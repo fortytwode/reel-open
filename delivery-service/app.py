@@ -1,6 +1,7 @@
 """Calendar identity and recipient rules for Reel delivery."""
 from datetime import datetime, timezone
 from functools import partial
+from html import escape
 import re
 from unicodedata import category
 
@@ -208,11 +209,112 @@ def verify_notion_transcript(notion, page_id, transcript, meeting_id=None):
         raise ProviderPending('Notion transcript readback failed; retry to verify')
 
 
+_NOTE_HEADINGS = {
+    'outcome', 'summary', 'overview', 'meeting summary', 'key points', 'highlights',
+    'key takeaways', 'discussion points', 'decisions', 'decisions made', 'open questions',
+    'questions', 'unresolved questions', 'action items', 'action item', 'actions',
+    'next steps', 'follow-ups',
+}
+_NOTE_INLINE = re.compile(
+    r'(?P<escaped>\\[\\`*_])|(?<!`)(?P<code>`+)(?P<literal>[^`]+)(?P=code)(?!`)'
+    r'|(?<![\\\w*_])(?P<emphasis>\*\*|__|\*|_)(?![\s*_])'
+    r'(?P<words>[^`*_]*?[^\s`*_])(?P=emphasis)(?![\w*_])'
+)
+_NOTE_BULLET = re.compile(r'([•*+–◦▪-]|[0-9]{1,9}[.)])[ \t]+(.+)')
+
+
+def _recap_inline(text):
+    plain, html = [], []
+    offset = 0
+    for match in _NOTE_INLINE.finditer(text):
+        prefix = text[offset:match.start()]
+        plain.append(prefix)
+        html.append(escape(prefix))
+        if match['escaped']:
+            literal = match['escaped'][1:]
+            plain.append(literal)
+            html.append(escape(literal))
+        else:
+            literal = match['literal'] if match['code'] else match['words']
+            if match['code']:
+                tag = 'code'
+            else:
+                tag = 'strong' if len(match['emphasis']) == 2 else 'em'
+            plain.append(literal)
+            html.append(f'<{tag}>{escape(literal)}</{tag}>')
+        offset = match.end()
+    return ''.join(plain) + text[offset:], ''.join(html) + escape(text[offset:])
+
+
+def _recap_summary(summary):
+    """Render Reel's note sections and a limited subset of older Markdown."""
+    plain, html, block = [], [], []
+    block_type = None
+    fence = None
+
+    def flush():
+        if block_type == 'code':
+            html.append('<pre><code>' + escape('\n'.join(block)) + '</code></pre>')
+        elif block_type == 'p':
+            html.append('<p>' + '<br>'.join(block) + '</p>')
+        elif block_type:
+            html.append(f'<{block_type}>' + ''.join(block) + f'</{block_type}>')
+        block.clear()
+
+    for raw in summary.splitlines():
+        line = raw.strip()
+        marker = re.fullmatch(r'(`{3,}|~{3,})[^`~]*', line)
+        if fence:
+            if marker and set(line) == {fence[0]} and len(line) >= len(fence):
+                flush()
+                fence, block_type = None, None
+            else:
+                plain.append(raw)
+                block.append(raw)
+            continue
+        heading = re.fullmatch(r'#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?', line)
+        bold_heading = re.fullmatch(r'(?:\*\*(.+?)\*\*|__(.+?)__):?', line)
+        bullet = _NOTE_BULLET.fullmatch(line)
+        if marker or not line or heading or bold_heading or line.rstrip(':').casefold() in _NOTE_HEADINGS:
+            flush()
+            block_type = None
+            if marker:
+                fence, block_type = marker[1], 'code'
+            elif not line:
+                plain.append('')
+            else:
+                label = line
+                if heading:
+                    label = heading[1]
+                elif bold_heading:
+                    label = bold_heading[1] or bold_heading[2]
+                text, markup = _recap_inline(label.rstrip(':'))
+                plain.append(text)
+                html.append(f'<h2>{markup}</h2>')
+            continue
+        if bullet:
+            list_type = 'ol' if bullet[1][0].isdigit() else 'ul'
+            if block_type != list_type:
+                flush()
+                block_type = list_type
+            text, markup = _recap_inline(bullet[2])
+            plain.append(raw[:len(raw) - len(raw.lstrip())] + (bullet[1] if list_type == 'ol' else '•') + ' ' + text)
+            block.append(f'<li>{markup}</li>')
+        else:
+            if block_type != 'p':
+                flush()
+                block_type = 'p'
+            text, markup = _recap_inline(raw)
+            plain.append(text)
+            block.append(markup)
+    flush()
+    return '\n'.join(plain), ''.join(html)
+
+
 def recap_message(recipients, title, summary, notion_url, message_id):
     """Build the internal recap with escaped supplied text and a stable ID."""
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
-    from html import escape
     if not recipients or any(not is_internal_email(address) for address in recipients):
         raise DeliveryError('Invalid recap recipients')
     if len(recipients) <= 3:
@@ -224,8 +326,9 @@ def recap_message(recipients, title, summary, notion_url, message_id):
     message['To'] = ', '.join(recipients)
     message['Subject'] = 'Meeting recap: ' + title
     message['Message-ID'] = '<' + message_id + '>'
-    message.attach(MIMEText(f'{greeting},\n\n{summary}\n\nMeeting notes: {notion_url}', 'plain', 'utf-8'))
-    message.attach(MIMEText(f'<p>{escape(greeting)},</p><p>{escape(summary).replace(chr(10), "<br>")}</p><p><a href="{escape(notion_url, quote=True)}">Meeting notes</a></p>', 'html', 'utf-8'))
+    plain_summary, html_summary = _recap_summary(summary)
+    message.attach(MIMEText(f'{greeting},\n\n{plain_summary}\n\nMeeting notes: {notion_url}', 'plain', 'utf-8'))
+    message.attach(MIMEText(f'<p>{escape(greeting)},</p>{html_summary}<p><a href="{escape(notion_url, quote=True)}">Meeting notes</a></p>', 'html', 'utf-8'))
     return message
 
 
