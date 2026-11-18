@@ -13,6 +13,7 @@ struct MeetingWorkspaceView: View {
     @State private var showAllUpcoming = false
     @State private var manualConsent = false
     @State private var transcriptSelected = false
+    @State private var readerFocused = false
     @State private var refreshing = false
     @State private var lastRefresh: Date?
 
@@ -60,36 +61,22 @@ struct MeetingWorkspaceView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar.frame(width: 184)
-            Divider()
-            VStack(alignment: .leading, spacing: 0) {
-                header.padding(24)
-                Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        recordingStatus
-                        if joining.busy { calendarStatus }
-                        if model.account == nil { signInPrompt }
-                        else {
-                            if !joining.busy && !sharedOnly && search.isEmpty { calendarStatus }
-                            if !sharedOnly && !upcoming.isEmpty { upcomingSection }
-                            if !sharedOnly && search.isEmpty && joining.visibleCloudMeetings.isEmpty {
-                                Label(joining.visibleCloudCalendarStatus, systemImage: "cloud")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                            historySection
-                        }
-                    }.padding(24)
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                if !readerFocused {
+                    sidebar.frame(width: 164)
+                    Divider()
+                    meetingList.frame(width: min(410, max(306, (geometry.size.width - 164) * 0.36)))
+                    Divider()
                 }
-            }.frame(minWidth: 420, maxWidth: .infinity)
-            Divider()
-            detail.frame(width: 370)
+                detail.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(Color(red: 0.08, green: 0.38, blue: 0.36))
         .task(id: model.accountGeneration) {
             selection = nil
+            readerFocused = false
             lastRefresh = nil
             notes.reset()
             await refresh()
@@ -97,9 +84,33 @@ struct MeetingWorkspaceView: View {
         .onChange(of: selection) { _, _ in
             manualConsent = false
             transcriptSelected = false
+            readerFocused = false
         }
         .task(id: selection) {
             if case .shared(let id) = selection { await notes.loadDetail(id: id) }
+        }
+    }
+
+    private var meetingList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header.padding(16)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    recordingStatus
+                    if joining.busy { calendarStatus }
+                    if model.account == nil { signInPrompt }
+                    else {
+                        if !joining.busy && !sharedOnly && search.isEmpty { calendarStatus }
+                        if !sharedOnly && !upcoming.isEmpty { upcomingSection }
+                        if !sharedOnly && search.isEmpty && joining.visibleCloudMeetings.isEmpty {
+                            Label(joining.visibleCloudCalendarStatus, systemImage: "cloud")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        historySection
+                    }
+                }.padding(16)
+            }
         }
     }
 
@@ -150,19 +161,18 @@ struct MeetingWorkspaceView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(sharedOnly ? "Shared with me" : "Meetings").font(.system(size: 27, weight: .semibold))
+                Text(sharedOnly ? "Shared with me" : "Meetings").font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 if refreshing { ProgressView().controlSize(.small).accessibilityLabel("Refreshing meetings") }
-                else if let lastRefresh {
-                    Text("Checked \(lastRefresh.formatted(date: .omitted, time: .shortened))")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
                 Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                    .help("Refresh meetings and notes").accessibilityLabel("Refresh meetings and notes")
+                    .help(lastRefresh.map { "Last checked \($0.formatted(date: .omitted, time: .shortened))" } ?? "Refresh meetings and notes")
+                    .accessibilityLabel("Refresh meetings and notes")
                     .disabled(refreshing || notes.loading)
-                Button("Record an open call", systemImage: "record.circle") { prepareRecording(nil) }
+                Button("Record", systemImage: "record.circle") { prepareRecording(nil) }
+                    .help("Record an open call").accessibilityLabel("Record an open call")
                     .disabled(model.isBusy || joining.busy || model.account == nil)
             }
             HStack {
@@ -257,7 +267,7 @@ struct MeetingWorkspaceView: View {
     private var historySection: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text("Past calls").font(.title3.weight(.semibold))
+                Text("Past calls").font(.headline).accessibilityAddTraits(.isHeader)
                 Spacer()
                 if notes.loading { ProgressView().controlSize(.small) }
             }
@@ -277,22 +287,25 @@ struct MeetingWorkspaceView: View {
             }
             ForEach(days, id: \.self) { day in
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(Self.dayLabel(day).uppercased()).font(.caption.weight(.medium)).foregroundStyle(.secondary).padding(.bottom, 4)
+                    Text(Self.dayLabel(day)).font(.callout.weight(.semibold)).foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.isHeader).padding(.bottom, 4)
                     ForEach(history.filter { Calendar.current.isDate($0.date, inSameDayAs: day) }) { call in
                         Button { selection = call.id } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: call.shared ? "person.2" : "text.bubble")
-                                    .foregroundStyle(.secondary).frame(width: 30)
+                                Image(systemName: call.shared ? "person.2" : "text.document")
+                                    .foregroundStyle(selection == call.id ? Color.accentColor : Color.secondary)
+                                    .frame(width: 22).accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(call.title).font(.callout.weight(.medium)).lineLimit(2)
                                     Text("\(call.date.formatted(date: .omitted, time: .shortened)) · \(Self.duration(call.duration)) · \(call.status)")
                                         .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                 }
                                 Spacer(minLength: 0)
-                            }.padding(12)
-                                .background(selection == call.id ? Color.accentColor.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 10))
+                            }.padding(10)
+                                .background(selection == call.id ? Color.accentColor.opacity(0.13) : .clear, in: RoundedRectangle(cornerRadius: 9))
                                 .contentShape(Rectangle())
                         }.buttonStyle(.plain)
+                            .accessibilityAddTraits(selection == call.id ? .isSelected : [])
                     }
                 }
             }
@@ -313,10 +326,10 @@ struct MeetingWorkspaceView: View {
         case .local(let id):
             if let recording = model.recording(id: id), let owner = model.account?.userID,
                recording.meeting?.ownerUserID == owner {
-                LocalMeetingDetail(model: model, recording: recording).id("\(owner):\(id)")
+                LocalMeetingDetail(model: model, recording: recording, readerFocused: $readerFocused).id("\(owner):\(id)")
             } else { emptyDetail }
         case .shared(let id):
-            if let meeting = notes.meetings.first(where: { $0.id == id }) { sharedDetail(meeting) }
+            if let meeting = notes.meetings.first(where: { $0.id == id }) { sharedDetail(meeting).id(id) }
             else { emptyDetail }
         case nil: emptyDetail
         }
@@ -325,10 +338,11 @@ struct MeetingWorkspaceView: View {
     private var emptyDetail: some View {
         VStack(spacing: 14) {
             Image(systemName: "text.bubble").font(.system(size: 35, weight: .light)).foregroundStyle(.tertiary)
-            Text("Your conversations, together").font(.headline)
-            Text("Select a meeting to see its details, summary and transcript.")
+            Text("Select a meeting").font(.headline)
+            Text("The summary and transcript will open here.")
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }.padding(36).frame(maxHeight: .infinity)
+            .onAppear { readerFocused = false }
     }
 
     private func upcomingDetail(_ meeting: CalendarMeeting) -> some View {
@@ -384,31 +398,31 @@ struct MeetingWorkspaceView: View {
     }
 
     private func sharedDetail(_ meeting: SharedMeetingNote) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                detailHeading(meeting.title, date: meeting.startedAt, subtitle: Self.duration(meeting.durationSeconds))
-                people(meeting.recipients, title: "NOTES SHARED WITH")
-                Divider()
-                Picker("Notes", selection: $transcriptSelected) {
-                    Text("Summary").tag(false)
-                    Text("Transcript").tag(true)
-                }.pickerStyle(.segmented)
-                if transcriptSelected {
-                    if let transcript = notes.detail(id: meeting.id)?.transcriptText {
-                        Text(transcript.isEmpty ? "No transcript available." : transcript).textSelection(.enabled)
-                    } else if notes.detailLoadingID == meeting.id { ProgressView("Loading transcript…") }
-                    else {
+        let loaded = notes.detail(id: meeting.id)
+        let library = CloudConfig.default.isConfigured
+            ? URL(string: "#meetings/\(meeting.id)", relativeTo: CloudConfig.default.notesBaseURL) : nil
+        return MeetingReader(title: meeting.title, date: meeting.startedAt, duration: Self.duration(meeting.durationSeconds),
+                             recipients: Array(Set(meeting.recipients)).sorted(), libraryURL: library,
+                             copyText: transcriptSelected ? loaded?.transcriptText : meeting.summary,
+                             transcriptSelected: $transcriptSelected, focused: $readerFocused) {
+            if transcriptSelected {
+                if let loaded, let transcript = loaded.transcriptText {
+                    if transcript.isEmpty {
+                        ContentUnavailableView("No transcript available", systemImage: "text.document")
+                    } else {
+                        MeetingTranscriptContent(note: loaded)
+                    }
+                } else if notes.detailLoadingID == meeting.id {
+                    ProgressView("Loading transcript…")
+                } else {
+                    VStack(alignment: .leading, spacing: 12) {
                         Text(notes.detailError ?? "Transcript is unavailable.").foregroundStyle(.secondary)
                         Button("Retry") { Task { await notes.loadDetail(id: meeting.id) } }
                     }
-                } else { Text(meeting.summary).textSelection(.enabled) }
-                Divider()
-                if CloudConfig.default.isConfigured, let url = URL(string: "#meetings/\(meeting.id)", relativeTo: CloudConfig.default.notesBaseURL) {
-                    Link("Open in library", destination: url).font(.callout)
                 }
-                Text("Visible to the recipients listed above. These notes are not shared with the whole team.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
+            } else {
+                MeetingSummaryContent(summary: meeting.summary)
+            }
         }
     }
 
@@ -502,29 +516,38 @@ private struct MeetingPeople: View {
 private struct LocalMeetingDetail: View {
     @ObservedObject var model: AppModel
     let recording: Recording
+    @Binding var readerFocused: Bool
     @State private var transcriptSelected = false
     @State private var transcript = ""
+
+    private var copyText: String? {
+        guard recording.meeting?.deliveryStatus != .noSpeech else { return nil }
+        if transcriptSelected { return transcript }
+        return recording.meeting?.needsContentReview == true ? nil : recording.summary
+    }
+
     var body: some View {
-        ScrollView {
+        MeetingReader(title: recording.title, date: recording.createdAt,
+                      duration: MeetingWorkspaceView.duration(recording.durationSeconds),
+                      recipients: Array(Set(recording.meeting?.deliveryReceipt?.recipients ?? [])).sorted(),
+                      libraryURL: nil,
+                      copyText: copyText,
+                      transcriptSelected: $transcriptSelected, focused: $readerFocused) {
             VStack(alignment: .leading, spacing: 20) {
-                detailHeading(recording.title, date: recording.createdAt, subtitle: MeetingWorkspaceView.duration(recording.durationSeconds))
                 Label(MeetingWorkspaceView.status(recording), systemImage: recording.meeting?.deliveryStatus == .confirmed ? "checkmark.circle" : "clock")
                     .font(.callout).foregroundStyle(.secondary)
-                if let receipt = recording.meeting?.deliveryReceipt { people(receipt.recipients, title: "DELIVERED TO") }
-                Divider()
-                Picker("Notes", selection: $transcriptSelected) {
-                    Text("Summary").tag(false)
-                    Text("Transcript").tag(true)
-                }.pickerStyle(.segmented)
                 if recording.meeting?.deliveryStatus == .noSpeech {
                     Text("No speech was detected. The recording is saved, but no notes were sent.").foregroundStyle(.secondary)
                 } else if transcriptSelected {
-                    Text(transcript.isEmpty ? "Transcript is not ready yet." : transcript).textSelection(.enabled)
+                    Text(transcript.isEmpty ? "Transcript is not ready yet." : transcript)
+                        .font(.system(size: 15)).lineSpacing(5).textSelection(.enabled)
                 } else if recording.meeting?.needsContentReview == true {
                     Text("Automatic notes delivery is paused. Review the saved transcript and recording; reprocess the recording if speech was missed.")
                         .foregroundStyle(.secondary)
+                } else if let summary = recording.summary {
+                    MeetingSummaryContent(summary: summary)
                 } else {
-                    Text(recording.summary ?? "Notes will appear here after transcription finishes.").textSelection(.enabled)
+                    Text("Notes will appear here after transcription finishes.").foregroundStyle(.secondary)
                 }
                 if let error = recording.meeting?.deliveryError { Text(error).font(.caption).foregroundStyle(.secondary) }
                 Divider()
@@ -539,7 +562,7 @@ private struct LocalMeetingDetail: View {
                 if recording.meeting?.calendarOccurrenceID == nil {
                     Text("Manual recording: notes are delivered only to the account that recorded it.").font(.caption).foregroundStyle(.secondary)
                 }
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
+            }
         }
         .task(id: recording.transcriptStatus) {
             let url = model.library.transcriptTextURL(for: recording)
