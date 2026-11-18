@@ -1,0 +1,706 @@
+{
+  "bitrates" : [
+    {
+      "in" : [
+        1920,
+        1080,
+        30
+      ],
+      "out" : 4000000
+    },
+    {
+      "in" : [
+        1670,
+        1080,
+        30
+      ],
+      "out" : 4000000
+    },
+    {
+      "in" : [
+        100,
+        100,
+        30
+      ],
+      "out" : 800000
+    },
+    {
+      "in" : [
+        1280,
+        720,
+        30
+      ],
+      "out" : 2500000
+    },
+    {
+      "in" : [
+        2560,
+        1440,
+        24
+      ],
+      "out" : 6000000
+    },
+    {
+      "in" : [
+        3840,
+        2160,
+        30
+      ],
+      "out" : 10000000
+    },
+    {
+      "in" : [
+        1920,
+        1080,
+        60
+      ],
+      "out" : 6000000
+    }
+  ],
+  "cacheControl" : {
+    "init.mp4" : "public, max-age=3600",
+    "meta.json" : "no-cache",
+    "seg00001.m4s" : "public, max-age=3600",
+    "thumb.jpg" : "public, max-age=3600",
+    "transcript.json" : "no-cache",
+    "transcript.txt" : "no-cache",
+    "trimmed.mp4" : "public, max-age=3600",
+    "video.m3u8" : "no-cache",
+    "video.mp4" : "public, max-age=3600"
+  },
+  "chunkRanges" : [
+    [
+      0,
+      8388608
+    ],
+    [
+      8388608,
+      16777216
+    ],
+    [
+      16777216,
+      16777339
+    ]
+  ],
+  "contentTypes" : {
+    "init.mp4" : "video/mp4",
+    "meta.json" : "application/json",
+    "seg00001.m4s" : "video/iso.segment",
+    "thumb.jpg" : "image/jpeg",
+    "transcript.json" : "application/json",
+    "transcript.txt" : "text/plain; charset=utf-8",
+    "trimmed.mp4" : "video/mp4",
+    "video.m3u8" : "application/vnd.apple.mpegurl",
+    "video.mp4" : "video/mp4"
+  },
+  "cornerBubble1080" : [
+    32,
+    32,
+    238,
+    238
+  ],
+  "defaultTitleTokyo" : "Recording – 21 Oct 2026, 19:00",
+  "defaultTitleUTC" : "Recording – 21 Oct 2026, 10:00",
+  "deleteObject" : {
+    "headers" : {
+      "Authorization" : "Firebase tok"
+    },
+    "method" : "DELETE",
+    "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fseg00001.m4s"
+  },
+  "dispositions" : [
+    {
+      "title" : "Q3 plan – v2",
+      "value" : "attachment; filename=\"Q3 plan - v2.mp4\""
+    },
+    {
+      "title" : "\"evil\"\r\nX: y",
+      "value" : "attachment; filename=\"-evil-X- y.mp4\""
+    },
+    {
+      "title" : "😀",
+      "value" : "attachment; filename=\"Reel recording.mp4\""
+    },
+    {
+      "title" : "Weekly sync (draft), v1.2_final",
+      "value" : "attachment; filename=\"Weekly sync (draft), v1.2_final.mp4\""
+    }
+  ],
+  "downloadURLs" : [
+    "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fmeta.json?alt=media",
+    "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fvideo.m3u8?alt=media"
+  ],
+  "encodedObjectNames" : [
+    {
+      "path" : "a-b_c.d~e/f g",
+      "value" : "a-b_c.d~e%2Ff%20g"
+    },
+    {
+      "path" : "reel/v/abcdefghij0123456789/k/0123456789abcdef0123456789abcdef/seg00001.m4s",
+      "value" : "reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fseg00001.m4s"
+    },
+    {
+      "path" : "ü+&?",
+      "value" : "%C3%BC%2B%26%3F"
+    }
+  ],
+  "expiryString" : "1800000000500",
+  "firestoreClearExpiry" : {
+    "body" : {
+      "fields" : {
+        "expiresAt" : {
+          "nullValue" : null
+        }
+      }
+    },
+    "headers" : {
+      "Authorization" : "Bearer tok",
+      "Content-Type" : "application/json"
+    },
+    "method" : "PATCH",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos/abcdefghij0123456789?updateMask.fieldPaths=expiresAt"
+  },
+  "firestoreCreateComment" : {
+    "body" : {
+      "fields" : {
+        "createdAt" : {
+          "timestampValue" : "2026-10-21T10:00:00.000Z"
+        },
+        "migrated" : {
+          "booleanValue" : true
+        },
+        "photoURL" : {
+          "nullValue" : null
+        },
+        "t" : {
+          "doubleValue" : 1.5
+        },
+        "text" : {
+          "stringValue" : "hi"
+        }
+      }
+    },
+    "headers" : {
+      "Authorization" : "Bearer tok",
+      "Content-Type" : "application/json"
+    },
+    "method" : "POST",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos/abcdefghij0123456789/comments"
+  },
+  "firestoreCreateRoom" : {
+    "body" : {
+      "fields" : {
+        "createdAt" : {
+          "timestampValue" : "2026-10-21T10:00:00.000Z"
+        },
+        "expiresAt" : {
+          "nullValue" : null
+        },
+        "ownerUid" : {
+          "stringValue" : "uid-1"
+        },
+        "views" : {
+          "integerValue" : "0"
+        }
+      }
+    },
+    "headers" : {
+      "Authorization" : "Bearer tok",
+      "Content-Type" : "application/json"
+    },
+    "method" : "POST",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos?documentId=abcdefghij0123456789"
+  },
+  "firestoreCreateRoomKeyed" : {
+    "body" : {
+      "fields" : {
+        "createdAt" : {
+          "timestampValue" : "2026-10-21T10:00:00.250Z"
+        },
+        "expiresAt" : {
+          "timestampValue" : "2027-01-15T08:00:00.500Z"
+        },
+        "ownerUid" : {
+          "stringValue" : "uid-1"
+        },
+        "views" : {
+          "integerValue" : "7"
+        }
+      }
+    },
+    "headers" : {
+      "Authorization" : "Bearer tok",
+      "Content-Type" : "application/json"
+    },
+    "method" : "POST",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos?documentId=abcdefghij0123456789-0123456789abcdef0123456789abcdef"
+  },
+  "firestoreDeleteDoc" : {
+    "headers" : {
+      "Authorization" : "Bearer tok"
+    },
+    "method" : "DELETE",
+    "url" : "https://firestore.googleapis.com/v1/projects/p/databases/reel/documents/videos/x/comments/c"
+  },
+  "firestoreDeleteRoom" : {
+    "headers" : {
+      "Authorization" : "Bearer tok"
+    },
+    "method" : "DELETE",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos/abcdefghij0123456789"
+  },
+  "firestoreGetRoom" : {
+    "headers" : {
+      "Authorization" : "Bearer tok"
+    },
+    "method" : "GET",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos/abcdefghij0123456789"
+  },
+  "firestoreList" : {
+    "headers" : {
+      "Authorization" : "Bearer tok"
+    },
+    "method" : "GET",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos/abcdefghij0123456789/comments?pageSize=300&pageToken=abc%2Fdef%2B%3D%3D"
+  },
+  "firestoreSetExpiry" : {
+    "body" : {
+      "fields" : {
+        "expiresAt" : {
+          "timestampValue" : "2027-01-15T08:00:00.500Z"
+        }
+      }
+    },
+    "headers" : {
+      "Authorization" : "Bearer tok",
+      "Content-Type" : "application/json"
+    },
+    "method" : "PATCH",
+    "url" : "https://firestore.googleapis.com/v1/projects/demo-reel/databases/reel/documents/videos/abcdefghij0123456789?updateMask.fieldPaths=expiresAt"
+  },
+  "folderNameUTC" : "2026-10-21 163002 abcdef",
+  "getMetadata" : {
+    "headers" : {
+      "Authorization" : "Firebase tok"
+    },
+    "method" : "GET",
+    "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fthumb.jpg"
+  },
+  "lockedStub" : "{\n  \"expiresAt\" : \"2027-01-15T08:00:00Z\",\n  \"id\" : \"abcdefghij0123456789\",\n  \"kdf\" : {\n    \"hash\" : \"SHA-256\",\n    \"iterations\" : 210000,\n    \"keyBytes\" : 16,\n    \"name\" : \"PBKDF2\",\n    \"salt\" : \"00112233445566778899aabbccddeeff\"\n  },\n  \"locked\" : true,\n  \"schemaVersion\" : 2,\n  \"status\" : \"ready\"\n}",
+  "metaKeyedProcessing" : "{\n  \"app\" : \"Reel 1.1.0\",\n  \"chapters\" : null,\n  \"createdAt\" : \"2026-10-21T10:00:00Z\",\n  \"download\" : \"video.mp4\",\n  \"durationSeconds\" : 8.08,\n  \"expiresAt\" : null,\n  \"hasThumbnail\" : true,\n  \"height\" : 720,\n  \"id\" : \"abcdefghij0123456789\",\n  \"locked\" : true,\n  \"ownerName\" : \"sam@northwind.example\",\n  \"playback\" : {\n    \"hls\" : false,\n    \"mp4\" : true\n  },\n  \"room\" : \"abcdefghij0123456789-0123456789abcdef0123456789abcdef\",\n  \"schemaVersion\" : 2,\n  \"status\" : \"processing\",\n  \"summary\" : null,\n  \"title\" : \"Secret\",\n  \"transcriptStatus\" : \"failed\",\n  \"trim\" : null,\n  \"width\" : 1280\n}",
+  "metaOpenReady" : "{\n  \"app\" : \"Reel 1.1.0\",\n  \"chapters\" : [\n    {\n      \"start\" : 0,\n      \"title\" : \"Intro\"\n    },\n    {\n      \"start\" : 30,\n      \"title\" : \"Demo\"\n    }\n  ],\n  \"createdAt\" : \"2026-10-21T10:00:00Z\",\n  \"download\" : \"trimmed.mp4\",\n  \"durationSeconds\" : 61.5,\n  \"expiresAt\" : \"2027-01-15T08:00:00Z\",\n  \"hasThumbnail\" : true,\n  \"height\" : 1080,\n  \"id\" : \"abcdefghij0123456789\",\n  \"locked\" : false,\n  \"ownerName\" : \"Sam\",\n  \"playback\" : {\n    \"hls\" : true,\n    \"mp4\" : true\n  },\n  \"room\" : \"abcdefghij0123456789\",\n  \"schemaVersion\" : 2,\n  \"status\" : \"ready\",\n  \"summary\" : \"A short summary.\",\n  \"title\" : \"Q3 plan – v2\",\n  \"transcriptStatus\" : \"ready\",\n  \"trim\" : {\n    \"end\" : 20.25,\n    \"start\" : 5\n  },\n  \"width\" : 1920\n}",
+  "metaStartingRecording" : "{\n  \"app\" : \"Reel 1.1.0\",\n  \"chapters\" : null,\n  \"createdAt\" : \"2026-10-21T10:00:00Z\",\n  \"download\" : null,\n  \"durationSeconds\" : 0,\n  \"expiresAt\" : null,\n  \"hasThumbnail\" : false,\n  \"height\" : 1080,\n  \"id\" : \"abcdefghij0123456789\",\n  \"locked\" : false,\n  \"ownerName\" : null,\n  \"playback\" : {\n    \"hls\" : false,\n    \"mp4\" : false\n  },\n  \"room\" : \"abcdefghij0123456789\",\n  \"schemaVersion\" : 2,\n  \"status\" : \"recording\",\n  \"summary\" : null,\n  \"title\" : \"Recording – 21 Oct 2026, 10:00\",\n  \"transcriptStatus\" : \"pending\",\n  \"trim\" : null,\n  \"width\" : 1670\n}",
+  "multipartUploads" : [
+    {
+      "contentDisposition" : null,
+      "expiresAt" : null,
+      "file" : "meta.json",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : null,
+      "metadata" : {
+        "cacheControl" : "no-cache",
+        "contentType" : "application/json",
+        "metadata" : {
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/meta.json"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: application/json\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Fmeta.json"
+    },
+    {
+      "contentDisposition" : null,
+      "expiresAt" : 1800000000500,
+      "file" : "seg00003.m4s",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : null,
+      "metadata" : {
+        "cacheControl" : "public, max-age=3600",
+        "contentType" : "video/iso.segment",
+        "metadata" : {
+          "expiresAt" : "1800000000500",
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/seg00003.m4s"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: video/iso.segment\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Fseg00003.m4s"
+    },
+    {
+      "contentDisposition" : "attachment; filename=\"Q3 plan - v2.mp4\"",
+      "expiresAt" : 1800000000500,
+      "file" : "video.mp4",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : "0123456789abcdef0123456789abcdef",
+      "metadata" : {
+        "cacheControl" : "public, max-age=3600",
+        "contentDisposition" : "attachment; filename=\"Q3 plan - v2.mp4\"",
+        "contentType" : "video/mp4",
+        "metadata" : {
+          "expiresAt" : "1800000000500",
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/k/0123456789abcdef0123456789abcdef/video.mp4"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: video/mp4\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fvideo.mp4"
+    },
+    {
+      "contentDisposition" : null,
+      "expiresAt" : null,
+      "file" : "video.m3u8",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : null,
+      "metadata" : {
+        "cacheControl" : "no-cache",
+        "contentType" : "application/vnd.apple.mpegurl",
+        "metadata" : {
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/video.m3u8"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Fvideo.m3u8"
+    },
+    {
+      "contentDisposition" : null,
+      "expiresAt" : null,
+      "file" : "init.mp4",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : null,
+      "metadata" : {
+        "cacheControl" : "public, max-age=3600",
+        "contentType" : "video/mp4",
+        "metadata" : {
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/init.mp4"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: video/mp4\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Finit.mp4"
+    },
+    {
+      "contentDisposition" : null,
+      "expiresAt" : null,
+      "file" : "thumb.jpg",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : "0123456789abcdef0123456789abcdef",
+      "metadata" : {
+        "cacheControl" : "public, max-age=3600",
+        "contentType" : "image/jpeg",
+        "metadata" : {
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/k/0123456789abcdef0123456789abcdef/thumb.jpg"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: image/jpeg\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fthumb.jpg"
+    },
+    {
+      "contentDisposition" : null,
+      "expiresAt" : null,
+      "file" : "transcript.txt",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : null,
+      "metadata" : {
+        "cacheControl" : "no-cache",
+        "contentType" : "text/plain; charset=utf-8",
+        "metadata" : {
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/transcript.txt"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Ftranscript.txt"
+    },
+    {
+      "contentDisposition" : "attachment; filename=\"x.mp4\"",
+      "expiresAt" : null,
+      "file" : "trimmed.mp4",
+      "headers" : {
+        "Authorization" : "Firebase tok",
+        "Content-Type" : "multipart/related; boundary=BND",
+        "X-Goog-Upload-Protocol" : "multipart"
+      },
+      "key" : null,
+      "metadata" : {
+        "cacheControl" : "public, max-age=3600",
+        "contentDisposition" : "attachment; filename=\"x.mp4\"",
+        "contentType" : "video/mp4",
+        "metadata" : {
+          "ownerUid" : "uid-1"
+        },
+        "name" : "reel/v/abcdefghij0123456789/trimmed.mp4"
+      },
+      "method" : "POST",
+      "payload" : "\r\n--BND\r\nContent-Type: video/mp4\r\n\r\nBYTES\r\n--BND--",
+      "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Ftrimmed.mp4"
+    }
+  ],
+  "outputSizes" : [
+    {
+      "in" : [
+        3456,
+        2234,
+        "p1080"
+      ],
+      "out" : [
+        1670,
+        1080
+      ]
+    },
+    {
+      "in" : [
+        800,
+        600,
+        "p1080"
+      ],
+      "out" : [
+        800,
+        600
+      ]
+    },
+    {
+      "in" : [
+        801,
+        601,
+        "p1080"
+      ],
+      "out" : [
+        800,
+        600
+      ]
+    },
+    {
+      "in" : [
+        3840,
+        2160,
+        "p720"
+      ],
+      "out" : [
+        1280,
+        720
+      ]
+    },
+    {
+      "in" : [
+        2160,
+        3840,
+        "p1080"
+      ],
+      "out" : [
+        1080,
+        1920
+      ]
+    },
+    {
+      "in" : [
+        5120,
+        2880,
+        "p2160"
+      ],
+      "out" : [
+        3840,
+        2160
+      ]
+    }
+  ],
+  "pbkdf2" : [
+    {
+      "iterations" : 1,
+      "key" : "55ac046e56e3089fec1691c22544b605",
+      "password" : "passwd",
+      "salt" : "73616c74"
+    },
+    {
+      "iterations" : 210000,
+      "key" : "ad519071e256cf0e45b48e4208a69a0d",
+      "password" : "hunter2",
+      "salt" : "00112233445566778899aabbccddeeff"
+    },
+    {
+      "iterations" : 1000,
+      "key" : "ba7c11495a90f8aa794eaaddd4bc853f",
+      "password" : "pässwörd 🔒",
+      "salt" : "ffeeddccbbaa99887766554433221100"
+    }
+  ],
+  "playlistEvent" : "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Finit.mp4?alt=media\"\n#EXTINF:4.02000,\nhttps://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fseg00001.m4s?alt=media\n#EXTINF:4.00000,\nhttps://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fseg00002.m4s?alt=media\n",
+  "playlistVOD" : "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Finit.mp4?alt=media\"\n#EXTINF:4.02000,\nhttps://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fseg00001.m4s?alt=media\n#EXTINF:4.00000,\nhttps://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fseg00002.m4s?alt=media\n#EXTINF:2.50000,\nhttps://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fseg00003.m4s?alt=media\n#EXT-X-ENDLIST\n",
+  "recordingJSONKeyed" : "{\n  \"access\" : {\n    \"location\" : {\n      \"keyed\" : {\n        \"_0\" : \"0123456789abcdef0123456789abcdef\"\n      }\n    },\n    \"passwordSalt\" : \"00112233445566778899aabbccddeeff\"\n  },\n  \"captureState\" : \"recovered\",\n  \"createdAt\" : \"2026-10-21T10:00:00Z\",\n  \"durationSeconds\" : 8.08,\n  \"folderName\" : \"f\",\n  \"hasThumbnail\" : true,\n  \"height\" : 720,\n  \"id\" : \"LOCAL-3\",\n  \"mode\" : \"camera\",\n  \"playback\" : {\n    \"hls\" : false,\n    \"mp4\" : true\n  },\n  \"shareID\" : \"abcdefghij0123456789\",\n  \"title\" : \"Secret\",\n  \"titleIsCustom\" : false,\n  \"transcriptStatus\" : \"failed\",\n  \"trimmedUploaded\" : false,\n  \"upload\" : {\n    \"failed\" : {\n      \"_0\" : \"HTTP 503\"\n    }\n  },\n  \"width\" : 1280\n}",
+  "recordingJSONOpen" : "{\n  \"access\" : {\n    \"expiresAt\" : \"2027-01-15T08:00:00Z\",\n    \"location\" : {\n      \"open\" : {\n\n      }\n    }\n  },\n  \"captureState\" : \"complete\",\n  \"chapters\" : [\n    {\n      \"start\" : 0,\n      \"title\" : \"Intro\"\n    },\n    {\n      \"start\" : 30,\n      \"title\" : \"Demo\"\n    }\n  ],\n  \"createdAt\" : \"2026-10-21T10:00:00Z\",\n  \"durationSeconds\" : 61.5,\n  \"folderName\" : \"2026-10-21 100000 abcdef\",\n  \"hasThumbnail\" : true,\n  \"height\" : 1080,\n  \"id\" : \"LOCAL-1\",\n  \"mode\" : \"screen\",\n  \"playback\" : {\n    \"hls\" : true,\n    \"mp4\" : true\n  },\n  \"shareID\" : \"abcdefghij0123456789\",\n  \"summary\" : \"A short summary.\",\n  \"title\" : \"Q3 plan – v2\",\n  \"titleIsCustom\" : true,\n  \"transcriptStatus\" : \"ready\",\n  \"trim\" : {\n    \"end\" : 20.25,\n    \"start\" : 5\n  },\n  \"trimmedUploaded\" : true,\n  \"upload\" : {\n    \"uploaded\" : {\n\n    }\n  },\n  \"width\" : 1920\n}",
+  "recordingJSONStarting" : "{\n  \"access\" : {\n    \"location\" : {\n      \"open\" : {\n\n      }\n    }\n  },\n  \"captureState\" : \"recording\",\n  \"createdAt\" : \"2026-10-21T10:00:00Z\",\n  \"durationSeconds\" : 0,\n  \"folderName\" : \"2026-10-21 100000 abcdef\",\n  \"hasThumbnail\" : false,\n  \"height\" : 1080,\n  \"id\" : \"LOCAL-2\",\n  \"mode\" : \"window\",\n  \"playback\" : {\n    \"hls\" : false,\n    \"mp4\" : false\n  },\n  \"shareID\" : \"abcdefghij0123456789\",\n  \"title\" : \"Recording – 21 Oct 2026, 10:00\",\n  \"titleIsCustom\" : false,\n  \"transcriptStatus\" : \"pending\",\n  \"trimmedUploaded\" : false,\n  \"upload\" : {\n    \"uploading\" : {\n\n    }\n  },\n  \"width\" : 1670\n}",
+  "resumableChunkLast" : {
+    "headers" : {
+      "X-Goog-Upload-Command" : "upload, finalize",
+      "X-Goog-Upload-Offset" : "0"
+    },
+    "method" : "POST",
+    "url" : "https://example.com/session"
+  },
+  "resumableChunkMid" : {
+    "headers" : {
+      "X-Goog-Upload-Command" : "upload",
+      "X-Goog-Upload-Offset" : "8388608"
+    },
+    "method" : "POST",
+    "url" : "https://example.com/session"
+  },
+  "resumableStart" : {
+    "body" : {
+      "cacheControl" : "public, max-age=3600",
+      "contentDisposition" : "attachment; filename=\"a.mp4\"",
+      "contentType" : "video/mp4",
+      "metadata" : {
+        "expiresAt" : "1800000000500",
+        "ownerUid" : "uid-1"
+      },
+      "name" : "reel/v/abcdefghij0123456789/k/0123456789abcdef0123456789abcdef/video.mp4"
+    },
+    "headers" : {
+      "Authorization" : "Firebase tok",
+      "Content-Type" : "application/json; charset=utf-8",
+      "X-Goog-Upload-Command" : "start",
+      "X-Goog-Upload-Header-Content-Length" : "12345678",
+      "X-Goog-Upload-Header-Content-Type" : "video/mp4",
+      "X-Goog-Upload-Protocol" : "resumable"
+    },
+    "method" : "POST",
+    "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o?name=reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fvideo.mp4"
+  },
+  "rooms" : [
+    "abcdefghij0123456789",
+    "abcdefghij0123456789-0123456789abcdef0123456789abcdef"
+  ],
+  "trims" : [
+    {
+      "in" : [
+        -3,
+        5,
+        10
+      ],
+      "out" : [
+        0,
+        5
+      ]
+    },
+    {
+      "in" : [
+        2,
+        99,
+        10
+      ],
+      "out" : [
+        2,
+        10
+      ]
+    },
+    {
+      "in" : [
+        0,
+        10,
+        10
+      ],
+      "out" : null
+    },
+    {
+      "in" : [
+        5,
+        5.2000000000000002,
+        10
+      ],
+      "out" : null
+    },
+    {
+      "in" : [
+        6,
+        2,
+        10
+      ],
+      "out" : null
+    },
+    {
+      "in" : [
+        1.2345600000000001,
+        7.8901199999999996,
+        10
+      ],
+      "out" : [
+        1.2350000000000001,
+        7.8899999999999997
+      ]
+    },
+    {
+      "in" : [
+        0.040000000000000001,
+        9.9600000000000009,
+        10
+      ],
+      "out" : null
+    }
+  ],
+  "updateMetadataClear" : {
+    "body" : {
+      "metadata" : {
+        "expiresAt" : null,
+        "ownerUid" : "uid-1"
+      }
+    },
+    "headers" : {
+      "Authorization" : "Firebase tok",
+      "Content-Type" : "application/json; charset=utf-8"
+    },
+    "method" : "PATCH",
+    "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fk%2F0123456789abcdef0123456789abcdef%2Fmeta.json"
+  },
+  "updateMetadataSet" : {
+    "body" : {
+      "metadata" : {
+        "expiresAt" : "1800000000500",
+        "ownerUid" : "uid-1"
+      }
+    },
+    "headers" : {
+      "Authorization" : "Firebase tok",
+      "Content-Type" : "application/json; charset=utf-8"
+    },
+    "method" : "PATCH",
+    "url" : "https://firebasestorage.googleapis.com/v0/b/demo-reel.firebasestorage.app/o/reel%2Fv%2Fabcdefghij0123456789%2Fseg00012.m4s"
+  },
+  "viewerURL" : "https://record.northwind.example/v/abcdefghij0123456789"
+}

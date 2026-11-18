@@ -1,0 +1,65 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // __ADDITIONAL_STORAGE_RULES__
+
+    // Layout (see Reel README "Remote layout"):
+    //   reel/v/<id>/<file>           public recording (anyone with the link)
+    //   reel/v/<id>/meta.json        for a password-protected recording: a stub
+    //                                with the key-derivation salt only
+    //   reel/v/<id>/k/<key>/<file>   password-protected recording; <key> is
+    //                                PBKDF2(password) and is never stored
+    //                                remotely, so the files can only be fetched
+    //                                by someone who knows the password (listing
+    //                                is denied, guesses are online only).
+    // Every object may carry custom metadata `expiresAt` (epoch milliseconds);
+    // after that instant nobody but the uploader can read it (expiring links).
+    // Only verified organization accounts may upload, and only the uploader
+    // (metadata.ownerUid) may overwrite, change metadata or delete.
+    function isReelUser() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && false /* __ORGANIZATION_DOMAIN__ */;
+    }
+    function isReelID(id) {
+      return id.matches('^[a-z0-9]{16,40}$');
+    }
+    function isReelFile(file) {
+      return file.matches('^(video[.]mp4|trimmed[.]mp4|meta[.]json|transcript[.]json|transcript[.]txt|thumb[.]jpg|video[.]m3u8|init[.]mp4|seg[0-9]{5,6}[.]m4s)$');
+    }
+    function isReelOwner() {
+      return isReelUser() && resource.metadata.ownerUid == request.auth.uid;
+    }
+    // Missing objects (resource == null) stay readable so a fetch returns 404,
+    // not 403; objects without `expiresAt` never expire.
+    function notExpired() {
+      return resource == null
+        || resource.metadata == null
+        || !('expiresAt' in resource.metadata)
+        || request.time.toMillis() < int(resource.metadata.expiresAt);
+    }
+    function validReelWrite() {
+      return isReelUser()
+        && request.resource.size < 5 * 1024 * 1024 * 1024
+        && request.resource.metadata.ownerUid == request.auth.uid
+        && (!('expiresAt' in request.resource.metadata)
+            || request.resource.metadata.expiresAt.matches('^[0-9]{1,15}$'));
+    }
+    match /reel/v/{videoId}/{file} {
+      allow get: if isReelID(videoId) && isReelFile(file) && (notExpired() || isReelOwner());
+      allow list: if false;
+      allow create: if (resource == null || isReelOwner()) && isReelID(videoId) && isReelFile(file) && validReelWrite();
+      allow update: if isReelID(videoId) && isReelFile(file) && isReelOwner() && validReelWrite();
+      allow delete: if isReelOwner();
+    }
+    match /reel/v/{videoId}/k/{key}/{file} {
+      allow get: if isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file)
+        && (notExpired() || isReelOwner());
+      allow list: if false;
+      allow create: if (resource == null || isReelOwner()) && isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file) && validReelWrite();
+      allow update: if isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file) && isReelOwner() && validReelWrite();
+      allow delete: if isReelOwner();
+    }
+  }
+}

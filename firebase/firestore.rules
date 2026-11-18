@@ -1,0 +1,150 @@
+rules_version = '2';
+
+//   videos/{room}                     {ownerUid, createdAt, views, expiresAt?}
+//   videos/{room}/reactions/{id}      {emoji, t, createdAt}           anyone may add
+//   videos/{room}/comments/{id}       {text, t, uid, name, photoURL, createdAt}
+//                                     verified organization users may add
+//
+// `room` is the share ID for a public recording and "<shareID>-<key>" for a
+// password-protected one (<key> is derived from the password and is never
+// stored remotely), so comments and reactions of a protected recording can only
+// be read by someone who knows the password. Public room listing is denied; the
+// private owner library below is separately listable. After `expiresAt` nothing in the room can be
+// read or added (except by the owner).
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isReelUser() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && false /* __ORGANIZATION_DOMAIN__ */;
+    }
+    function videoPath(room) { return /databases/$(database)/documents/videos/$(room); }
+    function notExpired(v) {
+      return !('expiresAt' in v) || v.expiresAt == null || request.time < v.expiresAt;
+    }
+    function isOwnerOf(v) { return isReelUser() && v.ownerUid == request.auth.uid; }
+    function roomOpen(room) {
+      return exists(videoPath(room)) && notExpired(get(videoPath(room)).data);
+    }
+    function isRoomOwner(room) {
+      return exists(videoPath(room)) && isOwnerOf(get(videoPath(room)).data);
+    }
+    function validTitleOverride(d) {
+      return !('titleOverride' in d) || (d.titleOverride is string
+        && d.titleOverride.size() > 0 && d.titleOverride.size() <= 500
+        && d.titleOverride.matches('.*[^\\s].*'));
+    }
+    function validRoom(room) { return room.matches('^[a-z0-9]{16,40}(-[a-f0-9]{32})?$'); }
+
+    // The library is private to its owner, including listing. Public viewers still use
+    // the existing direct share link and cannot discover anyone's recordings here.
+    match /users/{uid}/recordings/{shareID} {
+      function ownsLibrary() { return isReelUser() && request.auth.uid == uid; }
+      function validEntry(d) {
+        return shareID.matches('^[a-z0-9]{16,40}$')
+          && d.keys().hasAll(['id', 'title', 'createdAt', 'durationSeconds', 'status'])
+          && d.keys().hasOnly(['id', 'title', 'createdAt', 'durationSeconds', 'status'])
+          && d.id == shareID
+          && d.title is string && d.title.size() > 0 && d.title.size() <= 500
+          && d.createdAt is timestamp
+          && d.durationSeconds is number && d.durationSeconds >= 0 && d.durationSeconds <= 604800
+          && d.status in ['recording', 'processing', 'ready'];
+      }
+      allow read, delete: if ownsLibrary();
+      allow create, update: if ownsLibrary() && validEntry(request.resource.data);
+    }
+
+    // Organization is deliberately separate: existing publishers replace the
+    // recording index document when uploading or renaming a recording.
+    match /users/{uid}/libraryFolders/{folderID} {
+      function ownsLibrary() { return isReelUser() && request.auth.uid == uid; }
+      allow read: if ownsLibrary();
+      allow create, update: if ownsLibrary()
+        && folderID.matches('^[a-zA-Z0-9_-]{1,80}$')
+        && request.resource.data.keys().hasAll(['name', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['name', 'updatedAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 80
+        && request.resource.data.name.matches('.*[^\\s].*')
+        && request.resource.data.updatedAt == request.time;
+    }
+    match /users/{uid}/libraryPreferences/{shareID} {
+      function ownsLibrary() { return isReelUser() && request.auth.uid == uid; }
+      function validPreference(d) {
+        return shareID.matches('^[a-z0-9]{16,40}$')
+          && exists(/databases/$(database)/documents/users/$(uid)/recordings/$(shareID))
+          && d.keys().hasAll(['pinned', 'archived', 'folderId', 'updatedAt'])
+          && d.keys().hasOnly(['pinned', 'archived', 'folderId', 'updatedAt', 'titleOverride'])
+          && validTitleOverride(d)
+          && d.pinned is bool && d.archived is bool
+          && (d.folderId == null || (d.folderId is string
+            && d.folderId.matches('^[a-zA-Z0-9_-]{1,80}$')
+            && exists(/databases/$(database)/documents/users/$(uid)/libraryFolders/$(d.folderId))))
+          && d.updatedAt == request.time;
+      }
+      allow read, delete: if ownsLibrary();
+      allow create, update: if ownsLibrary() && validPreference(request.resource.data);
+    }
+
+    match /videos/{room} {
+      allow get: if notExpired(resource.data) || isOwnerOf(resource.data);
+      allow list: if false;
+      allow create: if validRoom(room) && isReelUser()
+        && request.resource.data.keys().hasOnly(['ownerUid', 'createdAt', 'views', 'expiresAt', 'titleOverride'])
+        && validTitleOverride(request.resource.data)
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.views is int && request.resource.data.views >= 0
+        && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt == null
+            || request.resource.data.expiresAt is timestamp);
+      // The owner may change expiry; anyone may add exactly one view while the room is open.
+      allow update: if (isOwnerOf(resource.data)
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.keys().hasOnly(['ownerUid', 'createdAt', 'views', 'expiresAt', 'titleOverride'])
+          && validTitleOverride(request.resource.data)
+          && request.resource.data.views is int
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['titleOverride']) || notExpired(resource.data)))
+        || (notExpired(resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views'])
+          && request.resource.data.views == resource.data.views + 1);
+      allow delete: if isOwnerOf(resource.data);
+
+      match /reactions/{reactionId} {
+        allow read: if roomOpen(room) || isRoomOwner(room);
+        allow create: if (roomOpen(room)
+            && request.resource.data.keys().hasOnly(['emoji', 't', 'createdAt'])
+            && request.resource.data.emoji in ['👍', '❤️', '😂', '😮', '🎉', '👏', '🔥', '🙌']
+            && request.resource.data.t is number && request.resource.data.t >= 0 && request.resource.data.t <= 86400
+            && request.resource.data.createdAt == request.time)
+          // Owner migrating reactions when the recording's password changes.
+          || (isRoomOwner(room)
+            && request.resource.data.keys().hasOnly(['emoji', 't', 'createdAt'])
+            && request.resource.data.emoji is string && request.resource.data.t is number
+            && request.resource.data.createdAt is timestamp);
+        allow update: if false;
+        allow delete: if isRoomOwner(room);
+      }
+
+      match /comments/{commentId} {
+        function validComment(d) {
+          return d.keys().hasOnly(['text', 't', 'uid', 'name', 'photoURL', 'createdAt', 'migrated'])
+            && d.text is string && d.text.size() > 0 && d.text.size() <= 2000
+            && (d.t == null || (d.t is number && d.t >= 0 && d.t <= 86400))
+            && d.uid is string && d.name is string && d.name.size() <= 120
+            && (!('photoURL' in d) || d.photoURL == null || (d.photoURL is string && d.photoURL.size() <= 500));
+        }
+        allow read: if roomOpen(room) || isRoomOwner(room);
+        allow create: if (roomOpen(room) && isReelUser()
+            && validComment(request.resource.data)
+            && request.resource.data.uid == request.auth.uid
+            && !('migrated' in request.resource.data)
+            && request.resource.data.createdAt == request.time)
+          // Owner migrating comments when the recording's password changes.
+          || (isRoomOwner(room) && validComment(request.resource.data)
+            && request.resource.data.migrated == true
+            && request.resource.data.createdAt is timestamp);
+        allow update: if false;
+        allow delete: if isReelUser() && (resource.data.uid == request.auth.uid || isRoomOwner(room));
+      }
+    }
+  }
+}

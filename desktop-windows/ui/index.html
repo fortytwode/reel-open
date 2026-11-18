@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self';">
+  <title>Reel setup</title>
+  <link rel="stylesheet" href="./setup.css">
+  <script type="module" src="./setup.mjs"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" aria-label="Reel home"><span class="brand-mark">R</span><span>reel</span></a>
+    <nav class="top-actions" aria-label="Shortcuts">
+      <button class="quiet" type="button" data-action="openRecorder">Browser Recorder <span aria-hidden="true">↗</span></button>
+      <button class="quiet" type="button" data-action="openLibrary">Web Library <span aria-hidden="true">↗</span></button>
+      <button class="quiet hidden" type="button" data-scroll="settings-card" id="settingsShortcut">Settings</button>
+    </nav>
+  </header>
+  <main class="shell">
+    <div id="banner" class="banner hidden" role="alert" aria-live="polite"></div>
+    <section id="setupView" class="setup-view">
+      <div class="intro"><p class="eyebrow">REEL FOR WINDOWS</p><h1>Meetings, ready when you are.</h1><p class="lede">Connect your calendar and choose what Reel can do. You stay in control.</p></div>
+      <ol class="steps" aria-label="Setup steps">
+        <li data-step="1"><span>1</span>Sign in</li><li data-step="2"><span>2</span>Connect calendar</li><li data-step="3"><span>3</span>Confirm</li>
+      </ol>
+      <section class="card onboarding" aria-labelledby="stepTitle">
+        <div class="step-copy"><p class="eyebrow" id="stepEyebrow">STEP 1</p><h2 id="stepTitle">Sign in to Reel</h2><p id="stepDescription">Use your Reel account to keep meetings and recordings tied to you.</p></div>
+        <div id="stepContent"></div>
+      </section>
+      <p class="footnote">Your meeting capture stays on this computer. Reel never turns on your microphone or camera.</p>
+    </section>
+    <section id="dashboard" class="dashboard hidden">
+      <div class="dashboard-heading"><div><p class="eyebrow">YOUR MEETING COMPANION</p><h1>You're all set.</h1><p id="welcome" class="lede"></p></div><button class="outline" type="button" data-action="refresh">Refresh calendar</button></div>
+      <div class="grid">
+        <section class="card settings-card"><div class="card-heading"><div><p class="eyebrow">PREFERENCES</p><h2>Meeting setup</h2></div><span id="saveState" class="save-state" aria-live="polite"></span></div>
+          <div id="settingsContent"></div>
+        </section>
+        <section class="card status-card"><p class="eyebrow">REEL STATUS</p><h2 id="statusTitle">Waiting for your next meeting</h2><p id="statusMessage" class="muted"></p><button id="stopButton" class="danger hidden" type="button" data-action="stopRecording">Stop and save recording</button></section>
+      </div>
+      <section class="card meetings-card"><div class="card-heading"><div><p class="eyebrow">UP NEXT</p><h2>Upcoming meetings</h2></div></div><div id="meetingsList" class="meeting-list"></div></section>
+      <section class="card recordings-card"><div class="card-heading"><div><p class="eyebrow">RECENT</p><h2>Latest recordings</h2></div><button class="text-button" type="button" data-action="openRecordings">Open recordings folder ↗</button></div><div id="recordingsList" class="recording-list"></div></section>
+      <div class="account-row"><span id="accountLabel"></span><button class="text-button" type="button" data-action="signOut">Sign out</button><button class="text-button" type="button" data-action="disconnectCalendar">Disconnect calendar</button></div>
+    </section>
+  </main>
+</body>
+</html>

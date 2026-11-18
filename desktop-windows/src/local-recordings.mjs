@@ -1,0 +1,337 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { readFileSync, existsSync } from 'node:fs';
+import * as fileIO from 'node:fs/promises';
+import path from 'node:path';
+
+const MAX_PACKET = 16 * 1024 * 1024;
+const MAX_PENDING = 32 * 1024 * 1024;
+const text = (value, max = 4096) => typeof value === 'string' && value.length > 0 && value.length <= max;
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
+  systemAudioConsent: false, selection: { useAll: true, ids: [] } });
+const metadata = recording => ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
+  durationSeconds: recording.durationSeconds, ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
+
+// Only the boxes and sample tables produced by Reel's pinned fragmented muxer are accepted.
+// This detects damaged/out-of-order appends; playback still requires the real media probe.
+function boxes(bytes, start = 0, end = bytes.length) {
+  const result = [];
+  for (let offset = start; offset < end;) {
+    check(offset + 8 <= end, 'Truncated MP4 box');
+    let size = bytes.readUInt32BE(offset), header = 8;
+    if (size === 1) {
+      check(offset + 16 <= end, 'Truncated large MP4 box');
+      const large = bytes.readBigUInt64BE(offset + 8);
+      check(large <= BigInt(Number.MAX_SAFE_INTEGER), 'Invalid MP4 box size');
+      size = Number(large); header = 16;
+    }
+    check(size >= header && offset + size <= end, 'Incomplete MP4 box');
+    result.push({ type: bytes.toString('ascii', offset + 4, offset + 8), start: offset,
+      data: offset + header, end: offset + size });
+    offset += size;
+  }
+  return result;
+}
+function children(bytes, box) { return boxes(bytes, box.data, box.end); }
+function one(list, type) {
+  const found = list.filter(box => box.type === type);
+  check(found.length === 1, `Expected one ${type} box`);
+  return found[0];
+}
+function uint(bytes, offset, end) {
+  check(offset + 4 <= end, 'Truncated MP4 field');
+  return bytes.readUInt32BE(offset);
+}
+function time(bytes, offset, end, version) {
+  check(version === 0 || version === 1, 'Unsupported MP4 time version');
+  if (!version) return uint(bytes, offset, end);
+  check(offset + 8 <= end, 'Truncated MP4 time');
+  const value = bytes.readBigUInt64BE(offset);
+  check(value <= BigInt(Number.MAX_SAFE_INTEGER), 'Invalid MP4 time');
+  return Number(value);
+}
+function initTracks(bytes) {
+  const top = boxes(bytes);
+  check(top.length === 2 && top[0].type === 'ftyp' && top[1].type === 'moov', 'Expected complete ftyp + moov init');
+  const tracks = new Map();
+  const movie = children(bytes, top[1]);
+  for (const trak of movie.filter(box => box.type === 'trak')) {
+    const list = children(bytes, trak), tkhd = one(list, 'tkhd');
+    const version = bytes[tkhd.data];
+    check(version === 0 || version === 1, 'Unsupported track header');
+    const id = uint(bytes, tkhd.data + 4 + (version ? 16 : 8), tkhd.end);
+    const mdia = children(bytes, one(list, 'mdia'));
+    const mdhd = one(mdia, 'mdhd'), mv = bytes[mdhd.data];
+    check(mv === 0 || mv === 1, 'Unsupported media header');
+    const timescale = uint(bytes, mdhd.data + 4 + (mv ? 16 : 8), mdhd.end);
+    const hdlr = one(mdia, 'hdlr');
+    check(hdlr.data + 12 <= hdlr.end, 'Truncated media handler');
+    const handler = bytes.toString('ascii', hdlr.data + 8, hdlr.data + 12);
+    const minf = children(bytes, one(mdia, 'minf'));
+    const stbl = children(bytes, one(minf, 'stbl'));
+    const stsd = one(stbl, 'stsd');
+    check(uint(bytes, stsd.data + 4, stsd.end) === 1, 'Expected one codec entry');
+    const entries = boxes(bytes, stsd.data + 8, stsd.end);
+    check(entries.length === 1 && ((handler === 'vide' && entries[0].type === 'avc1')
+      || (handler === 'soun' && entries[0].type === 'mp4a')), 'Expected AVC video and AAC audio');
+    const entry = entries[0];
+    const codecBoxes = boxes(bytes, entry.data + (handler === 'vide' ? 78 : 28), entry.end);
+    if (handler === 'vide') {
+      const config = one(codecBoxes, 'avcC');
+      check(config.end - config.data >= 7 && bytes[config.data] === 1, 'Missing AVC decoder configuration');
+    } else {
+      const config = one(codecBoxes, 'esds');
+      // The pinned muxer uses fixed descriptor headers and writes the AudioSpecificConfig here.
+      check(config.end - config.data >= 37 && bytes[config.data + 17] === 0x40
+        && bytes[config.data + 34] >= 2 && config.data + 35 + bytes[config.data + 34] <= config.end
+        && (bytes[config.data + 35] >>> 3) === 2, 'Missing AAC-LC decoder configuration');
+    }
+    check(id > 0 && timescale > 0 && !tracks.has(id), 'Invalid or duplicate track');
+    tracks.set(id, { handler, timescale, end: 0, samples: 0 });
+  }
+  check(tracks.size === 2 && [...tracks.values()].filter(track => track.handler === 'vide').length === 1
+    && [...tracks.values()].filter(track => track.handler === 'soun').length === 1, 'Expected one video and one audio track');
+  const extensions = children(bytes, one(movie, 'mvex')).filter(box => box.type === 'trex');
+  check(extensions.length === tracks.size && new Set(extensions.map(box => uint(bytes, box.data + 4, box.end))).size === tracks.size
+    && extensions.every(box => tracks.has(uint(bytes, box.data + 4, box.end))), 'Missing fragmented track defaults');
+  return tracks;
+}
+function fragmentTracks(bytes, index, tracks) {
+  const top = boxes(bytes);
+  check(top.length === 2 && top[0].type === 'moof' && top[1].type === 'mdat', 'Expected complete moof + mdat fragment');
+  const [moof, mdat] = top, list = children(bytes, moof), mfhd = one(list, 'mfhd');
+  check(uint(bytes, mfhd.data + 4, mfhd.end) === index, 'Fragment sequence differs from append index');
+  const updates = new Map(), ranges = [];
+  for (const traf of list.filter(box => box.type === 'traf')) {
+    const fields = children(bytes, traf), tfhd = one(fields, 'tfhd');
+    check(uint(bytes, tfhd.data, tfhd.end) === 0x020038, 'Expected moof-relative sample defaults');
+    const id = uint(bytes, tfhd.data + 4, tfhd.end), track = tracks.get(id);
+    check(track && !updates.has(id), 'Unknown or duplicate fragment track');
+    const defaultDuration = uint(bytes, tfhd.data + 8, tfhd.end);
+    const defaultSize = uint(bytes, tfhd.data + 12, tfhd.end);
+    const defaultFlags = uint(bytes, tfhd.data + 16, tfhd.end);
+    const tfdt = one(fields, 'tfdt');
+    const base = time(bytes, tfdt.data + 4, tfdt.end, bytes[tfdt.data]);
+    check(base >= track.end, 'Fragment decode time moved backwards');
+    let sampleCount = 0, duration = 0;
+    for (const trun of fields.filter(box => box.type === 'trun')) {
+      const vf = uint(bytes, trun.data, trun.end), flags = vf & 0xffffff;
+      check((vf >>> 24) <= 1 && (flags & 1) && !(flags & ~0xf05), 'Unsupported sample table');
+      const count = uint(bytes, trun.data + 4, trun.end);
+      check(count > 0 && count <= mdat.end - mdat.data, 'Invalid sample count');
+      let position = trun.data + 8;
+      const offset = uint(bytes, position, trun.end) | 0; position += 4;
+      let firstFlags = defaultFlags;
+      if (flags & 4) { firstFlags = uint(bytes, position, trun.end); position += 4; }
+      const start = moof.start + offset;
+      let dataEnd = start;
+      for (let i = 0; i < count; i++) {
+        const sampleDuration = flags & 0x100 ? uint(bytes, position, trun.end) : defaultDuration;
+        if (flags & 0x100) position += 4;
+        const size = flags & 0x200 ? uint(bytes, position, trun.end) : defaultSize;
+        if (flags & 0x200) position += 4;
+        let sampleFlags = i ? defaultFlags : firstFlags;
+        if (flags & 0x400) { sampleFlags = uint(bytes, position, trun.end); position += 4; }
+        if (flags & 0x800) { uint(bytes, position, trun.end); position += 4; }
+        check(sampleDuration > 0 && size > 0, 'Empty MP4 sample');
+        if (!sampleCount && !i && track.handler === 'vide') check(!(sampleFlags & 0x10000), 'Video fragment must start with a keyframe');
+        dataEnd += size; duration += sampleDuration;
+        check(start >= mdat.data && dataEnd <= mdat.end && Number.isSafeInteger(base + duration), 'Sample data escapes mdat');
+      }
+      check(position === trun.end, 'Unexpected bytes in sample table');
+      ranges.push({ start, end: dataEnd }); sampleCount += count;
+    }
+    check(sampleCount > 0, 'Fragment track has no samples');
+    updates.set(id, { ...track, end: base + duration, samples: track.samples + sampleCount });
+  }
+  check(updates.size > 0, 'Fragment has no known samples');
+  let end = mdat.data;
+  for (const range of ranges.sort((a, b) => a.start - b.start)) {
+    check(range.start === end, 'Overlapping or missing sample data'); end = range.end;
+  }
+  check(end === mdat.end, 'Unreferenced media bytes');
+  return updates;
+}
+
+/** Main-process-only local files. No URLs, sharing, or caller-selected output paths.
+ * begin/append/finish/abort and settings/completion mutations are asynchronous.
+ * list/getSettings/hasCompleted are synchronous owner-bound metadata snapshots.
+ * io may override filesystem operations for fault testing; root is trusted app configuration.
+ */
+export function createLocalRecordingStore({ root, io: overrides } = {}) {
+  check(text(root), 'A local recordings root is required');
+  const directory = path.resolve(root), io = { ...fileIO, ...overrides }, owners = new Map();
+  function owner(ownerUserID) {
+    check(text(ownerUserID, 1024), 'Invalid recording owner');
+    if (owners.has(ownerUserID)) return owners.get(ownerUserID);
+    const dir = path.join(directory, createHash('sha256').update(ownerUserID).digest('hex'));
+    let state = { version: 1, ownerUserID, settings: defaults(ownerUserID), recordings: [], completed: {} };
+    try {
+      const saved = JSON.parse(readFileSync(path.join(dir, 'library.json'), 'utf8'));
+      check(saved.version === 1 && saved.ownerUserID === ownerUserID && Array.isArray(saved.recordings)
+        && saved.completed && typeof saved.completed === 'object' && !Array.isArray(saved.completed), 'Invalid local recording metadata');
+      state = saved;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const value = { dir, state, tail: Promise.resolve() }; owners.set(ownerUserID, value); return value;
+  }
+  async function writeAll(handle, bytes) {
+    for (let offset = 0; offset < bytes.length;) {
+      const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, null);
+      check(Number.isInteger(bytesWritten) && bytesWritten > 0 && bytesWritten <= bytes.length - offset, 'Local recording write made no progress');
+      offset += bytesWritten;
+    }
+  }
+  function mutate(value, update) {
+    const result = value.tail.then(async () => {
+      const state = update(structuredClone(value.state));
+      await io.mkdir(value.dir, { recursive: true, mode: 0o700 });
+      const temporary = path.join(value.dir, `${randomBytes(16).toString('hex')}.json.tmp`);
+      let handle;
+      try {
+        handle = await io.open(temporary, 'wx', 0o600);
+        await writeAll(handle, Buffer.from(JSON.stringify(state)));
+        await handle.sync(); await handle.close(); handle = null;
+        await io.rename(temporary, path.join(value.dir, 'library.json'));
+        value.state = state;
+      } finally {
+        if (handle) await handle.close().catch(() => {});
+        await io.unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      }
+      return state;
+    });
+    value.tail = result.catch(() => {}); return result;
+  }
+  async function begin({ ownerUserID, title = 'Meeting', createdAt = new Date().toISOString(), meeting = null } = {}) {
+    const value = owner(ownerUserID);
+    check(text(title) && Number.isFinite(Date.parse(createdAt)), 'Invalid recording metadata');
+    createdAt = new Date(createdAt).toISOString();
+    await io.mkdir(value.dir, { recursive: true, mode: 0o700 });
+    const id = randomBytes(16).toString('hex'), finalPath = path.join(value.dir, `${id}.mp4`);
+    const partialPath = finalPath + '.partial';
+    const file = await io.open(partialPath, 'wx', 0o600);
+    let audioFile = null, audioTail = Promise.resolve(), audioFailure = null, audioFrames = 0;
+    const audioPartial = path.join(value.dir, `${id}.pcm.partial`), audioFinal = path.join(value.dir, `${id}.pcm`);
+    if (meeting) { try { audioFile = await io.open(audioPartial, 'wx', 0o600); } catch (error) { audioFailure = error; } }
+    function appendAudio(bytes) {
+      if (!meeting || sealed) return Promise.reject(Error('Audio sidecar is closed'));
+      if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length % 2 || bytes.length > MAX_PACKET) return Promise.reject(Error('Invalid audio packet'));
+      const copy = Buffer.from(bytes);
+      const operation = audioTail.then(async () => {
+        if (audioFailure) throw audioFailure;
+        await writeAll(audioFile, copy); audioFrames += copy.length / 2;
+      }).catch(error => { audioFailure ??= error; throw error; });
+      audioTail = operation.catch(() => {}); return operation;
+    }
+    function failAudio() { audioFailure ??= Error('The audio sidecar could not be saved.'); }
+    let tracks = null, lastIndex = 0, tail = Promise.resolve(), failure = null, pending = 0;
+    let sealed = false, finishPromise, closePromise, abortPromise;
+    const close = () => closePromise ??= file.close();
+    function append(bytes, operation) {
+      if (sealed) return Promise.reject(Error('Recording writer is closed'));
+      try {
+        check(bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= MAX_PACKET, 'Invalid or oversized recording packet');
+        check(pending + bytes.byteLength <= MAX_PENDING, 'Recording writer cannot keep up');
+        bytes = Buffer.from(bytes); pending += bytes.length;
+      } catch (error) { failure ??= error; return Promise.reject(error); }
+      const result = tail.then(async () => {
+        if (failure) throw failure;
+        const apply = operation(bytes);
+        await writeAll(file, bytes); await file.sync(); apply();
+      }).catch(async error => { failure ??= error; await close().catch(() => {}); throw error; })
+        .finally(() => { pending -= bytes.length; });
+      tail = result.catch(() => {}); return result;
+    }
+    function appendInit(bytes) {
+      return append(bytes, packet => {
+        check(!tracks, 'Recording init already appended');
+        const parsed = initTracks(packet); return () => { tracks = parsed; };
+      });
+    }
+    function appendFragment({ index, duration, bytes } = {}) {
+      return append(bytes, packet => {
+        check(tracks && Number.isInteger(index) && index === lastIndex + 1, 'Recording fragment is out of order');
+        check(Number.isFinite(duration) && duration >= 0, 'Invalid fragment duration');
+        const updates = fragmentTracks(packet, index, tracks);
+        return () => { for (const [id, track] of updates) tracks.set(id, track); lastIndex = index; };
+      });
+    }
+    function finish({ durationSeconds } = {}) {
+      if (finishPromise) return finishPromise;
+      if (sealed) return Promise.reject(Error('Recording writer was aborted'));
+      sealed = true;
+      finishPromise = (async () => {
+        try {
+          await tail;
+          if (failure) throw failure;
+          check(Number.isFinite(durationSeconds) && durationSeconds > 0 && lastIndex > 0
+            && [...tracks.values()].every(track => track.samples > 0), 'Recording has no complete video and audio samples');
+          await file.sync(); await close(); await io.rename(partialPath, finalPath);
+          if (meeting) {
+            await audioTail;
+            try {
+              if (audioFailure || !audioFile || !audioFrames) throw audioFailure ?? Error('No meeting audio was saved.');
+              await audioFile.sync(); await audioFile.close(); audioFile = null; await io.rename(audioPartial, audioFinal);
+            } catch (error) { audioFailure ??= error; }
+            if (audioFile) { await audioFile.close().catch(() => {}); audioFile = null; }
+          }
+          const recording = { id, title, createdAt, durationSeconds, ...(meeting ? { processing: { title, createdAt, meeting, phase: audioFailure ? 'failed' : 'pending', ...(audioFailure ? { error: 'Meeting audio could not be saved.' } : {}), audioFrames } } : {}) };
+          await mutate(value, state => { state.recordings.push(recording); return state; });
+          return { ...recording, path: finalPath, playable: true };
+        } catch (error) { failure ??= error; await close().catch(() => {}); throw error; }
+      })();
+      return finishPromise;
+    }
+    function abort() {
+      if (abortPromise) return abortPromise;
+      sealed = true;
+      // Preserve the synced prefix privately; it never becomes a completed recording.
+      abortPromise = finishPromise ? finishPromise.then(() => {}, () => {}) : Promise.all([tail.then(() => close()).catch(() => {}), audioTail.then(() => audioFile?.close()).catch(() => {})]).then(() => {});
+      return abortPromise;
+    }
+    return { id, appendInit, appendFragment, appendAudio, failAudio, finish, abort };
+  }
+  function list(ownerUserID) { return owner(ownerUserID).state.recordings.slice().reverse().map(metadata); }
+  function getSettings(ownerUserID) { return structuredClone(owner(ownerUserID).state.settings); }
+  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, selection } = {}) {
+    check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The settings owner changed');
+    check([autoJoin, participantConsent, systemAudioConsent].every(flag => typeof flag === 'boolean')
+      && typeof selection?.useAll === 'boolean' && Array.isArray(selection.ids) && selection.ids.length <= 250
+      && selection.ids.every(id => text(id, 1024)), 'Invalid recording settings');
+    check(!autoJoin || (participantConsent && systemAudioConsent), 'Automatic recording requires both permissions');
+    const settings = { ownerUserID, autoJoin, participantConsent, systemAudioConsent,
+      selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)] } };
+    const state = await mutate(owner(ownerUserID), state => { state.settings = settings; return state; });
+    return structuredClone(state.settings);
+  }
+  function hasCompleted({ ownerUserID, occurrenceKey } = {}) {
+    check(text(occurrenceKey), 'Invalid meeting occurrence');
+    return Object.hasOwn(owner(ownerUserID).state.completed, occurrenceKey);
+  }
+  async function markCompleted({ ownerUserID, occurrenceKey, recording } = {}) {
+    check(text(occurrenceKey), 'Invalid meeting occurrence');
+    const value = owner(ownerUserID);
+    check(recording?.playable === true && /^[0-9a-f]{32}$/.test(recording.id ?? '')
+      && recording.path === path.join(value.dir, `${recording.id}.mp4`), 'Recording does not belong to this owner');
+    await mutate(value, state => {
+      check(state.recordings.some(item => item.id === recording.id), 'Recording was not saved by this owner');
+      if (!Object.hasOwn(state.completed, occurrenceKey)) Object.defineProperty(state.completed, occurrenceKey,
+        { value: recording.id, enumerable: true, configurable: true, writable: true });
+      return state;
+    });
+  }
+  function getProcessing({ ownerUserID, id }) {
+    const item = owner(ownerUserID).state.recordings.find(recording => recording.id === id);
+    return item?.processing && existsSync(path.join(owner(ownerUserID).dir, `${id}.mp4`)) ? structuredClone(item.processing) : null;
+  }
+  function listProcessing(ownerUserID) { return owner(ownerUserID).state.recordings.filter(item => item.processing && existsSync(path.join(owner(ownerUserID).dir, `${item.id}.mp4`))).map(item => ({ id: item.id, processing: structuredClone(item.processing) })); }
+  async function saveProcessing({ ownerUserID, id, processing }) {
+    await mutate(owner(ownerUserID), state => { const item = state.recordings.find(recording => recording.id === id);
+      check(item?.processing && existsSync(path.join(owner(ownerUserID).dir, `${id}.mp4`)), 'Recording no longer exists'); item.processing = structuredClone(processing); return state; });
+  }
+  function getAudioInfo({ ownerUserID, id }) {
+    const value = owner(ownerUserID), item = value.state.recordings.find(recording => recording.id === id);
+    check(item?.processing?.audioFrames > 0, 'Meeting audio is unavailable');
+    return { path: path.join(value.dir, `${id}.pcm`), sampleRate: 16000, channels: 1, frameCount: item.processing.audioFrames };
+  }
+  return { begin, list, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, listProcessing, saveProcessing, getAudioInfo };
+}

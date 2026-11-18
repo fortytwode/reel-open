@@ -1,0 +1,32 @@
+.build/
+.swiftpm/
+dist/
+*.xcuserstate
+DerivedData/
+.DS_Store
+.firebase/
+firebase-debug.log
+# REA / Ghidra evidence that is too large or binary to commit
+research/loom-evidence/large/
+research/loom-evidence/**/*.gpr
+research/loom-evidence/**/*.rep/
+research/loom-evidence/**/*.bin
+research/*.json
+!research/loom-evidence/*.json
+.claude/worktrees/
+firestore-debug.log
+
+# Local test dependencies and Python caches
+**/node_modules
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+
+# Deployment-owned organization configuration and generated artifacts
+/organization.local.json
+/.reel/
+/web/organization.json
+/desktop-windows/organization.json
+
+/firebase.local.json

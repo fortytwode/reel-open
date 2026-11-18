@@ -1,0 +1,13 @@
+{
+  "name": "reel-windows-desktop-capture-probe",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test source-selection.test.mjs",
+    "probe": "electron main.mjs",
+    "verify": "node verify.mjs"
+  },
+  "devDependencies": {
+    "electron": "45.2.3"
+  }
+}

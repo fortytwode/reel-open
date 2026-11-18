@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Record · Reel</title>
+  <meta name="theme-color" content="#ffffff">
+  <link rel="manifest" href="/reel.webmanifest">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/viewer.css">
+  <link rel="stylesheet" href="/meeting-calendar.css?v=20261030-calendar2">
+  <link rel="stylesheet" href="/record.css?v=20261029-meetings3">
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="/record" aria-label="Reel"><span class="dot"></span>Reel</a>
+    <div class="actions" id="account">
+      <a class="button" href="/library" data-library="" target="_blank" rel="noopener">Library</a>
+      <button id="install-reel" type="button">Install on Windows</button>
+      <span id="user" class="muted small"></span>
+      <button id="sign-in" type="button" class="primary" hidden>Sign in with Google</button>
+      <button id="sign-out" type="button" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <p id="unsupported" class="notice error" hidden>This browser can't record with Reel. Use an up-to-date Google Chrome or Microsoft Edge on Windows or macOS.</p>
+    <p id="auth-msg" class="notice" hidden></p>
+
+    <details id="install-help" class="install-help">
+      <summary>Install Reel on Windows</summary>
+      <p>Open this page in Microsoft Edge or Google Chrome. Select the Install app icon in the address bar, or use the browser menu’s Apps / Install Reel option. Reel opens in its own window and can be pinned to Start or your taskbar.</p>
+      <p>You can also record here without installing. Keep Reel open until uploads finish. Shortcuts work while Reel or its floating controls are focused; the browser asks you what to share for each new recording.</p>
+    </details>
+    <p id="install-status" class="small muted" role="status"></p>
+    <div id="meeting-calendar-panel"></div>
+    <section class="recorder card" id="setup">
+      <div class="rec-head">
+        <h1 id="recording-heading">New recording</h1>
+        <label>Recording type <select id="recording-kind"><option value="recording">Screen recording</option><option value="meeting">Meeting</option></select></label>
+        <p class="muted small">After you press Start, pick what to share: your entire screen, a window or a browser tab. Tick <b>Also share system audio</b> (screen) or <b>Also share tab audio</b> (tab) to include sound from your computer.</p>
+      </div>
+      <section id="meeting-setup" hidden>
+        <label>Calendar invitation <select id="meeting-calendar-invite"><option value="">Manual meeting — private Calls and recap to you</option></select></label>
+        <p id="meeting-calendar-status" class="muted small">Sign in to select a calendar invitation for team recaps.</p>
+        <label>Meeting title <input id="meeting-title" maxlength="200" placeholder="Meeting title"></label>
+        <label>Attendee emails <input id="meeting-attendees" placeholder="Emails, separated by commas"></label>
+        <p class="muted small">Records video, your microphone and computer sound. For Google Meet or Teams in a browser, share the meeting tab and tick <b>Also share tab audio</b>. For Zoom or Teams desktop, share your screen with system audio. Keep this Reel window open until transcription finishes.</p>
+        <p class="muted small">Meeting audio is sent securely to OpenAI for transcription and AI meeting notes. Organization sign-in is required. The video stays in this browser unless you choose Share video. When signed in, its title and date appear in your private Meetings portal.</p>
+        <p class="muted small">New meeting notes are automatically saved in Notion. Recaps go to internal calendar invitees, including nonattendees; external invitees are excluded. A manual meeting without an invitation sends a recap only to you.</p>
+      </section>
+      <div id="ordinary-settings">
+      <div class="recorder-preview">
+        <video id="preview" class="preview" muted playsinline hidden aria-label="Camera preview"></video>
+        <div class="preview-empty" aria-hidden="true">◉</div>
+        <div class="preview-controls"><button id="preview-toggle" type="button">Check camera &amp; microphone</button><meter id="mic-meter" min="0" max="1" value="0" aria-label="Microphone level"></meter><span id="preview-status" role="status">Check your devices before recording. Camera backgrounds apply during recording.</span></div>
+      </div>
+      <div class="grid">
+        <label>Record
+          <select id="mode">
+            <option value="screen">Screen, window or tab</option>
+            <option value="camera">Camera only</option>
+          </select>
+        </label>
+        <label>Camera
+          <select id="camera"></select>
+        </label>
+        <label>Microphone
+          <select id="mic"></select>
+        </label>
+        <label>Audio
+          <select id="audio">
+            <option value="micOnly">Microphone</option>
+            <option value="micAndSystem">Microphone + system audio</option>
+            <option value="systemOnly">System audio only</option>
+            <option value="none">No audio</option>
+          </select>
+        </label>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="camera-on"> Show camera bubble</label>
+        <label><input type="checkbox" id="auto-upload"> Upload and share</label>
+      </div>
+      <details class="recording-settings"><summary>Recording settings</summary>
+      <div class="grid">
+        <label>Camera background
+          <select id="background">
+            <option value="none">None</option>
+            <option value="blur">Blur background</option>
+            <option value="image">Virtual background</option>
+          </select>
+        </label>
+        <label>Bubble size
+          <select id="bubble">
+            <option value="small">Small</option>
+            <option value="medium">Medium</option>
+            <option value="large">Large</option>
+          </select>
+        </label>
+        <label>Quality
+          <select id="quality">
+            <option value="p720">720p</option>
+            <option value="p1080">1080p</option>
+            <option value="p1440">1440p</option>
+            <option value="p2160">4K</option>
+          </select>
+        </label>
+        <label>Frame rate
+          <select id="fps">
+            <option value="24">24 fps</option>
+            <option value="30">30 fps</option>
+            <option value="60">60 fps</option>
+          </select>
+        </label>
+        <label>Countdown
+          <select id="countdown">
+            <option value="0">None</option>
+            <option value="3">3 s</option>
+            <option value="5">5 s</option>
+          </select>
+        </label>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="copy-on-stop"> Copy link when I stop</label>
+        <label><input type="checkbox" id="upload-mp4"> Also upload an MP4 (downloads, transcript API)</label>
+        <label id="bg-image-row" hidden>Background image <input type="file" id="bg-image" accept="image/*"></label>
+      </div>
+      </details>
+      </div>
+      <div class="start-row">
+        <button id="start" type="button" class="primary big">Start recording</button>
+        <span class="muted small" id="shortcut-hint">Ctrl+Alt+R start/stop · Ctrl+Alt+P pause · Ctrl+Alt+Backspace cancel (while this tab or the bubble is focused)</span>
+      </div>
+
+    </section>
+
+    <section class="card live" id="live" hidden>
+      <div class="live-row">
+        <span class="rec-dot"></span>
+        <strong id="live-state">Recording</strong>
+        <span id="live-time" class="time">0:00</span>
+        <span id="live-upload" class="muted small"></span>
+        <span class="spacer"></span>
+        <button id="pause" type="button">Pause</button>
+        <button id="restart" type="button" title="Discard and start again with the same screen">Restart</button>
+        <button id="cancel" type="button">Cancel</button>
+        <button id="stop" type="button" class="primary">Stop</button>
+      </div>
+      <p id="countdown-big" class="countdown" hidden></p>
+      <p class="muted small" id="live-hint"></p>
+    </section>
+
+    <section class="card" id="last" hidden>
+      <div class="live-row">
+        <strong>Link</strong>
+        <a id="last-link" target="_blank" rel="noopener"></a>
+        <span class="spacer"></span>
+        <button id="last-copy" type="button" class="primary">Copy link</button>
+      </div>
+    </section>
+
+    <section class="library">
+      <div class="lib-head"><h2>Your recordings</h2><span class="muted small">Stored in this browser; uploaded ones are also on the web.</span></div>
+      <ol id="list" class="rec-list"></ol>
+      <p id="empty" class="muted">No recordings yet.</p>
+    </section>
+  </main>
+
+  <dialog id="meeting-notes-dialog">
+    <h3 id="meeting-notes-title">Meeting notes</h3>
+    <p id="meeting-notes-status" class="muted small" role="status"></p>
+    <p class="muted small">AI meeting notes include decisions and action items.</p>
+    <p id="meeting-summary"></p>
+    <pre id="meeting-transcript" class="meeting-transcript"></pre>
+    <p id="meeting-notion-status" role="status"></p>
+    <a id="meeting-notion-link" target="_blank" rel="noopener" hidden>Open notes in Notion</a>
+    <div class="dialog-actions">
+      <button id="meeting-retranscribe" type="button">Transcribe</button>
+      <button id="meeting-download-transcript" type="button">Download transcript</button>
+      <button id="meeting-send-notion" type="button">Send notes to Notion</button>
+      <button id="meeting-notes-close" type="button">Close</button>
+    </div>
+  </dialog>
+
+  <dialog id="share-dialog">
+    <form method="dialog" id="share-form">
+      <h3>Sharing</h3>
+      <p class="muted small" id="share-title"></p>
+      <label>Password <input type="password" id="share-password" autocomplete="new-password" placeholder="Leave empty to keep the current setting"></label>
+      <label class="inline"><input type="checkbox" id="share-remove"> Remove password</label>
+      <label>Link expires
+        <select id="share-expiry">
+          <option value="keep">Keep current</option>
+          <option value="never">Never</option>
+          <option value="hour">In 1 hour</option>
+          <option value="day">In 1 day</option>
+          <option value="week">In 7 days</option>
+          <option value="month">In 30 days</option>
+        </select>
+      </label>
+      <p class="error small" id="share-error" hidden></p>
+      <div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button id="share-save" value="save" class="primary">Save</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="trim-dialog">
+    <form method="dialog" id="trim-form">
+      <h3>Trim</h3>
+      <p class="muted small">Viewers only see the part between start and end. The original stays intact; downloads get a trimmed copy.</p>
+      <video id="trim-video" controls playsinline></video>
+      <div class="trim-row">
+        <label>Start (s) <input type="number" id="trim-start" step="0.1" min="0"></label>
+        <button type="button" id="trim-set-start">Use current time</button>
+        <label>End (s) <input type="number" id="trim-end" step="0.1" min="0"></label>
+        <button type="button" id="trim-set-end">Use current time</button>
+      </div>
+      <div class="dialog-actions"><button value="cancel" formnovalidate>Cancel</button><button value="clear" formnovalidate>Remove trim</button><button value="save" class="primary">Save</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <footer class="foot muted small">Reel 1.2.8 · <a href="/record" data-recorder="" class="muted">Recorder</a></footer>
+  <script type="module" src="/reel/install.js?v=20261029-meetings3"></script>
+  <script type="module" src="/record.js?v=20261118-orgstate1"></script>
+</body>
+</html>

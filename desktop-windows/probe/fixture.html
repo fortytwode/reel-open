@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>REEL CAPTURE FIXTURE 9C41</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #161616; }
+  #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; width: 100vw; height: 100vh; }
+  #grid div:nth-child(1), #grid div:nth-child(4) { background: #ef12c5; }
+  #grid div:nth-child(2), #grid div:nth-child(3) { background: #12e9a4; }
+  #tag { position: fixed; top: 42%; left: 22%; background: black; color: white; font: bold 30px sans-serif; padding: 12px; }
+</style>
+<div id="grid"><div></div><div></div><div></div><div></div></div>
+<div id="tag">REEL FIXTURE 9C41</div>
+<script>
+  // Synthetic audible output; no microphone, call, account, or real content.
+  const audio = new AudioContext();
+  const tone = audio.createOscillator();
+  const volume = audio.createGain();
+  tone.frequency.value = 440;
+  volume.gain.value = 0.3;
+  tone.connect(volume).connect(audio.destination);
+  tone.start();
+  audio.resume().then(() => { document.title += ' AUDIO-RUNNING'; });
+</script>
+</html>

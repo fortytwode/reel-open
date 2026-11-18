@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Reel</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/viewer.css?v=20261105-parity2">
+</head>
+<body class="viewer-page">
+  <header class="bar">
+    <a class="brand" href="/library" data-library="" aria-label="Your recordings"><span class="dot"></span>Reel <span class="brand-section">Library</span></a>
+    <div class="actions">
+      <button id="copy-link" type="button" aria-label="Copy link at current playback position">Copy link</button>
+      <a id="download" class="button" href="#" download hidden>Download</a>
+    </div>
+  </header>
+  <main id="main">
+    <section class="head">
+      <h1 id="title">Loading…</h1>
+      <button id="rename-shared-title" type="button" hidden>Rename shared title</button>
+      <p id="subtitle" class="muted"></p>
+      <p id="share-message" class="muted small" role="status" aria-live="polite" hidden></p>
+      <p id="expiry" class="muted small" hidden></p>
+    </section>
+
+    <section id="gate" class="gate" hidden>
+      <form id="gate-form" autocomplete="off">
+        <label for="gate-password">Password</label>
+        <div class="gate-row">
+          <input id="gate-password" type="password" required autocomplete="current-password">
+          <button id="gate-submit" type="submit" class="primary">Watch</button>
+        </div>
+        <p id="gate-error" class="error" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <section class="layout" id="layout">
+      <div class="left">
+        <div class="player-wrap">
+          <div id="status" class="status" hidden></div>
+          <video id="player" controls playsinline preload="metadata" hidden><track id="captions-track" kind="captions" srclang="en" label="Transcript"></video>
+          <button id="captions-toggle" type="button" aria-pressed="false" hidden>Captions</button>
+          <button id="play-cover" class="play-cover" type="button" aria-label="Play recording" hidden>
+            <img id="poster" class="poster" alt="" hidden>
+            <span class="play-symbol" aria-hidden="true">▶</span>
+            <span class="play-caption">Watch recording</span>
+          </button>
+          <div id="floaters" class="floaters" aria-hidden="true"></div>
+        </div>
+        <p id="playback-error" class="error small" role="status" hidden></p>
+        <div id="strip" class="strip" aria-label="Reactions timeline" hidden>
+          <div id="playhead" class="playhead"></div>
+        </div>
+        <div class="controls-row" id="controls-row" hidden>
+          <div id="reactbar" class="reactbar" role="group" aria-label="React" hidden></div>
+          <button id="comment-shortcut" class="comment-shortcut" type="button" hidden>Comment</button>
+          <div class="speed">
+            <label class="muted" for="speed">Speed</label>
+            <select id="speed">
+              <option value="0.8">0.8×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.2">1.2×</option>
+              <option value="1.5">1.5×</option>
+              <option value="1.75">1.75×</option>
+              <option value="2">2×</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <aside class="side">
+        <div class="panel">
+          <div class="tabs" role="tablist" aria-label="Recording details">
+            <button id="tab-overview" type="button" role="tab" aria-selected="false" aria-controls="pane-overview" tabindex="-1">Overview</button>
+            <button id="tab-transcript" type="button" role="tab" aria-selected="true" aria-controls="pane-transcript">Transcript</button>
+            <button id="tab-comments" type="button" role="tab" aria-selected="false" aria-controls="pane-comments" tabindex="-1" hidden>Comments <span id="comment-count" class="muted"></span></button>
+          </div>
+          <div id="pane-overview" class="pane overview" role="tabpanel" aria-labelledby="tab-overview" hidden>
+            <section id="summary-card" class="card" aria-label="AI summary" hidden>
+              <h2>Summary</h2>
+              <p id="summary-text" class="summary-text"></p>
+              <h3 id="chapters-heading" hidden>Chapters</h3>
+              <ol id="chapters" class="chapters" hidden></ol>
+            </section>
+            <p id="overview-empty" class="empty-state" hidden>No summary or chapters are available for this recording. You can still watch the video or read its transcript.</p>
+          </div>
+          <div id="pane-transcript" class="pane" role="tabpanel" aria-labelledby="tab-transcript">
+            <div class="pane-head">
+              <span class="muted small">Click a line to jump</span>
+              <div class="transcript-actions">
+                <button id="copy-transcript" type="button" disabled>Copy</button>
+                <a id="download-transcript-txt" class="muted small" href="#" download="reel-transcript.txt" hidden>TXT</a>
+                <a id="download-transcript-srt" class="muted small" href="#" download="reel-transcript.srt" hidden>SRT</a>
+                <a id="transcript-json" class="muted small" href="#" hidden>JSON</a>
+              </div>
+            </div>
+            <div id="transcript-find" class="transcript-find" hidden>
+              <label class="visually-hidden" for="transcript-search">Find in transcript</label>
+              <input id="transcript-search" type="search" placeholder="Find in transcript" aria-controls="segments" aria-describedby="transcript-find-help">
+              <span id="transcript-match-count" class="muted small" role="status" aria-live="polite">0 matches</span>
+              <button id="transcript-previous" type="button" aria-label="Previous transcript match" disabled>Previous</button>
+              <button id="transcript-next" type="button" aria-label="Next transcript match" disabled>Next</button>
+              <span id="transcript-find-help" class="visually-hidden">Press Enter for the next match, or Shift+Enter for the previous match.</span>
+            </div>
+            <ol id="segments" class="segments"><li class="muted">Loading transcript…</li></ol>
+          </div>
+          <div id="pane-comments" class="pane" role="tabpanel" aria-labelledby="tab-comments" hidden>
+            <ol id="comments" class="comments"></ol>
+            <div id="comment-auth" class="comment-auth"></div>
+            <form id="comment-form" class="comment-form" hidden>
+              <textarea id="comment-text" rows="3" maxlength="2000" placeholder="Add a comment" required></textarea>
+              <div class="comment-form-row">
+                <label class="small"><input id="comment-at" type="checkbox" checked> at <span id="comment-at-time">0:00</span></label>
+                <button id="comment-submit" type="submit" class="primary">Post</button>
+              </div>
+            </form>
+            <p id="comment-msg" class="small error" role="alert" hidden></p>
+          </div>
+        </div>
+      </aside>
+    </section>
+  </main>
+  <footer class="foot muted small">Recorded with Reel</footer>
+  <script type="module" src="/viewer.js?v=20261118-orgstate1"></script>
+</body>
+</html>

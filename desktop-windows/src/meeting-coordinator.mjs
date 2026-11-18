@@ -1,0 +1,401 @@
+import { createHash } from 'node:crypto';
+import { parseMeetingURL } from './google-calendar.mjs';
+
+const MAX_LATENESS_MS = 5 * 60_000;
+const RETRY_DELAY_MS = 30_000;
+const MAX_ATTEMPTS = 3;
+const RETRYABLE = new Set(['busy', 'timed_out', 'chrome_unavailable', 'dedicated_window_unavailable']);
+const NATIVE_FAILURES = new Set(['busy', 'timed_out', 'chrome_unavailable', 'dedicated_window_unavailable',
+  'ambiguous_window', 'manual_required', 'sign_in_required', 'denied', 'awaiting_admission',
+  'cancelled', 'invalid_join', 'duplicate_request']);
+const SESSION_ID = /^[0-9a-f]{32}$/;
+const HWND = /^[1-9][0-9]*$/;
+
+const publicState = state => ({ ...state });
+const timeOf = value => Date.parse(value);
+const entryKey = (ownerUserID, occurrenceKey) => `${Buffer.byteLength(ownerUserID)}:${ownerUserID}${occurrenceKey}`;
+
+/**
+ * Main-process-only, caller-driven coordinator. Call refresh() when calendar
+ * data/settings change and tick() about every 20 seconds while the app is awake.
+ *
+ * Inject:
+ * - auth: getProfile(), onStateChange(listener) -> unsubscribe
+ * - calendar: discover({auth,selection,now,signal}) -> owner-bound snapshot
+ * - native: join({url,consentConfirmed:true,signal}), inspect(sessionId), close(sessionId)
+ *   (join bridge must map AbortSignal to the native cancel operation)
+ * - recorder: start({hwnd,pid,meeting,ownerUserID,systemAudio:true,microphone:false,signal})
+ *   -> opaque handle; stop(handle) -> {path,playable:true}. The adapter must
+ *   release tracks immediately on abort even if start has not resolved.
+ * - getSettings() -> {ownerUserID,autoJoin,participantConsent,
+ *   systemAudioConsent,selection:{useAll:boolean,ids:string[]}}
+ * - hasCompleted({ownerUserID,occurrenceKey}) and
+ *   markCompleted({ownerUserID,occurrenceKey,recording}) persistence callbacks.
+ *
+ * Only calendar discovery supplies meeting URLs and only native join supplies
+ * the HWND. The public state never contains either. `capturing` follows a
+ * successful recorder start; `completed` follows stop/save and persistence.
+ */
+export function createMeetingCoordinator({ auth, calendar, native, recorder, getSettings,
+  hasCompleted, markCompleted, now = () => new Date() } = {}) {
+  if (typeof auth?.getProfile !== 'function' || typeof auth?.onStateChange !== 'function'
+    || typeof calendar?.discover !== 'function' || typeof native?.join !== 'function'
+    || typeof native?.inspect !== 'function' || typeof native?.close !== 'function'
+    || typeof recorder?.start !== 'function' || typeof recorder?.stop !== 'function'
+    || typeof getSettings !== 'function' || typeof hasCompleted !== 'function'
+    || typeof markCompleted !== 'function' || typeof now !== 'function') throw TypeError('Invalid meeting coordinator dependencies');
+
+  let state = { phase: 'idle', ownerUserID: null, meetingId: null, attempts: 0, reason: null };
+  let snapshot = null;
+  let refreshController = null;
+  let joinController = null;
+  let active = null;
+  let stopPromise = null;
+  let tickPromise = null;
+  let generation = 0;
+  let refreshSequence = 0;
+  let disposed = false;
+  const entries = new Map();
+  const unresolvedSessions = new Set();
+  const listeners = new Set();
+  const emit = next => {
+    if (unresolvedSessions.size && next.phase !== 'close_required')
+      next = { ...next, phase: 'close_required', reason: 'owned_window_close_required' };
+    state = { ...state, ...next };
+    for (const listener of listeners) { try { listener(publicState(state)); } catch { /* listener isolation */ } }
+  };
+
+  function clock() {
+    const date = now();
+    const value = date instanceof Date ? date.getTime() : new Date(date).getTime();
+    if (!Number.isFinite(value)) throw TypeError('Invalid coordinator clock');
+    return value;
+  }
+  function settingsKey(settings) {
+    const selection = settings?.selection;
+    if (typeof settings?.ownerUserID !== 'string' || typeof settings.autoJoin !== 'boolean'
+      || typeof settings.participantConsent !== 'boolean' || typeof settings.systemAudioConsent !== 'boolean'
+      || typeof selection?.useAll !== 'boolean' || !Array.isArray(selection.ids)
+      || selection.ids.some(id => typeof id !== 'string')) return null;
+    return JSON.stringify({ ownerUserID: settings.ownerUserID, autoJoin: settings.autoJoin,
+      participantConsent: settings.participantConsent, systemAudioConsent: settings.systemAudioConsent,
+      selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)].sort() } });
+  }
+  function eligibility() {
+    let profile, settings;
+    try { profile = auth.getProfile(); settings = getSettings(); } catch { return null; }
+    const key = settingsKey(settings);
+    if (!profile?.userID || !profile.email || profile.calendarConnected !== true || !key
+      || settings.ownerUserID !== profile.userID || !settings.autoJoin
+      || !settings.participantConsent || !settings.systemAudioConsent) return null;
+    return { ownerUserID: profile.userID, email: profile.email.toLowerCase(), settings, key };
+  }
+  function occurrence(meeting) {
+    const link = parseMeetingURL(meeting?.joinURL);
+    const start = timeOf(meeting?.start), end = timeOf(meeting?.end);
+    if (!link || !Number.isFinite(start) || !Number.isFinite(end) || end <= start
+      || typeof meeting?.id !== 'string' || !meeting.id || typeof meeting?.calendarID !== 'string' || !meeting.calendarID) return null;
+    const url = new URL(link.url);
+    // Mirrors ReelCore/MeetingJoinCoordinator.swift: duplicate calendar copies
+    // of one call share a key; query passcodes remain in the native join URL.
+    const key = createHash('sha256').update(`${url.hostname}${url.pathname}:${start / 1000}`).digest('hex');
+    return { meeting, link, key, start, end };
+  }
+  function stillEligible(owner, key, occurrenceKey = null) {
+    const current = eligibility();
+    if (!current || current.ownerUserID !== owner || current.key !== key) return false;
+    if (!snapshot || snapshot.ownerUserID !== owner || snapshot.ownerEmail !== current.email || snapshot.settingsKey !== key) return false;
+    if (!occurrenceKey) return true;
+    const meeting = snapshot.meetings.map(occurrence).find(item => item?.key === occurrenceKey);
+    return !!meeting && clock() < meeting.end;
+  }
+  async function closeNative(sessionId) {
+    if (!SESSION_ID.test(sessionId ?? '')) return true;
+    let result;
+    try { result = await native.close(sessionId); } catch { result = null; }
+    // `released` means the helper saw navigation away and relinquished this
+    // window without touching unrelated content. Pending/failed stays owned.
+    if ((result?.ok === true && ['closed', 'already_closed'].includes(result.state))
+      || result?.state === 'released') {
+      unresolvedSessions.delete(sessionId);
+      return true;
+    }
+    unresolvedSessions.add(sessionId);
+    emit({ phase: 'close_required', reason: 'owned_window_close_required' });
+    return false;
+  }
+
+  function invalidate(reason = 'cancelled') {
+    generation++;
+    refreshController?.abort();
+    joinController?.abort();
+    snapshot = null;
+    if (active) return stopActive(reason);
+    if (!joinController) emit({ phase: 'idle', ownerUserID: null, meetingId: null, reason });
+    return Promise.resolve();
+  }
+
+  async function stopActive(reason) {
+    if (stopPromise) return stopPromise;
+    if (!active) return;
+    const capture = active;
+    const scopedKey = entryKey(capture.ownerUserID, capture.key);
+    const failClosed = reason => {
+      const entry = entries.get(scopedKey) ?? { attempts: 0 };
+      entry.terminal = true;
+      entries.set(scopedKey, entry);
+      emit({ phase: 'save_failed', reason });
+    };
+    emit({ phase: 'saving', ownerUserID: capture.ownerUserID, meetingId: capture.meeting.id, reason });
+    stopPromise = (async () => {
+      let recording;
+      try { recording = await recorder.stop(capture.handle); }
+      catch { failClosed('recording_save_failed'); return; }
+      finally { await closeNative(capture.sessionId); }
+      if (!recording || recording.playable !== true || typeof recording.path !== 'string' || !recording.path) {
+        failClosed('recording_save_failed'); return;
+      }
+      try { await markCompleted({ ownerUserID: capture.ownerUserID, occurrenceKey: capture.key, recording }); }
+      catch { failClosed('completion_save_failed'); return; }
+      const entry = entries.get(scopedKey) ?? { attempts: 0 };
+      entry.completed = true;
+      entries.set(scopedKey, entry);
+      emit({ phase: 'completed', ownerUserID: capture.ownerUserID, meetingId: capture.meeting.id,
+        attempts: entry.attempts, reason });
+    })();
+    try { await stopPromise; }
+    finally { active = null; stopPromise = null; }
+  }
+
+  async function refresh() {
+    if (disposed) return;
+    let eligible = eligibility();
+    if (!eligible) { await invalidate('not_enabled'); return; }
+    if (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID || snapshot.ownerEmail !== eligible.email
+      || snapshot.settingsKey !== eligible.key)) {
+      await invalidate('settings_changed');
+      eligible = eligibility();
+      if (!eligible) return;
+    }
+    const refreshVersion = ++refreshSequence;
+    const cancellationVersion = generation;
+    refreshController?.abort();
+    const controller = new AbortController();
+    refreshController = controller;
+    const { ownerUserID, email, settings, key } = eligible;
+    let result;
+    try { result = await calendar.discover({ auth, selection: settings.selection, now: new Date(clock()), signal: controller.signal }); }
+    catch {
+      if (refreshController !== controller || disposed) return;
+      await invalidate('calendar_unavailable');
+      emit({ phase: active ? 'saving' : 'calendar_unavailable', ownerUserID, reason: 'calendar_unavailable' });
+      throw new Error('Could not refresh eligible calendar meetings.');
+    }
+    if (refreshController !== controller || disposed || controller.signal.aborted
+      || refreshVersion !== refreshSequence || cancellationVersion !== generation) return;
+    const current = eligibility();
+    if (!current || current.ownerUserID !== ownerUserID || current.email !== email || current.key !== key
+      || result?.ownerUserID !== ownerUserID || !Array.isArray(result.meetings)) {
+      await invalidate('account_changed');
+      return;
+    }
+    const meetings = result.meetings.filter(item => occurrence(item));
+    const failedKey = ['failed', 'save_failed'].includes(state.phase) && state.ownerUserID === ownerUserID
+      ? occurrence(snapshot?.meetings.find(item => item.id === state.meetingId))?.key : null;
+    snapshot = { ownerUserID, ownerEmail: email, settingsKey: key, meetings };
+    if (active) {
+      const current = meetings.map(occurrence).find(item => item?.key === active.key);
+      if (!current) await stopActive('calendar_ineligible');
+      else {
+        active.end = current.end;
+        if (clock() >= active.end) await stopActive('meeting_deadline');
+      }
+    }
+    if (joinController && !meetings.some(item => occurrence(item)?.key === joinController.occurrenceKey)) joinController.abort();
+    // A refresh must not advertise readiness for an occurrence that already
+    // failed and will not be retried. Keep its actionable status until it ends
+    // or disappears; tick can still start a different eligible meeting.
+    const currentFailure = failedKey && meetings.find(item => occurrence(item)?.key === failedKey && timeOf(item.end) > clock());
+    if (!active && !joinController && currentFailure) emit({ ...state, meetingId: currentFailure.id });
+    if (!active && !joinController && !currentFailure) emit({ phase: meetings.length ? 'scheduled' : 'idle', ownerUserID,
+      meetingId: null, attempts: 0, reason: null });
+  }
+
+  async function attempt(item, eligible) {
+    const { meeting, link, key, start, end } = item;
+    const scopedKey = entryKey(eligible.ownerUserID, key);
+    const entry = entries.get(scopedKey) ?? { attempts: 0, retryAfter: 0, terminal: false, completed: false };
+    entry.attempts++;
+    entries.set(scopedKey, entry);
+    const controller = new AbortController();
+    controller.occurrenceKey = key;
+    joinController = controller;
+    const version = generation;
+    emit({ phase: 'joining', ownerUserID: eligible.ownerUserID, meetingId: meeting.id, attempts: entry.attempts, reason: null });
+    let result, captureHandle, nativeSessionId;
+    try {
+      try { result = await native.join({ url: link.url, consentConfirmed: true, signal: controller.signal }); }
+      catch (cause) {
+        // The bridge may discover a late joined window while cancelling and
+        // fail to close it before returning. Retain only that typed owned ID.
+        if (cause?.code === 'owned_window_close_required' && SESSION_ID.test(cause.sessionId ?? ''))
+          nativeSessionId = cause.sessionId;
+        throw cause;
+      }
+      const sessionId = result?.sessionId;
+      if (SESSION_ID.test(sessionId ?? '')) nativeSessionId = sessionId;
+      if (controller.signal.aborted || generation !== version || !stillEligible(eligible.ownerUserID, eligible.key, key)) {
+        await closeNative(nativeSessionId);
+        if (state.phase === 'joining' && state.ownerUserID === eligible.ownerUserID)
+          emit({ phase: 'cancelled', reason: 'eligibility_changed' });
+        return;
+      }
+      if (result?.ok !== true || result.state !== 'joined' || !nativeSessionId
+        || !HWND.test(String(result.hwnd ?? '')) || String(result.hwnd).length > 20
+        || !Number.isSafeInteger(result.pid) || result.pid <= 0) {
+        await closeNative(nativeSessionId);
+        const reason = NATIVE_FAILURES.has(result?.state) ? result.state : 'join_failed';
+        if (RETRYABLE.has(reason) && entry.attempts < MAX_ATTEMPTS) {
+          entry.retryAfter = clock() + RETRY_DELAY_MS;
+          emit({ phase: 'retry_wait', reason });
+        } else { entry.terminal = true; emit({ phase: 'failed', reason }); }
+        return;
+      }
+      const startOperation = Promise.resolve().then(() => recorder.start({ hwnd: String(result.hwnd), pid: result.pid, meeting,
+        ownerUserID: eligible.ownerUserID, systemAudio: true, microphone: false, signal: controller.signal }));
+      let abortListener;
+      const aborted = new Promise(resolve => {
+        abortListener = () => resolve({ cancelled: true });
+        if (controller.signal.aborted) abortListener();
+        else controller.signal.addEventListener('abort', abortListener, { once: true });
+      });
+      const outcome = await Promise.race([
+        startOperation.then(handle => ({ handle }), cause => ({ cause })), aborted
+      ]);
+      controller.signal.removeEventListener('abort', abortListener);
+      if (outcome.cancelled) {
+        // Cancellation cannot wait on an adapter that never settles. If it
+        // returns a handle later, stop and save that owned partial capture.
+        void startOperation.then(async handle => {
+          if (!handle) return;
+          try {
+            const recording = await recorder.stop(handle);
+            if (recording?.playable === true && typeof recording.path === 'string' && recording.path) {
+              await markCompleted({ ownerUserID: eligible.ownerUserID, occurrenceKey: key, recording });
+              entry.completed = true;
+            }
+          } catch { /* no completion claim */ }
+          entry.terminal = true;
+        }, () => {});
+        await closeNative(nativeSessionId);
+        if (state.phase === 'joining' && state.ownerUserID === eligible.ownerUserID)
+          emit({ phase: 'cancelled', reason: 'eligibility_changed' });
+        return;
+      }
+      if (outcome.cause) throw outcome.cause;
+      captureHandle = outcome.handle;
+      if (!captureHandle) throw Error('No capture handle');
+      if (controller.signal.aborted || generation !== version || !stillEligible(eligible.ownerUserID, eligible.key, key)) {
+        try {
+          const recording = await recorder.stop(captureHandle);
+          if (recording?.playable === true && typeof recording.path === 'string' && recording.path)
+            await markCompleted({ ownerUserID: eligible.ownerUserID, occurrenceKey: key, recording });
+        } catch { /* do not claim completion */ }
+        entry.terminal = true;
+        await closeNative(nativeSessionId);
+        if (state.phase === 'joining' && state.ownerUserID === eligible.ownerUserID)
+          emit({ phase: 'cancelled', reason: 'eligibility_changed' });
+        return;
+      }
+      active = { handle: captureHandle, sessionId: nativeSessionId, ownerUserID: eligible.ownerUserID, key, meeting, end };
+      emit({ phase: 'capturing', reason: null });
+    } catch {
+      if (captureHandle) { try { await recorder.stop(captureHandle); } catch { /* no completion claim */ } }
+      await closeNative(nativeSessionId);
+      if (controller.signal.aborted || generation !== version) {
+        if (state.phase === 'joining' && state.ownerUserID === eligible.ownerUserID)
+          emit({ phase: 'cancelled', reason: 'eligibility_changed' });
+      }
+      else { entry.terminal = true; emit({ phase: 'failed', reason: 'join_or_capture_failed' }); }
+    } finally {
+      if (joinController === controller) joinController = null;
+    }
+  }
+
+  async function tickImpl() {
+    if (stopPromise) { await stopPromise; return; }
+    if (unresolvedSessions.size) {
+      for (const sessionId of [...unresolvedSessions]) await closeNative(sessionId);
+      if (!unresolvedSessions.size) {
+        const current = eligibility();
+        emit({ phase: !disposed && snapshot && current ? 'scheduled' : 'idle',
+          ownerUserID: current?.ownerUserID ?? null, meetingId: null, reason: null });
+      }
+      return;
+    }
+    if (disposed) return;
+    const eligible = eligibility();
+    if (!eligible || (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID
+      || snapshot.ownerEmail !== eligible.email || snapshot.settingsKey !== eligible.key))) {
+      await invalidate('eligibility_changed'); return;
+    }
+    if (active) {
+      if (!snapshot || !snapshot.meetings.some(item => occurrence(item)?.key === active.key)) {
+        await stopActive('calendar_ineligible'); return;
+      }
+      if (clock() >= active.end) { await stopActive('meeting_deadline'); return; }
+      let inspected;
+      try { inspected = await native.inspect(active.sessionId); } catch { inspected = null; }
+      if (!stillEligible(active.ownerUserID, snapshot.settingsKey, active.key)
+        || inspected?.ok !== true || inspected.state !== 'in_call')
+        await stopActive(inspected?.state === 'left' ? 'meeting_left' : 'meeting_uncertain');
+      return;
+    }
+    if (joinController || !snapshot || !eligible) return;
+    const instant = clock();
+    const candidates = snapshot.meetings.map(occurrence).filter(Boolean)
+      .sort((a, b) => a.start - b.start || a.key.localeCompare(b.key));
+    for (const item of candidates) {
+      if (instant < item.start || instant > item.start + MAX_LATENESS_MS || instant >= item.end) continue;
+      const scopedKey = entryKey(eligible.ownerUserID, item.key);
+      const entry = entries.get(scopedKey);
+      if (entry?.terminal || entry?.completed || entry?.attempts >= MAX_ATTEMPTS || instant < (entry?.retryAfter ?? 0)) continue;
+      let persisted;
+      try {
+        persisted = hasCompleted({ ownerUserID: eligible.ownerUserID, occurrenceKey: item.key });
+        if (typeof persisted !== 'boolean') throw TypeError('Completion lookup must be synchronous');
+      }
+      catch { emit({ phase: 'failed', reason: 'completion_lookup_failed' }); return; }
+      if (persisted) { entries.set(scopedKey, { ...entry, completed: true }); continue; }
+      await attempt(item, eligible);
+      return;
+    }
+  }
+  function tick() {
+    if (tickPromise) return tickPromise;
+    tickPromise = tickImpl();
+    return tickPromise.finally(() => { tickPromise = null; });
+  }
+  async function cancel() {
+    await invalidate('cancelled');
+    if (tickPromise) await tickPromise;
+  }
+  function onStateChange(listener) {
+    if (typeof listener !== 'function') throw TypeError('listener must be a function');
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+  const unsubscribe = auth.onStateChange(() => {
+    const eligible = eligibility();
+    if (!eligible || (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID
+      || snapshot.ownerEmail !== eligible.email || snapshot.settingsKey !== eligible.key)))
+      void invalidate('account_changed');
+  });
+  async function dispose() {
+    disposed = true;
+    unsubscribe?.();
+    await cancel();
+    if (unresolvedSessions.size) throw new Error('The owned meeting window still needs to be closed.');
+  }
+  return { refresh, tick, cancel, dispose, getState: () => publicState(state), onStateChange };
+}

@@ -1,0 +1,12 @@
+{
+  "name": "reel-windows-desktop",
+  "version": "0.1.2",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.mjs probe/source-selection.test.mjs"
+  },
+  "devDependencies": { "electron": "45.2.3" }
+}

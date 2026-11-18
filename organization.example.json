@@ -1,0 +1,21 @@
+{
+  "allowedEmailDomain": "northwind.example",
+  "projectID": "demo-reel",
+  "bucket": "demo-reel.firebasestorage.app",
+  "apiKey": "example-public-api-key",
+  "authDomain": "demo-reel.firebaseapp.com",
+  "firestoreDatabase": "reel",
+  "googleClientID": "123456-examplemac.apps.googleusercontent.com",
+  "googleDesktopClientId": "123456-examplewindows.apps.googleusercontent.com",
+  "viewerBase": "https://record.northwind.example",
+  "viewerPath": "v",
+  "webBase": "https://record.northwind.example",
+  "meetingServiceURL": "https://meetings.northwind.example",
+  "deliveryServiceURL": "https://delivery.northwind.example",
+  "speechServiceURL": "https://speech.northwind.example",
+  "allowedOrigins": [
+    "https://record.northwind.example",
+    "http://localhost:5000"
+  ],
+  "notesBaseURL": "https://record.northwind.example/library"
+}
