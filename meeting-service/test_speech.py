@@ -9,6 +9,12 @@ from app import BridgeError, create_app, verify_firebase
 from speech import SpeechError, summarize_text, transcribe_audio
 
 
+def provider_notes(**fields):
+    return {'title': 'Planning', 'summary': 'Decision: proceed.', 'key_points': [],
+            'decisions': [], 'open_questions': [], 'has_meeting_content': True,
+            'action_items': [], **fields}
+
+
 @pytest.fixture(autouse=True)
 def organization_config(monkeypatch):
     monkeypatch.setenv('REEL_FIREBASE_PROJECT', 'advisr-485ac')
@@ -36,7 +42,7 @@ def setup(monkeypatch):
     def handler(req):
         requests.append(req)
         if req.url.path.endswith('/responses'):
-            return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps({'title': 'Planning', 'summary': 'Decision: proceed.', 'has_meeting_content': True, 'action_items': [{'owner': '', 'task': 'Follow up', 'due': ''}]})}]}]})
+            return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(provider_notes(action_items=[{'owner': '', 'task': 'Follow up', 'due': '', 'evidence': ''}]))}]}]})
         return httpx.Response(200, json={'text': 'Hello', 'languages': [{'code': 'en'}]})
     app = create_app(auth_verifier=lambda _: claims, speech_transport=httpx.MockTransport(handler))
     app.testing = True
@@ -84,7 +90,7 @@ def test_summary_full_input_and_structured_output(setup):
     transcript = 'Beginning ' + 'x' * 190000 + ' final decision'
     response = client.post('/summary', json={'text': transcript, 'title': 'Planning', 'attendees': ['a@example.com']}, headers={'Authorization': 'Bearer token'})
     assert response.status_code == 200
-    assert response.json['summary'] == 'Decision: proceed.\n\nAction items\n- Follow up'
+    assert response.json['summary'] == 'Outcome\nDecision: proceed.\n\nAction items\n• Owner unconfirmed: Follow up'
     body = json.loads(requests[0].content)
     assert json.loads(body['input'])['transcript'] == transcript
     assert body['store'] is False and body['reasoning']['effort'] == 'medium'
@@ -173,13 +179,14 @@ def test_in_process_transcription_function(monkeypatch):
 def test_in_process_summary_function(monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'secret-test')
     requests = []
-    notes = {'title': 'Planning', 'summary': 'Decision: proceed.', 'has_meeting_content': True, 'action_items': [{'owner': 'Alice', 'task': 'Follow up', 'due': 'Friday'}]}
+    notes = provider_notes(action_items=[{'owner': 'Alice', 'task': 'Follow up', 'due': 'Friday', 'evidence': 'Alice will follow up on Friday.'}])
     def handler(req):
         requests.append(req)
         return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(notes)}]}]})
-    result = summarize_text('Discussion', 'Planning', ['a@example.com'], httpx.MockTransport(handler))
-    assert result['summary'] == 'Decision: proceed.\n\nAction items\n- Alice: Follow up (due: Friday)'
-    assert json.loads(json.loads(requests[0].content)['input'])['transcript'] == 'Discussion'
+    text = 'Alice will follow up on Friday.'
+    result = summarize_text(text, 'Planning', ['alice@example.com'], httpx.MockTransport(handler))
+    assert result['summary'] == 'Outcome\nDecision: proceed.\n\nAction items\n• Alice: Follow up (due: Friday)'
+    assert json.loads(json.loads(requests[0].content)['input'])['transcript'] == text
     with pytest.raises(SpeechError, match='Invalid summary content'):
         summarize_text('Discussion', attendees=['not-an-email'])
 
@@ -190,7 +197,7 @@ def test_summary_classification_contract(monkeypatch, classification):
     monkeypatch.setenv('OPENAI_API_KEY', 'secret-test')
     claims = {'sub': 'uid', 'email': 'owner@example.com', 'email_verified': True,
               'iss': 'https://securetoken.google.com/advisr-485ac', 'aud': 'advisr-485ac'}
-    notes = {'title': 'Meeting', 'summary': 'A decision', 'action_items': [], 'has_meeting_content': classification}
+    notes = provider_notes(title='Meeting', summary='A decision', has_meeting_content=classification)
     def handler(req):
         return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(notes)}]}]})
     client = create_app(auth_verifier=lambda _: claims, speech_transport=httpx.MockTransport(handler)).test_client()
@@ -199,7 +206,7 @@ def test_summary_classification_contract(monkeypatch, classification):
         assert response.status_code == 422 and response.json['code'] == 'meeting_review_required'
         assert 'summary' not in response.json and response.headers['Cache-Control'] == 'no-store'
     elif classification is True:
-        assert response.status_code == 200 and response.json['summary'] == 'A decision'
+        assert response.status_code == 200 and response.json['summary'] == 'Outcome\nA decision'
     else:
         assert response.status_code == 502
 
@@ -218,7 +225,7 @@ def test_acknowledgement_only_is_reviewed_even_when_model_says_content(monkeypat
     monkeypatch.setenv('OPENAI_API_KEY', 'secret-test')
     claims = {'sub': 'uid', 'email': 'owner@example.com', 'email_verified': True,
               'iss': 'https://securetoken.google.com/advisr-485ac', 'aud': 'advisr-485ac'}
-    notes = {'title': 'Meeting', 'summary': 'Acknowledged.', 'action_items': [], 'has_meeting_content': True}
+    notes = provider_notes(title='Meeting', summary='Acknowledged.')
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(notes)}]}]}))
     client = create_app(auth_verifier=lambda _: claims, speech_transport=transport).test_client()
     response = client.post('/summary', json={'text': text}, headers={'Authorization': 'Bearer token'})
@@ -232,8 +239,86 @@ def test_short_decisions_remain_deliverable(monkeypatch, text):
     monkeypatch.setenv('OPENAI_API_KEY', 'secret-test')
     claims = {'sub': 'uid', 'email': 'owner@example.com', 'email_verified': True,
               'iss': 'https://securetoken.google.com/advisr-485ac', 'aud': 'advisr-485ac'}
-    notes = {'title': 'Meeting', 'summary': text, 'action_items': [], 'has_meeting_content': True}
+    notes = provider_notes(title='Meeting', summary=text)
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(notes)}]}]}))
     client = create_app(auth_verifier=lambda _: claims, speech_transport=transport).test_client()
     response = client.post('/summary', json={'text': text}, headers={'Authorization': 'Bearer token'})
-    assert response.status_code == 200 and response.json['summary'] == text
+    assert response.status_code == 200 and response.json['summary'] == 'Outcome\n' + text
+
+
+@pytest.mark.parametrize(('owner', 'evidence'), [
+    ('Vaibhav', 'Thank you, Vaibhav. I will share the build tomorrow.'),
+    ('Wahid', 'Thank you, Vaibhav. I will share the build tomorrow.'),
+    ('Wahid', 'Wahid will share the build tomorrow.'),
+])
+def test_misheard_or_unsupported_owner_remains_unconfirmed(monkeypatch, owner, evidence):
+    monkeypatch.setenv('OPENAI_API_KEY', 'secret-test')
+    notes = provider_notes(action_items=[{'owner': owner, 'task': 'Share the build', 'due': 'Tomorrow', 'evidence': evidence}])
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(notes)}]}]}))
+    result = summarize_text('Thank you, Vaibhav. I will share the build tomorrow.', attendees=['wahid@example.com'], transport=transport)
+    assert result['action_items'] == [{'owner': '', 'task': 'Share the build', 'due': 'Tomorrow'}]
+    assert 'Vaibhav' not in result['summary']
+    assert 'Owner unconfirmed: Share the build' in result['summary']
+
+
+def test_roster_names_and_compact_sections_preserve_decisions_and_uncertainty(monkeypatch):
+    from speech import attendee_keywords
+    monkeypatch.setenv('OPENAI_API_KEY', 'secret-test')
+    requests = []
+    notes = provider_notes(summary='Release approved; attribution still needs checking.',
+        key_points=[{'topic': 'Revenue', 'detail': 'SDK and server reporting may overlap.'}],
+        decisions=['Do not scale until reporting is verified.'], open_questions=['India or Philippines remains undecided.'],
+        action_items=[{'owner': 'Wahid', 'task': 'Share the build', 'due': 'Tomorrow', 'evidence': 'Wahid, share the build tomorrow.'}])
+    def handler(req):
+        requests.append(req)
+        return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': json.dumps(notes)}]}]})
+    names = {'wahid@example.com': 'Wahid Khan'}
+    result = summarize_text('Wahid, share the build tomorrow.', attendees=['wahid@example.com'], attendee_names=names, transport=httpx.MockTransport(handler))
+    assert result['action_items'][0]['owner'] == 'Wahid Khan'
+    assert result['summary'] == ('Outcome\nRelease approved; attribution still needs checking.'
+        '\n\nKey points\n• Revenue: SDK and server reporting may overlap.'
+        '\n\nDecisions\n• Do not scale until reporting is verified.'
+        '\n\nAction items\n• Wahid Khan: Share the build (due: Tomorrow)'
+        '\n\nOpen questions\n• India or Philippines remains undecided.')
+    context = json.loads(json.loads(requests[0].content)['input'])
+    assert context['attendee_context'] == [{'email': 'wahid@example.com', 'name_hint': 'Wahid Khan'}]
+    assert context['speaker_attribution'] == 'unavailable'
+    assert attendee_keywords(['wahid@example.com', 'ana.smith@example.com'], names) == ['Wahid Khan', 'wahid', 'ana smith']
+
+
+@pytest.mark.parametrize('evidence', [
+    'Thanks, Wahid. I will share the build tomorrow.',
+    'I spoke to Wahid. I will share the build tomorrow.',
+    'Wahid will not share the build tomorrow.',
+])
+def test_an_attendee_mention_alone_does_not_assign_an_action(evidence):
+    from speech import _grounded_owner, attendee_context
+    context = attendee_context(['wahid@example.com'])
+    assert _grounded_owner('Wahid', evidence, evidence, context, 'Share the build') == ''
+
+
+def test_owner_excerpt_must_name_one_person_and_match_whole_words():
+    from speech import _grounded_owner, attendee_context
+    context = attendee_context(['alice.jones@example.com', 'alice.smith@example.com'])
+    assert _grounded_owner('Alice Jones', 'Alice will send it.', 'Alice will send it.', context, 'Send it') == ''
+    context = attendee_context(['alice@example.com'])
+    assert _grounded_owner('Alice', 'alice will send it.', 'Malice will send it.', context, 'Send it') == ''
+    assert _grounded_owner('Alice', 'Alice will send it.', 'Alice will send it.', context, 'Send it') == 'Alice'
+    assert _grounded_owner('Alice', 'Alice, please send it.', 'Alice, please send it.', context, 'Send it') == 'Alice'
+    quote = 'Alice will review it. I will send the build.'
+    assert _grounded_owner('Alice', quote, quote, context, 'Send the build') == ''
+    quote = 'Alice will send the contract. I will send the build.'
+    assert _grounded_owner('Alice', quote, quote, context, 'Send the build') == ''
+    quote = 'Alice will send the contract, and I will send the build.'
+    assert _grounded_owner('Alice', quote, quote, context, 'Send the build') == ''
+    quote = 'We will not delay. Alice will send it.'
+    assert _grounded_owner('Alice', quote, quote, context, 'Send it') == 'Alice'
+    context = attendee_context(['bo@example.com'], {'bo@example.com': 'Bo'})
+    assert _grounded_owner('Bo', 'Bo will send it.', 'Bo will send it.', context, 'Send it') == 'Bo'
+
+
+def test_duplicate_email_casing_and_unusable_spelling_hints_do_not_block_recognition():
+    from speech import _grounded_owner, attendee_context, attendee_keywords
+    context = attendee_context(['Alice@example.com', 'alice@example.com'])
+    assert _grounded_owner('Alice', 'Alice will send it.', 'Alice will send it.', context, 'Send it') == 'Alice'
+    assert attendee_keywords(['bad', 'alice@example.com'], {'other@example.com': 'Other', 'alice@example.com': 'Bad\nName'}) == ['alice']

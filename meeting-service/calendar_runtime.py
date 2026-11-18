@@ -221,11 +221,16 @@ class BotDispatcher:
                    "callback_token": token, "output_bucket": os.environ["BOT_BUCKET"], "output_prefix": prefix,
                    "max_duration_seconds": max_duration, "admission_timeout_seconds": 900,
                    "capture_deadline": capture_deadline.isoformat()}
+        attendees = saved["participant_roster"] if shared else event["attendees"]
         record = {"execution_id": execution, "owner_id": owner_uid, "owner_email": owner,
                   "event_id": event["id"], "meeting_id": meeting_id, "title": event["title"],
-                  "started_at": event["start"], "attendees": saved["participant_roster"] if shared else event["attendees"], "status": "requesting_entry",
+                  "started_at": event["start"], "attendees": attendees, "status": "requesting_entry",
                   "callback_hash": digest(token), "output_prefix": prefix, "output_bucket": os.environ["BOT_BUCKET"],
                   "created_at": now.isoformat(), "notion_status": "pending"}
+        attendee_names = current.get("attendee_names", {})
+        if attendee_names:
+            attendee_emails = {email.strip().lower() for email in attendees}
+            record["attendee_names"] = {email: name for email, name in attendee_names.items() if email in attendee_emails}
         self.store.cas("executions/" + execution, record, 0)
         from google.cloud import storage
         blob = storage.Client().bucket(os.environ["BOT_BUCKET"]).blob(prefix + "payload.json")

@@ -86,12 +86,56 @@ def connect(service):
 
 def test_shared_invitation_metadata_is_private_and_keeps_complete_roster():
     normalized = normalize_event("primary", event(iCalUID="invitation@example.com",
-        organizer={"email": "Organizer@Example.com"}), OWNER, NOW)
+        organizer={"email": "Organizer@Example.com", "displayName": "Céleste Roy"},
+        creator={"email": "creator@example.com", "displayName": "Unlisted Creator"},
+        attendees=[{"email": OWNER, "displayName": " Morgan Owner "},
+            {"email": "guest@example.com", "displayName": "Two\nLines"},
+            {"email": "empty@example.com", "displayName": " "},
+            {"email": "long@example.com", "displayName": "A" * 81},
+            {"email": "tag@example.com", "displayName": "<name>"}]), OWNER, NOW)
     assert normalized["ical_uid"] == "invitation@example.com"
     assert normalized["organizer_email"] == "organizer@example.com"
-    assert normalized["participant_roster"] == sorted([OWNER, "guest@example.com", "organizer@example.com"])
+    assert normalized["participant_roster"] == sorted([OWNER, "guest@example.com", "organizer@example.com",
+        "empty@example.com", "long@example.com", "tag@example.com"])
+    assert normalized["attendee_names"] == {OWNER: "Morgan Owner", "organizer@example.com": "Céleste Roy"}
     public = CalendarMeetings._public(normalized, OWNER)
-    assert all(key not in public for key in ("ical_uid", "organizer_email", "participant_roster"))
+    assert all(key not in public for key in ("ical_uid", "organizer_email", "participant_roster", "attendee_names"))
+
+
+def test_name_only_sync_retains_consent_and_freezes_active_occurrence(setup):
+    service, _, calendar, scheduler, _, clock = setup
+    raw = event(iCalUID="invitation@example.com")
+    raw["attendees"][1]["displayName"] = "Initial Name"
+    calendar.items["primary"] = [raw]
+    connect(service)
+    service.sync(CLAIMS)
+    task = scheduler.tasks[0]
+    clock["now"] = NOW + timedelta(minutes=10)
+    assert service.dispatch_callback(CLAIMS, task["event"], task["start"]) == "awaiting_consent"
+
+    raw["attendees"][1]["displayName"] = "Updated Name"
+    service.sync(CLAIMS)
+    state, _ = service._load(OWNER)
+    pending = state["events"][task["event"]]
+    assert pending["attendee_names"] == {"guest@example.com": "Updated Name"}
+    assert pending["status"] == "awaiting_consent" and len(scheduler.tasks) == 1
+
+    raw["attendees"][1].pop("displayName")
+    service.sync(CLAIMS)
+    state, _ = service._load(OWNER)
+    assert not state["events"][task["event"]].get("attendee_names")
+
+    raw["attendees"][1]["displayName"] = "Approved Name"
+    service.sync(CLAIMS)
+    raw["attendees"][1]["displayName"] = "Name After Sync"
+    assert service.approve(CLAIMS, task["event"])["status"] == "requesting_entry"
+    service.sync(CLAIMS)
+    state, _ = service._load(OWNER)
+    assert state["events"][task["event"]]["attendee_names"] == {"guest@example.com": "Approved Name"}
+    service.update_provider_status(CLAIMS, task["event"], "completed")
+    service.sync(CLAIMS)
+    state, _ = service._load(OWNER)
+    assert state["events"][task["event"]]["attendee_names"] == {"guest@example.com": "Approved Name"}
 
 
 @pytest.mark.parametrize("changes", [{"iCalUID": ""}, {"iCalUID": "x" * 1025},
@@ -103,6 +147,14 @@ def test_incomplete_or_invalid_invitation_identity_stays_owner_scoped(changes):
     raw.update(changes)
     normalized = normalize_event("primary", raw, OWNER, NOW)
     assert normalized and "ical_uid" not in normalized
+
+
+def test_owner_scoped_invitation_keeps_names_for_listed_attendees():
+    normalized = normalize_event("primary", event(attendeesOmitted=True,
+        organizer={"email": "organizer@example.com", "displayName": "Unlisted Organizer"},
+        attendees=[{"email": OWNER.upper(), "displayName": "Morgan Owner"}]), OWNER, NOW)
+    assert "participant_roster" not in normalized
+    assert normalized["attendee_names"] == {OWNER: "Morgan Owner"}
 
 
 def test_connect_is_explicit_before_calendar_reads_and_sync_dedupes(setup):

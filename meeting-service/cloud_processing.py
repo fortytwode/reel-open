@@ -75,7 +75,7 @@ def immutable_json(bucket, name, create):
 def process_step(store, execution, scheduler, *, clock=time.time):
     """Run one bounded stage. All identities and paths come from saved state."""
     from google.cloud import storage
-    from speech import transcribe_audio, summarize_text
+    from speech import attendee_keywords, transcribe_audio, summarize_text
     from canonical_delivery.app import GCSStateStore, calendar_service, deliver
     from canonical_delivery.providers import configured_providers
 
@@ -106,6 +106,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
         return record['processing_status']
     if record.get('processing_lease_until', 0) > clock():
         raise RuntimeError('Processing is already in progress')
+    attendee_names = record.get('attendee_names', event.get('attendee_names'))
     record['processing_lease_until'] = clock() + LEASE_SECONDS
     store.cas(key, record, generation)
     try:
@@ -126,7 +127,8 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                 # Match desktop: skip only exact digital silence, never quiet speech.
                 with wave.open(io.BytesIO(wav), 'rb') as stream:
                     pcm = stream.readframes(stream.getnframes())
-                result = transcribe_audio(wav, 'en', record['title'][:200], [], previous) if any(pcm) else {'text': ''}
+                result = (transcribe_audio(wav, 'en', record['title'][:200],
+                          attendee_keywords(record['attendees'], attendee_names), previous) if any(pcm) else {'text': ''})
                 text = result.get('text')
                 if not isinstance(text, str):
                     raise ValueError('Invalid transcript')
@@ -162,7 +164,8 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                 state_name = 'transcript_too_long' if len(text) > 200000 else 'processing'
             elif index == count + 1:
                 text = '\n'.join(segment['text'] for segment in segments)
-                summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: summarize_text(text, record['title'][:200], record['attendees']))
+                summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: summarize_text(
+                    text, record['title'][:200], record['attendees'], attendee_names=attendee_names))
                 # Old immutable summaries lack this decision; hold them for review.
                 from speech import acknowledgement_only
                 record['has_meeting_content'] = (False if acknowledgement_only(text) else
