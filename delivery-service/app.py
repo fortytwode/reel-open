@@ -1,11 +1,23 @@
 """Calendar identity and recipient rules for Reel delivery."""
+from collections import Counter
 from datetime import datetime, timezone
 from functools import partial
 from html import escape
+import logging
+import os
 import re
+import time
 from unicodedata import category
+from uuid import NAMESPACE_URL, uuid5
 
 from reel_organization import _safe_url, firebase_project, is_internal_email, notes_base_url, trusted_origins
+
+if __package__:
+    from .slack_recaps import SlackError, SlackRecaps
+else:
+    from slack_recaps import SlackError, SlackRecaps
+
+logger = logging.getLogger(__name__)
 
 
 class DeliveryError(Exception):
@@ -332,6 +344,38 @@ def recap_message(recipients, title, summary, notion_url, message_id):
     return message
 
 
+def slack_recap_message(title, summary, notes_url):
+    plain, _ = _recap_summary(summary)
+    sections = {'outcome': [], 'actions': []}
+    section = 'outcome'
+    for line in plain.splitlines():
+        line = line.strip()
+        label = line.rstrip(':').casefold()
+        if label in _NOTE_HEADINGS:
+            if label in {'outcome', 'summary', 'overview', 'meeting summary'}:
+                section = 'outcome'
+            elif label in {'action items', 'action item', 'actions', 'next steps', 'follow-ups'}:
+                section = 'actions'
+            else:
+                section = None
+        elif line and section:
+            sections[section].append(line)
+    heading = ' '.join(title.split())[:150] or 'Meeting notes'
+    blocks = [{'type': 'header', 'text': {'type': 'plain_text', 'text': heading}}]
+    for key, label, limit, lines in (
+        ('outcome', 'Outcome', 760, 4), ('actions', 'Action items', 720, 4),
+    ):
+        preview = '\n'.join(sections[key][:lines])
+        if preview:
+            if len(preview) > limit:
+                preview = preview[:limit - 1].rstrip() + '…'
+            blocks.append({'type': 'section', 'text': {'type': 'plain_text', 'text': f'{label}\n{preview}'}})
+    blocks.append({'type': 'section', 'text': {
+        'type': 'mrkdwn', 'verbatim': True, 'text': f'<{escape(notes_url, quote=False)}|Open in Reel>',
+    }})
+    return {'text': f'Reel meeting notes are ready: {heading}\n{notes_url}', 'blocks': blocks}
+
+
 def _supported_link(value):
     from urllib.parse import urlsplit
     try:
@@ -389,13 +433,15 @@ def verify_firebase(token):
     return id_token.verify_firebase_token(token, Request(), audience=project)
 
 
-def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service, *, store=None, providers=None, clock=None):
+def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service, *, store=None, providers=None, clock=None, slack=None):
     from flask import Flask, jsonify, request, g
-    import time
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
     clock = clock or time.time
     dependencies = {}
+    slack_token = os.getenv('REEL_SLACK_BOT_TOKEN', '').strip()
+    if slack is None and slack_token:
+        slack = SlackRecaps(slack_token)
 
     @app.after_request
     def cors(response):
@@ -487,7 +533,8 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
                     from providers import configured_providers
                 dependencies['providers'] = providers if providers is not None else configured_providers(store=note_store())
             note_store()
-            receipt = deliver(payload, email, dependencies['store'], dependencies['providers'], calendar_factory, clock, deadline=g.delivery_deadline)
+            receipt = deliver(payload, email, dependencies['store'], dependencies['providers'], calendar_factory, clock,
+                              deadline=g.delivery_deadline, slack=slack)
             return jsonify(receipt)
         except DeliveryError as exc:
             return jsonify(error=str(exc), retryable=exc.status in (409, 503)), exc.status
@@ -793,8 +840,8 @@ class ProviderRejected(ProviderPending):
         self.retry_after = retry_after
 
 
-def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None):
-    """Notion first, verified routing second, durable Gmail outbox last."""
+def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None, *, slack=None):
+    """File and share verified notes, then deliver the recap."""
     recording_id, content_hash = validate_payload(payload)
     deadline = deadline or clock() + 570  # Gunicorn kills the synchronous worker at 600s.
     if payload['calendar'] is None:
@@ -1001,6 +1048,13 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 state = save(email=email, email_create_uncertain=False)
             receipt = {'verified':True, 'page_id':page['page_id'], 'url':page['url'], 'recipients':recipients, 'email_status':'confirmed', 'route':route['kind'], 'suppressed_duplicate':False, 'notes_url':notes_url}
             save(receipt=receipt)
+            if slack is not None and notes_url:
+                try:
+                    outcome = send_slack_recaps(slack, note, state, save, fence, clock, deadline)
+                    receipt = {**receipt, 'slack': outcome}
+                    save(receipt=receipt)
+                except Exception:
+                    logger.warning('Reel Slack recap interrupted (%s)', meeting_id)
             return receipt
     finally:
         # A failed request releases only its own lease. A crashed/killed worker
@@ -1014,3 +1068,68 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                     state[field] = max(state[field], clock() + 60)
             state['lease_until'] = clock()
             store.cas(key, state, generation)
+
+
+def send_slack_recaps(slack, note, state, save, fence, clock, deadline):
+    """Use the note's existing access list and checkpoint each optional DM."""
+    def request(operation, *args):
+        fence()
+        try:
+            return operation(*args)
+        except SlackError as exc:
+            if exc.uncertain or exc.code not in {'ratelimited', 'rate_limited'} or not 0 < exc.retry_after <= 2:
+                raise
+            time.sleep(exc.retry_after)
+            fence()
+            return operation(*args)
+
+    message = slack_recap_message(note['title'], note['summary'], note['notes_url'])
+    results = dict(state.get('slack_dms', {}))
+    counts = Counter()
+    recipients = note['recipients']
+    for index, email in enumerate(recipients):
+        if deadline - clock() < 90:
+            counts['not_attempted'] += len(recipients) - index
+            break
+        if not is_internal_email(email):
+            counts['unmatched'] += 1
+            continue
+        fence()
+        previous = results.get(email, {})
+        status = previous.get('status')
+        if status and status != 'posting':
+            counts[status] += 1
+            continue
+        client_msg_id = str(uuid5(NAMESPACE_URL, f"reel:slack:{note['id']}:{email}"))
+        timestamp = None
+        try:
+            if not status:
+                channel = request(slack.resolve_dm, email)
+                if channel:
+                    previous = {'status': 'posting', 'channel': channel, 'started_at': clock()}
+                    results[email] = previous
+                    save(slack_dms=results)
+                    status = 'posting'
+                    timestamp = request(slack.post_dm, channel, message, client_msg_id)
+                else:
+                    status = 'unmatched'
+        except SlackError as exc:
+            logger.warning('Reel Slack recap request failed (%s)', exc.code)
+            if status != 'posting' or not exc.uncertain:
+                status = 'failed'
+        if status == 'posting' and not timestamp:
+            fence()
+            try:
+                timestamp = slack.find_dm(previous['channel'], client_msg_id, max(0, previous['started_at'] - 5))
+            except SlackError as exc:
+                logger.warning('Reel Slack recap readback failed (%s)', exc.code)
+        if timestamp:
+            status = 'sent'
+        elif status == 'posting':
+            status = 'unconfirmed'
+        results[email] = {'status': status, **({'ts': timestamp} if timestamp else {})}
+        save(slack_dms=results)
+        counts[status] += 1
+    if any(counts[name] for name in ('failed', 'not_attempted', 'unconfirmed')):
+        logger.warning('Reel Slack recap incomplete (%s): %s', note['id'], dict(counts))
+    return dict(counts)
