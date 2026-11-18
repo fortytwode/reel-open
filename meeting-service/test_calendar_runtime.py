@@ -276,8 +276,9 @@ def test_dispatcher_emits_teams_compatible_display_name(monkeypatch, hybrid, eve
     event = {"id": "qa-event", "title": "QA meeting", "start": dispatch_now.isoformat(),
              "end": (dispatch_now + timedelta(minutes=event_minutes)).isoformat(),
              "join_url": "https://teams.microsoft.com/l/meetup-join/qa/0", "attendees": [owner], "calendar_id": "primary", "attempted": True, "status": "dispatching"}
+    saved_event = dict(event, attendee_names={owner: "Meeting Owner", "unlisted@example.com": "Unlisted Name"})
     store.cas("calendar/" + runtime.digest(owner), {
-        "identity": {"owner_uid": owner_uid}, "config": {"enabled": True, "calendar_ids": ["primary"]}, "events": {event["id"]: event}}, 0)
+        "identity": {"owner_uid": owner_uid}, "config": {"enabled": True, "calendar_ids": ["primary"]}, "events": {event["id"]: saved_event}}, 0)
     uploaded = []
 
     class Blob:
@@ -307,6 +308,9 @@ def test_dispatcher_emits_teams_compatible_display_name(monkeypatch, hybrid, eve
 
     assert uploaded[0]["capture_deadline"] == (dispatch_now + timedelta(minutes=min(event_minutes + 5, 180))).isoformat()
     assert uploaded[0]["max_duration_seconds"] == min((event_minutes + 5) * 60, 10800)
+    assert "attendee_names" not in uploaded[0]
+    record, _ = store.load("executions/" + uploaded[0]["execution_id"])
+    assert record["attendee_names"] == {owner: "Meeting Owner"}
     display_name = uploaded[0]["display_name"]
     assert display_name == "Reel Notetaker - recording"
     assert re.fullmatch(r"[A-Za-z0-9 '._@-]+", display_name)
@@ -589,13 +593,14 @@ def shared_calendar(setup, monkeypatch, *, difference=None, uncertain=False, pil
     items = {}
     for index, owner in enumerate(owners):
         item = {"id": "copy-" + str(index), "iCalUID": "invitation@example.com", "summary": "Shared meeting",
-                "organizer": {"email": owners[0]},
+                "organizer": {"email": owners[0], "displayName": "Meeting Organizer"},
                 "attendees": [{"email": email, "responseStatus": "accepted"} for email in owners],
                 "start": {"dateTime": (now - timedelta(seconds=1)).isoformat()},
                 "end": {"dateTime": (now + timedelta(minutes=30)).isoformat()},
                 "hangoutLink": ("https://meet.google.com/abc-defg-hij" if pilot == "google_meet"
                                  else "https://teams.microsoft.com/meet/123456789")
                                  + ("/?p=second" if index else "?p=first")}
+        item["attendees"][1]["displayName"] = f"Guest Name {index}"
         if index == 1:
             if difference == "uid": item["iCalUID"] = "private-invitation@example.com"
             if difference == "organizer": item["organizer"] = {"email": owners[2]}
@@ -653,6 +658,7 @@ def test_shared_invitation_three_owners_launch_once_with_absent_attendee(setup, 
     assert len(launches) == 1
     records = [value[0] for key, value in store.data.items() if key.startswith("executions/")]
     assert len(records) == 1 and set(records[0]["attendees"]) == set(owners)
+    assert records[0]["attendee_names"] == {owners[0]: "Meeting Organizer", owners[1]: "Guest Name 0"}
     claims = [value[0] for key, value in store.data.items() if key.startswith("sharedcapture/")]
     assert len(claims) == 1 and claims[0]["capture_deadline"]
     for owner in owners:

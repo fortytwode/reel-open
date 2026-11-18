@@ -141,9 +141,9 @@ def normalize_event(calendar_id, event, owner_email, now=None):
     owner = owner_email.lower()
     attendees = event.get("attendees", [])
     owner_attendee = next((x for x in attendees if str(x.get("email", "")).lower() == owner), None)
-    organizer = str(event.get("organizer", {}).get("email", "")).lower() == owner
+    organizer = event.get("organizer", {})
     creator = str(event.get("creator", {}).get("email", "")).lower() == owner
-    if not (organizer or creator or owner_attendee is not None):
+    if not (str(organizer.get("email", "")).lower() == owner or creator or owner_attendee is not None):
         return None
     if owner_attendee and owner_attendee.get("responseStatus") == "declined":
         return None
@@ -177,7 +177,7 @@ def normalize_event(calendar_id, event, owner_email, now=None):
             "join_url": url, "passcode": passcode, "status": "scheduled",
             "attempted": False, "task_name": ""}
     uid = event.get("iCalUID")
-    organizer_email = str(event.get("organizer", {}).get("email", "")).strip().lower()
+    organizer_email = str(organizer.get("email", "")).strip().lower()
     roster = {owner.strip(), organizer_email, *(str(x.get("email", "")).strip().lower() for x in attendees)}
     if (isinstance(uid, str) and 0 < len(uid) <= 1024 and uid.strip() == uid
             and not any(ord(c) < 32 or ord(c) == 127 for c in uid)
@@ -185,6 +185,18 @@ def normalize_event(calendar_id, event, owner_email, now=None):
             and all(0 < len(email) <= 320 and
                 re.fullmatch(r"[^@\s<>]+@[^@\s<>]+", email) for email in roster)):
         normalized.update(ical_uid=uid, organizer_email=organizer_email, participant_roster=sorted(roster))
+    roster_emails = {email.strip().lower() for email in normalized.get("participant_roster", normalized["attendees"])}
+    attendee_names = {}
+    for participant in (*attendees[:100], organizer):
+        email = str(participant.get("email", "")).strip().lower()
+        name = participant.get("displayName")
+        if not isinstance(name, str) or re.search(r"[\x00-\x1f\x7f-\x9f<>\u2028\u2029]", name):
+            continue
+        name = name.strip()
+        if 0 < len(name) <= 80 and email in roster_emails and re.fullmatch(r"[^@\s<>]+@[^@\s<>]+", email):
+            attendee_names.setdefault(email, name)
+    if attendee_names:
+        normalized["attendee_names"] = attendee_names
     return normalized
 
 
@@ -343,6 +355,10 @@ class CalendarMeetings:
                 if changed:
                     new["status"] = "scheduled"
                     existing[identity] = new
+                elif "attendee_names" in new:
+                    old["attendee_names"] = new["attendee_names"]
+                else:
+                    old.pop("attendee_names", None)
                 current_event = existing.get(identity)
                 if current_event and current_event.get("status") == "scheduled" and not current_event.get("task_name"):
                     scheduled.append((identity, current_event["start"]))

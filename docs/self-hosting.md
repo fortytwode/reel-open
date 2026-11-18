@@ -35,6 +35,10 @@ Build and deploy the [meeting API](../meeting-service/README.md) and [optional d
 
 The generated backend settings enable meeting access for every verified account in your configured email domain. With `MEETING_CLOUD_PROVIDERS=google_meet,teams` and the cloud worker configured, both providers are available throughout that domain. Remove optional cloud-owner pilot lists when opening the service to the whole organization. Each person then signs in to the browser recorder, opens Calendar, connects Google Calendar and chooses per-meeting approval or confirms standing participant consent. Merely downloading an app does not enroll their calendar. Domain-wide availability preserves private meeting-note access for the invited participants.
 
+Meeting notes use a short outcome, topic bullets, decisions, actions and open questions. Calendar display names and email local parts provide spelling hints; being invited does not identify a voice. An action owner must match one invited person and be named in a supporting transcript excerpt. Otherwise the notes mark the owner unconfirmed. The original transcript remains available, including recognition errors.
+
+Automatic owner confirmation currently recognizes conservative English assignment phrasing. Other wording and languages can leave an owner unconfirmed even when the transcript contains their name. Notes and action text remain generated summaries, so retain the transcript for verification.
+
 For unattended recording, provision a Cloud Run Job, private GCS storage and Cloud Tasks for the [cloud worker](../meeting-bot/README.md). Start with an explicit owner and provider scope. Google Meet can use a dedicated Workspace bot account signed into official Google Chrome. The operator saves Playwright browser state to a private GCS object and the worker verifies the expected signed-in account before requesting admission. Meeting policy, consent and host admission still apply.
 
 ## Export a clean source snapshot

@@ -50,7 +50,7 @@ def setup(monkeypatch):
     bucket, store, tasks, deliveries = Bucket(), FakeStore(), [], []
     monkeypatch.setattr(google.cloud.storage, 'Client', lambda: types.SimpleNamespace(bucket=lambda _: bucket))
     monkeypatch.setattr(speech, 'transcribe_audio', lambda *args: {'text': 'A clear decision'})
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args: {'summary': 'The decision', 'has_meeting_content': True})
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: {'summary': 'The decision', 'has_meeting_content': True})
     package = types.ModuleType('canonical_delivery')
     package.__path__ = []
     app = types.ModuleType('canonical_delivery.app')
@@ -100,10 +100,51 @@ def test_completed_execution_uses_immutable_transcript_summary_and_calendar_refe
     assert len(tasks) == 3
 
 
+@pytest.mark.parametrize('source, expected_name', [
+    ('record', 'Recorded Name'), ('event', 'Calendar Name'), ('legacy', None),
+])
+def test_attendee_hints_use_execution_snapshot_or_legacy_calendar_context(setup, monkeypatch, source, expected_name):
+    import speech
+
+    store, _, record, _, _, deliveries = setup
+    owner = record['owner_email']
+    if source != 'legacy':
+        key = 'calendar/' + digest(owner)
+        state, generation = store.load(key)
+        state['events'][record['event_id']]['attendee_names'] = {owner: 'Calendar Name'}
+        store.cas(key, state, generation)
+    if source == 'record':
+        key = 'executions/' + record['execution_id']
+        saved, generation = store.load(key)
+        saved['attendee_names'] = {owner: 'Recorded Name'}
+        store.cas(key, saved, generation)
+    keywords, summary_calls = [], []
+
+    def transcribe(wav, language, title, hints, previous):
+        keywords.extend(hints)
+        return {'text': 'A clear decision'}
+
+    def summarize(text, title, attendees, *, attendee_names):
+        summary_calls.append((attendees, attendee_names))
+        return {'summary': 'The decision', 'has_meeting_content': True}
+
+    monkeypatch.setattr(speech, 'transcribe_audio', transcribe)
+    monkeypatch.setattr(speech, 'summarize_text', summarize)
+    assert run(setup) == 'processing'
+    assert run(setup) == 'processing'
+    assert run(setup) == 'processing'
+    assert run(setup) == 'delivered'
+    expected = {owner: expected_name} if expected_name else None
+    assert summary_calls == [([owner], expected)]
+    assert keywords == speech.attendee_keywords([owner], expected)
+    assert keywords
+    assert 'attendee_names' not in deliveries[0][0]
+
+
 def test_empty_speech_never_summarizes_or_delivers(setup, monkeypatch):
     import speech
     monkeypatch.setattr(speech, 'transcribe_audio', lambda *args: {'text': ''})
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args: pytest.fail('must not summarize silence'))
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: pytest.fail('must not summarize silence'))
     assert run(setup) == 'processing'
     assert run(setup) == 'no_speech'
     assert setup[-1] == []
@@ -151,7 +192,7 @@ def test_delivery_retry_reuses_identical_summary(setup, monkeypatch):
     monkeypatch.setattr(delivery_app, 'deliver', failing)
     with pytest.raises(RuntimeError):
         run(setup)
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args: pytest.fail('summary must not be regenerated'))
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: pytest.fail('summary must not be regenerated'))
     monkeypatch.setattr(delivery_app, 'deliver', lambda payload, *a, **k: calls.append(payload) or {'url': 'https://notes'})
     store, _, record, scheduler, _, _ = setup
     assert processing.process_step(store, record['execution_id'], scheduler, clock=lambda: 1000) == 'delivered'
@@ -220,7 +261,7 @@ def test_oversized_transcript_is_downloadable_without_summary_or_delivery(setup,
     import speech
     store, bucket, record, _, _, deliveries = setup
     monkeypatch.setattr(speech, 'transcribe_audio', lambda *args: {'text': 'x' * 200001})
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args: pytest.fail('oversized transcript must not summarize'))
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: pytest.fail('oversized transcript must not summarize'))
     assert run(setup) == 'processing'
     assert run(setup) == 'transcript_too_long'
     saved, _ = store.load('executions/' + record['execution_id'])
@@ -303,7 +344,7 @@ def test_review_required_preserves_transcript_and_never_delivers_or_requeues(set
     from calendar_runtime import enqueue_processing
     store, bucket, record, scheduler, tasks, deliveries = setup
     calls = []
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args: calls.append(1) or {'summary': '', 'has_meeting_content': False})
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: calls.append(1) or {'summary': '', 'has_meeting_content': False})
     assert run(setup) == 'processing'
     assert run(setup) == 'processing'
     assert run(setup) == 'review_required'
@@ -345,7 +386,7 @@ def test_cached_acknowledgement_summary_is_held_for_review(setup, monkeypatch):
     import speech
     store, bucket, record, _, _, deliveries = setup
     monkeypatch.setattr(speech, 'transcribe_audio', lambda *args: {'text': 'Okay.'})
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args: {'summary': 'Acknowledged.', 'has_meeting_content': True})
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: {'summary': 'Acknowledged.', 'has_meeting_content': True})
     assert run(setup) == 'processing'
     assert run(setup) == 'processing'
     assert run(setup) == 'review_required'
@@ -361,7 +402,7 @@ def test_cached_acknowledgement_cannot_deliver_from_later_step(setup, monkeypatc
     import speech
     store, bucket, record, _, _, deliveries = setup
     monkeypatch.setattr(speech, 'transcribe_audio', lambda *args: {'text': 'Okay.'})
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args: {'summary': 'Acknowledged.', 'has_meeting_content': True})
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: {'summary': 'Acknowledged.', 'has_meeting_content': True})
     assert run(setup) == 'processing'
     assert run(setup) == 'processing'
     name = record['output_prefix'] + 'processing/summary.json'

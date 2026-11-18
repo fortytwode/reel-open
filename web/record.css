@@ -87,3 +87,4 @@ button:focus-visible,a:focus-visible,summary:focus-visible,select:focus-visible 
 #meeting-setup input:not([type=checkbox]) { display: block; width: 100%; box-sizing: border-box; margin-top: 5px; }
 #meeting-notes-dialog { width: min(760px, 90vw); max-height: 85vh; overflow: auto; }
 .meeting-transcript { white-space: pre-wrap; max-height: 40vh; overflow: auto; font: inherit; padding: 12px; background: #f4f5f7; }
+#meeting-summary { white-space: pre-wrap; }
