@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import wave
 
 import captions
+import providers
 import test_capture_deadline
 from worker import Run
 
@@ -211,6 +212,84 @@ class CaptionUploadTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('REEL_BROWSER_CAPTION_FIXTURES') == '1', 'requires Chromium')
 class BrowserCaptionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_consent_notices_preserve_whitespace_normalization(self):
+        from playwright.async_api import async_playwright
+        notices = [('<div style="white-space: pre-line">Taking\nnotes</div>'),
+                   ('<div style="white-space: pre">Taking  notes</div>'),
+                   ('<span>Take notes</span> <br><span>for me</span>')]
+        ffmpeg = MagicMock()
+        ffmpeg.poll.return_value = None
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                for role in ('dialog', 'alertdialog'):
+                    for notice in notices:
+                        with self.subTest(role=role, notice=notice):
+                            await page.set_content(f'<button aria-label="Present now"></button><div role="{role}">{notice}</div>')
+                            self.assertTrue((await providers.observe(page, 'meet'))['consent_gate'])
+                            with self.assertRaisesRegex(RuntimeError, '^meeting_access_lost$'):
+                                await providers.monitor(page, 'meet', 60, lambda: False, ffmpeg)
+            finally:
+                await browser.close()
+
+    async def test_spoken_status_phrases_do_not_interrupt_the_recording(self):
+        from playwright.async_api import async_playwright
+
+        fixtures = {
+            'meet': ('role="region" aria-label="Captions"', '<button aria-label="Present now"></button>'),
+            'teams': ('data-tid="closed-caption-renderer-wrapper" aria-label="Live Captions"',
+                      '<button data-tid="hangup-main-btn"></button>'),
+        }
+        ffmpeg = MagicMock()
+        ffmpeg.poll.return_value = None
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page()
+                for provider, (caption_attributes, controls) in fixtures.items():
+                    with self.subTest(provider=provider):
+                        await page.set_content(f"""{controls}
+                            <div role="dialog"><div {caption_attributes}>
+                                <div role="dialog">Meeting ended. Sign in to join. Request to join was denied. Taking notes.</div>
+                            </div></div>
+                            <div role="alertdialog" id="consent">
+                            </div>
+                            <div style="display: none">Sign in to join</div>
+                            <div style="visibility: hidden">Meeting ended. Access denied.</div>
+                            <div id="status"></div>""")
+                        raw_text = await providers.body_text(page)
+                        self.assertIn('Meeting ended. Sign in to join. Request to join was denied.', raw_text)
+                        state = await providers.observe(page, provider)
+                        self.assertTrue(state['in_call'])
+                        self.assertFalse(state['blocked'])
+                        self.assertFalse(state['denied'])
+                        self.assertFalse(state['consent_gate'])
+
+                        stopped = MagicMock(side_effect=(False, True, True))
+                        with patch.object(page, 'wait_for_timeout', AsyncMock()) as wait:
+                            self.assertEqual(await providers.monitor(page, provider, 60, stopped, ffmpeg),
+                                             'execution_stopped')
+                            wait.assert_awaited_once()
+
+                        for status, expected in [('<span>Sign in</span> <span>to join</span>', 'blocked'),
+                                                 ('<span>Request to join</span> <span>was denied</span>', 'denied')]:
+                            await page.locator('#status').evaluate('(node, html) => node.innerHTML = html', status)
+                            self.assertTrue((await providers.observe(page, provider))[expected])
+                            with self.assertRaisesRegex(RuntimeError, '^meeting_access_lost$'):
+                                await providers.monitor(page, provider, 60, lambda: False, ffmpeg)
+
+                        await page.locator('#status').evaluate("node => node.innerHTML = '<span>Meeting</span> ended'")
+                        self.assertEqual(await providers.monitor(page, provider, 60, lambda: False, ffmpeg),
+                                         'meeting_ended')
+                        await page.locator('#status').evaluate("node => node.textContent = ''")
+                        await page.locator('#consent').evaluate("node => node.textContent = 'Taking notes'")
+                        self.assertTrue((await providers.observe(page, provider))['consent_gate'])
+                        with self.assertRaisesRegex(RuntimeError, '^meeting_access_lost$'):
+                            await providers.monitor(page, provider, 60, lambda: False, ffmpeg)
+            finally:
+                await browser.close()
+
     async def test_locally_fulfilled_teams_uses_caption_spans_inside_each_author_group(self):
         from playwright.async_api import async_playwright
 

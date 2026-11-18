@@ -26,6 +26,29 @@ WAITING = {
 }
 ENDED = re.compile(r"you[’']ve been removed|you have been removed|removed from (?:the |this )?meeting|meeting (?:has )?ended|call ended|you left the meeting|ended by (?:the )?host", re.I)
 
+CONTROL_TEXT = """(body, captionRoots) => {
+    if (body.closest(captionRoots)) return '';
+    if (!body.querySelector(captionRoots)) return body.innerText;
+
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                return node.matches(captionRoots) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+            }
+            return NodeFilter.FILTER_ACCEPT;
+        }
+    });
+    const range = document.createRange();
+    const rendered = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const value = node.textContent.trim();
+        if (!value || getComputedStyle(node.parentElement).visibility !== 'visible') continue;
+        range.selectNodeContents(node);
+        if (range.getClientRects().length) rendered.push(value);
+    }
+    return rendered.join(' ');
+}"""
+
 
 async def visible(page, selectors):
     for frame in page.frames:
@@ -78,18 +101,37 @@ async def fill_first(page, selectors, value):
     return False
 
 
-async def body_text(page):
+def caption_roots():
+    from browser_captions import SELECTORS
+    return ','.join(config['root'] for config in SELECTORS.values())
+
+
+async def body_text(page, *, ignore_captions=False):
     texts = []
     for frame in page.frames:
         try:
-            texts.append(await frame.locator('body').inner_text(timeout=1500))
+            body = frame.locator('body')
+            if ignore_captions:
+                texts.append(await body.evaluate(CONTROL_TEXT, caption_roots(), timeout=1500))
+            else:
+                texts.append(await body.inner_text(timeout=1500))
         except Exception:
             pass
     return '\n'.join(texts)
 
 
+async def notes_consent_gate(page):
+    for frame in page.frames:
+        for dialog in await frame.locator('[role="dialog"], [role="alertdialog"]').all():
+            if await dialog.is_visible():
+                text = await dialog.evaluate(CONTROL_TEXT, caption_roots(), timeout=1500)
+                if re.search(r'take notes for me|taking notes', ' '.join(text.split()), re.I):
+                    return True
+    return False
+
+
 async def observe(page, provider):
-    text = await body_text(page)
+    text = await body_text(page, ignore_captions=True)
     host = urlsplit(page.url).hostname or ''
     blocked = bool(BLOCKED.search(text)) or host in {'accounts.google.com', 'login.microsoftonline.com', 'login.live.com'}
     captcha_selectors = ['iframe[src*="recaptcha"][title*="challenge" i]',
@@ -101,7 +143,7 @@ async def observe(page, provider):
     if provider != 'meet':
         captcha_selectors.append('iframe[title*="reCAPTCHA"]')
     blocked = blocked or await visible(page, captcha_selectors)
-    gate = await visible(page, ['[role="dialog"]:has-text("take notes for me")', '[role="alertdialog"]:has-text("take notes for me")', '[role="dialog"]:has-text("taking notes")'])
+    gate = await notes_consent_gate(page)
     selectors = {
         'meet': ['[data-participant-id]', '[data-self-name]', 'button[aria-label*="Present now"]', 'button[aria-label*="Share screen"]'],
         'teams': ['button#hangup-button', 'button[data-tid="hangup-main-btn"]'],
@@ -207,7 +249,7 @@ async def monitor(page, provider, duration, stopped, ffmpeg):
     while not stopped() and time.monotonic() - started < duration:
         if ffmpeg.poll() is not None:
             raise RuntimeError('recorder_exited')
-        text = await body_text(page)
+        text = await body_text(page, ignore_captions=True)
         if ENDED.search(text):
             return 'meeting_ended'
         state = await observe(page, provider)
