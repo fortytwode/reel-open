@@ -12,6 +12,34 @@ CHUNK_SECONDS = 300
 LEASE_SECONDS = 660
 
 
+def caption_context(bucket, record, duration):
+    """Read only the generation bound by the authenticated worker callback."""
+    from speaker_alignment import validate_caption_artifact
+    generation = record.get('captions_generation')
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+        return None
+    try:
+        blob = bucket.blob(record['output_prefix'] + 'captions.json')
+        blob.reload(timeout=15)
+        if int(blob.generation) != generation or not 0 < int(blob.size) <= 2 * 1024 * 1024:
+            return None
+        value = json.loads(blob.download_as_bytes(if_generation_match=generation, timeout=20))
+        return validate_caption_artifact(value, record['execution_id'], record.get('provider'), duration)
+    except Exception:
+        # Missing, invalid or unavailable captions do not discard the recording.
+        return None
+
+
+def attributed_transcript(segments, captions):
+    from speaker_alignment import align_speakers
+    transcript = align_speakers(segments, captions)
+    if transcript['segments']:
+        transcript['segments'] = list(transcript['segments'])
+        transcript['segments'][0] = {**transcript['segments'][0],
+            'speaker_attribution': transcript['speaker_attribution'], 'speaker_coverage': transcript['speaker_coverage']}
+    return transcript
+
+
 def audio_layout(blob, generation):
     blob.reload(timeout=30)
     if int(blob.generation) != generation:
@@ -148,10 +176,10 @@ def process_step(store, execution, scheduler, *, clock=time.time):
             if not segments:
                 state_name = 'no_speech'
             elif index == count:
-                text = '\n'.join(segment['text'] for segment in segments)
-                immutable_json(bucket, prefix + 'transcript.json', lambda: {'schema_version': 1,
-                    'model': 'OpenAI', 'speaker_attribution': 'unavailable', 'segments': segments,
-                    'text': text})
+                from speaker_alignment import transcript_text
+                transcript = immutable_json(bucket, prefix + 'transcript.json', lambda: attributed_transcript(
+                    segments, caption_context(bucket, record, size / 32000)))
+                text = transcript_text(transcript['segments'])
                 text_blob = bucket.blob(prefix + 'transcript.txt')
                 try:
                     text_blob.upload_from_string(text, content_type='text/plain', if_generation_match=0, timeout=30)
@@ -161,11 +189,14 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                     if existing != text.encode('utf-8'):
                         raise ValueError('Saved transcript differs')
                 record['transcript_available'] = True
-                state_name = 'transcript_too_long' if len(text) > 200000 else 'processing'
+                state_name = 'transcript_too_long' if len(transcript['text']) > 200000 else 'processing'
             elif index == count + 1:
+                transcript = immutable_json(bucket, prefix + 'transcript.json', lambda: (_ for _ in ()).throw(ValueError('Transcript unavailable')))
                 text = '\n'.join(segment['text'] for segment in segments)
+                speaker_context = ({'speaker_turns': transcript['segments']}
+                    if transcript.get('speaker_attribution') in ('platform_captions', 'partial') else {})
                 summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: summarize_text(
-                    text, record['title'][:200], record['attendees'], attendee_names=attendee_names))
+                    text, record['title'][:200], record['attendees'], attendee_names=attendee_names, **speaker_context))
                 # Old immutable summaries lack this decision; hold them for review.
                 from speech import acknowledgement_only
                 record['has_meeting_content'] = (False if acknowledgement_only(text) else
@@ -177,6 +208,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                 else:
                     state_name = 'review_required'
             else:
+                transcript = immutable_json(bucket, prefix + 'transcript.json', lambda: (_ for _ in ()).throw(ValueError('Transcript unavailable')))
                 summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: (_ for _ in ()).throw(ValueError('Summary unavailable')))
                 from speech import acknowledgement_only
                 if summary.get('has_meeting_content') is not True or acknowledgement_only('\n'.join(segment['text'] for segment in segments)):
@@ -185,7 +217,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                     state_name = 'review_required'
                 else:
                     payload = {'id': record['meeting_id'], 'title': record['title'], 'started_at': record['started_at'],
-                               'attendees': record['attendees'], 'summary': summary['summary'], 'segments': segments,
+                               'attendees': record['attendees'], 'summary': summary['summary'], 'segments': transcript['segments'],
                                'calendar': None if manual else {'legacy_occurrence_id': event_id, 'occurrence_start': record['started_at']}}
                     delivery_store = GCSStateStore(os.environ['DELIVERY_RECEIPTS_BUCKET'])
                     receipt = deliver(payload, owner, delivery_store,

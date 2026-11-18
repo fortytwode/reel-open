@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from functools import partial
 import re
+from unicodedata import category
 
 from reel_organization import _safe_url, firebase_project, is_internal_email, notes_base_url, trusted_origins
 
@@ -421,6 +422,35 @@ def validate_payload(payload):
     return recording_id, hashlib.sha256(encoded).hexdigest()
 
 
+def format_transcript(segments):
+    statuses = {
+        'unavailable': 'Speaker identification unavailable for this recording.',
+        'partial': 'Speaker identification is partial. Names are platform display labels. Timings are approximate.',
+        'platform_captions': 'Speaker identification uses platform captions. Names are platform display labels. Timings are approximate.',
+    }
+    first = segments[0] if segments else {}
+    attribution, coverage = first.get('speaker_attribution'), first.get('speaker_coverage')
+    status = ''
+    if (isinstance(attribution, str) and isinstance(coverage, (int, float))
+            and not isinstance(coverage, bool) and 0 <= coverage <= 1):
+        status = statuses.get(attribution, '')
+    labels = []
+    for segment in segments:
+        name = segment.get('speaker_name')
+        if (not (status and attribution == 'unavailable')
+                and segment.get('speaker_source') in ('google_meet_caption', 'teams_caption')
+                and segment.get('speaker_match') == 'caption_text_match'
+                and isinstance(name, str) and len(name) <= 120
+                and not any(category(char) in ('Cc', 'Cf', 'Zl', 'Zp') for char in name)):
+            labels.append(name.strip())
+        else:
+            labels.append('')
+    if not status and not any(labels):
+        return '\n'.join(segment['text'] for segment in segments)
+    transcript = '\n'.join(f"{label or 'Speaker unknown'}: {segment['text'].strip()}" for label, segment in zip(labels, segments))
+    return f'{status}\n\n{transcript}' if status else transcript
+
+
 class GCSStateStore:
     """GCS JSON API receipts, guarded by object generation preconditions."""
     def __init__(self, bucket, prefix='delivery'):
@@ -725,7 +755,7 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 state = save(recipients=recipients, attendees=attendees, title=title)
             recipients, attendees, title = state['recipients'], state['attendees'], state['title']
             delivery_payload = {**payload, 'title':title}
-            transcript = '\n'.join(item['text'] for item in payload['segments'])
+            transcript = format_transcript(payload['segments'])
             meeting_id = 'reel_' + digest_key(*identity)
             notes_url = state.get('notes_url')
             if 'notes_url' in state:

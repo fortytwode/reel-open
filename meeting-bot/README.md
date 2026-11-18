@@ -35,6 +35,8 @@ Recording and admission limits are 1–10,800 and 1–900 seconds, respectively.
 
 Guest restrictions, provider UI changes, lobby policies and CAPTCHA can prevent entry. The supported cloud pilot scopes in the calendar API are Google Meet and Microsoft Teams. `BOT_DIAGNOSTICS=1` saves viewport snapshots and body text under the private execution's `debug/` prefix for authorized tests. Those files can contain visible meeting information.
 
+The worker attempts to enable native live captions after admission and saves bounded speaker/text observations to `captions.json` under the same private execution prefix. Captions follow the platform's availability and meeting policy. Missing controls, missing names, provider changes or capture limits produce an explicit unavailable or partial result while audio recording continues. Caption names are kept as displayed, including presentation labels; participant tiles and calendar order are never used to guess a speaker. Only ordinary media notices with known text can be dismissed automatically. Admission, security and consent gates remain in force.
+
 ## Dedicated Google Meet account
 
 Set the worker's `BOT_GOOGLE_AUTH_STATE_URI` to a private `gs://BUCKET/reel-bot-auth/google/…` JSON object and set `BOT_GOOGLE_ACCOUNT_EMAIL` to the matching, dedicated Workspace account. The object contains `schema_version: 1`, `account_email` and a Playwright `storage_state` with cookies and origins. The worker reads a fixed object generation, restores state and checks a visible matching Google account indicator before requesting entry. Missing, expired or mismatched state stops the run. Protect this state as a credential.
@@ -50,4 +52,10 @@ cd meeting-bot
 python3 -m unittest discover -s tests -v
 ```
 
-With Playwright and Chromium installed, run `PYTHONPATH=. python3 tests/browser_meet_controls.py` for the isolated Meet control fixtures.
+With Playwright and Chromium installed, run the caption tests including the browser fixtures with:
+
+```sh
+REEL_BROWSER_CAPTION_FIXTURES=1 python3 -m unittest discover -s tests -p test_captions.py -v
+```
+
+Run `PYTHONPATH=. python3 tests/browser_meet_controls.py` for the isolated Meet control fixtures.
