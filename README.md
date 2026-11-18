@@ -21,6 +21,8 @@ python3 -m http.server 8000 --bind 127.0.0.1 --directory web
 
 ## Deploy to your organization
 
+Anyone can self-host the same Reel code with their own organization domain, accounts, infrastructure and private credentials. No Rocketship account or infrastructure is required. Shared features and fixes belong in this public repository; each deployment supplies its own configuration and chooses when to upgrade.
+
 Use the [self-hosting guide](docs/self-hosting.md) to set up hosting, Google sign-in, recording storage and optional meeting services. Enter your own Firebase and Google Workspace settings in a local copy of [organization.example.json](organization.example.json).
 
 ## Run checks
