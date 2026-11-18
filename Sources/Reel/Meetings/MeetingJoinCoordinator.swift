@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Combine
 import CryptoKit
+import EventKit
 import ReelCore
 import ScreenCaptureKit
 import UserNotifications
@@ -21,28 +22,13 @@ final class MeetingJoinCoordinator: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var calendarStatus = "Checking meeting calendars…"
     @Published private(set) var cloudMeetings: [CloudCalendarMeeting] = []
-    @Published private(set) var cloudCalendarStatus = "Checking cloud meetings…"
+    @Published private(set) var cloudCalendarStatus = "Checking Reel notetaker meetings…"
     @Published private(set) var accessibilitySettingsURL: URL?
     @Published var reminders = OrganizationState.defaults.bool(forKey: "meetingCalendar.localReminders") {
         didSet { OrganizationState.defaults.set(reminders, forKey: "meetingCalendar.localReminders"); Task { await refresh() } }
     }
-    @Published var autoJoin = OrganizationState.defaults.bool(forKey: "meetingCalendar.localAutoJoin") {
-        didSet {
-            guard oldValue != autoJoin else { return }
-            OrganizationState.defaults.set(autoJoin, forKey: "meetingCalendar.localAutoJoin")
-            if !autoJoin { joinTask?.cancel() }
-            Task { await refresh() }
-        }
-    }
-    @Published var standingConsent = OrganizationState.defaults.bool(forKey: "meetingCalendar.standingConsent") {
-        didSet {
-            if standingConsent, let consentOwner {
-                OrganizationState.defaults.set(consentOwner, forKey: "meetingCalendar.standingConsentOwner")
-            } else if standingConsent { standingConsent = false; return }
-            OrganizationState.defaults.set(standingConsent, forKey: "meetingCalendar.standingConsent")
-            if !standingConsent { autoJoin = false; joinTask?.cancel() }
-        }
-    }
+    @Published private(set) var autoJoin = OrganizationState.defaults.bool(forKey: "meetingCalendar.localAutoJoin")
+    @Published private(set) var standingConsent = OrganizationState.defaults.bool(forKey: "meetingCalendar.standingConsent")
     private let discovery = CalendarDiscovery()
     private var loop: Task<Void, Never>?
     private var joinTask: Task<Void, Never>?
@@ -63,6 +49,7 @@ final class MeetingJoinCoordinator: ObservableObject {
     private var accountIdentity: String?
     private var calendarAccountGeneration: UInt64 = 0
     private var consentOwner: String?
+    private var automaticConsentRevision = 0
     private let base = CloudConfig.default.meetingServiceURL
 
     var selected: CalendarMeeting? { visibleMeetings.first { $0.id == selectedID } }
@@ -73,30 +60,91 @@ final class MeetingJoinCoordinator: ObservableObject {
     var visibleMeetings: [CalendarMeeting] { hasCurrentAccount ? meetings : [] }
     var visibleCloudMeetings: [CloudCalendarMeeting] { hasCurrentAccount ? cloudMeetings : [] }
     var visibleCloudCalendarStatus: String {
-        hasCurrentAccount ? cloudCalendarStatus : "Checking cloud meetings for this account…"
+        hasCurrentAccount ? cloudCalendarStatus : "Checking Reel notetaker meetings for this account…"
     }
     var visibleStatus: String { hasCurrentAccount ? status : "" }
     var visibleCalendarStatus: String {
         hasCurrentAccount ? calendarStatus : "Refreshing calendars for this account…"
     }
 
-    /// The guided setup commits only a current, explicit consent decision. A refresh
-    /// still in flight must finish first; stale account/scope snapshots never opt in.
-    func enableAutomaticJoiningForSetup(expectedOwner: String, selectedCalendarIDs: Set<String>,
-                                        useAllCalendars: Bool, consentConfirmed: Bool) -> Bool {
-        let ids = Set(OrganizationState.defaults.stringArray(forKey: "meetingCalendar.selectedIDs") ?? [])
-        let mode = CalendarSelection.initialMode(
-            stored: OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool, selected: ids)
+    var hasStandingConsentForCurrentScope: Bool {
+        let scope = refreshScope
+        guard standingConsent, hasCurrentAccount else { return false }
+        let owner = AppModel.shared.account?.userID ?? "local:\(getuid())"
+        let defaults = OrganizationState.defaults
+        guard defaults.string(forKey: "meetingCalendar.standingConsentOwner") == owner else { return false }
+        let hasAppleCalendarAccess = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        guard defaults.object(forKey: "meetingCalendar.standingConsentUseAll") as? Bool == scope.useAll,
+              defaults.stringArray(forKey: "meetingCalendar.standingConsentSelection").map(Set.init) == scope.calendarIDs else { return false }
+        return !hasAppleCalendarAccess ||
+            defaults.stringArray(forKey: "meetingCalendar.standingConsentCalendars").map(Set.init) == includedCalendars(scope)
+    }
+
+    /// Pasted links always require explicit per-meeting consent.
+    func hasStandingConsent(for meeting: CalendarMeeting) -> Bool {
+        guard meeting.calendarID != "manual", hasStandingConsentForCurrentScope else { return false }
+        if meeting.calendarID == "reel-cloud" { return true }
+        return EKEventStore.authorizationStatus(for: .event) == .fullAccess &&
+            includedCalendars(refreshScope).contains(meeting.calendarID)
+    }
+
+    var setupWillEnableJoining: Bool {
+        MeetingSetupJoining.enabledAfterCompletion(previousPreference:
+            OrganizationState.defaults.object(forKey: "meetingCalendar.localAutoJoin") as? Bool)
+    }
+
+    func setAutomaticJoining(_ enabled: Bool) {
+        guard !enabled || hasStandingConsentForCurrentScope else { return }
+        OrganizationState.defaults.set(enabled, forKey: "meetingCalendar.localAutoJoin")
+        autoJoin = enabled
+        if !enabled {
+            automaticConsentRevision += 1
+            joinTask?.cancel()
+        }
+        Task { await refresh() }
+    }
+
+    func invalidateStandingConsent() {
+        guard standingConsent || autoJoin else { return }
+        standingConsent = false
+        autoJoin = false
+        automaticConsentRevision += 1
+        joinTask?.cancel()
+        OrganizationState.defaults.set(false, forKey: "meetingCalendar.standingConsent")
+    }
+
+    private func includedCalendars(_ scope: RefreshScope) -> Set<String> {
+        CalendarSelection.identifiers(available: Set(discovery.calendars.map(\.id)),
+                                      selected: scope.calendarIDs, useAll: scope.useAll)
+    }
+
+    private func saveConsentScope(_ scope: RefreshScope, included: Set<String>?) {
+        let defaults = OrganizationState.defaults
+        defaults.set(scope.useAll, forKey: "meetingCalendar.standingConsentUseAll")
+        defaults.set(scope.calendarIDs.sorted(), forKey: "meetingCalendar.standingConsentSelection")
+        defaults.set(included?.sorted(), forKey: "meetingCalendar.standingConsentCalendars")
+    }
+
+    /// Setup saves consent only against the exact scope that the user reviewed.
+    func completeSetup(expectedOwner: String, expectedGeneration: UInt64,
+                       selectedCalendarIDs: Set<String>, useAllCalendars: Bool,
+                       includedCalendarIDs: Set<String>, consentConfirmed: Bool) -> Bool {
+        let scope = refreshScope
         let appOwner = AppModel.shared.account?.userID ?? "local:\(getuid())"
-        guard consentConfirmed, !refreshing, consentOwner == expectedOwner,
-              appOwner == expectedOwner, accountIdentity == AppModel.shared.account?.userID,
-              ids == selectedCalendarIDs, mode.useAll == useAllCalendars,
+        guard consentConfirmed, !refreshing, consentOwner == expectedOwner, appOwner == expectedOwner,
+              hasCurrentAccount, scope.generation == expectedGeneration,
+              scope.calendarIDs == selectedCalendarIDs, scope.useAll == useAllCalendars,
+              !includedCalendarIDs.isEmpty, includedCalendars(scope) == includedCalendarIDs,
+              EKEventStore.authorizationStatus(for: .event) == .fullAccess,
+              AXIsProcessTrusted(), NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil,
               AppModel.shared.phase == .idle else { return false }
+        let defaults = OrganizationState.defaults
+        defaults.set(expectedOwner, forKey: "meetingCalendar.standingConsentOwner")
+        saveConsentScope(scope, included: includedCalendarIDs)
+        defaults.set(true, forKey: "meetingCalendar.standingConsent")
         standingConsent = true
-        guard standingConsent,
-              OrganizationState.defaults.string(forKey: "meetingCalendar.standingConsentOwner") == expectedOwner else { return false }
-        autoJoin = true
-        return autoJoin && standingConsent
+        setAutomaticJoining(setupWillEnableJoining)
+        return true
     }
 
     func start() {
@@ -138,15 +186,15 @@ final class MeetingJoinCoordinator: ObservableObject {
         let currentConsentOwner = owner ?? "local:\(getuid())"
         consentOwner = currentConsentOwner
         if OrganizationState.defaults.string(forKey: "meetingCalendar.standingConsentOwner") != currentConsentOwner {
-            standingConsent = false; autoJoin = false
+            invalidateStandingConsent()
         }
         if owner != accountIdentity || calendarAccountGeneration != scope.generation {
+            automaticConsentRevision += 1
             joinTask?.cancel(); selectedID = nil; consent = false; manualMeetings = []; meetings = []; cloudMeetings = []
-            cloudCalendarStatus = "Checking cloud meetings…"
+            cloudCalendarStatus = "Checking Reel notetaker meetings…"
             status = ""; accessibilitySettingsURL = nil
             if accountIdentity != nil, owner != accountIdentity {
-                autoJoin = false
-                standingConsent = false
+                invalidateStandingConsent()
             }
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: Array(scheduled))
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: Array(scheduled))
@@ -159,13 +207,28 @@ final class MeetingJoinCoordinator: ObservableObject {
         if storedMode == nil {
             OrganizationState.defaults.set(mode.useAll, forKey: "meetingCalendar.useAll")
             // Earlier cloud-only consent did not cover all local desktop calendars.
-            if mode.expandsLegacyScope { standingConsent = false }
+            if mode.expandsLegacyScope { invalidateStandingConsent() }
         }
         let useAll = mode.useAll
         // Never retain another refresh/account's authority while a routing request is pending.
         desktopRouting = nil; cloudIDs = [:]
         await discovery.refresh(selectedCalendarIDs: ids, useAllCalendars: useAll)
         guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
+        if standingConsent {
+            let defaults = OrganizationState.defaults
+            let hasAppleCalendarAccess = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+            // Earlier releases invalidated consent on every in-app selection change.
+            // Preserve that scope for existing users, even if they only use Google Calendar.
+            if defaults.object(forKey: "meetingCalendar.standingConsentUseAll") == nil {
+                saveConsentScope(scope, included: hasAppleCalendarAccess ? includedCalendars(scope) : nil)
+            } else if hasAppleCalendarAccess,
+                      defaults.stringArray(forKey: "meetingCalendar.standingConsentCalendars") == nil,
+                      defaults.object(forKey: "meetingCalendar.standingConsentUseAll") as? Bool == scope.useAll,
+                      defaults.stringArray(forKey: "meetingCalendar.standingConsentSelection").map(Set.init) == scope.calendarIDs {
+                defaults.set(includedCalendars(scope).sorted(), forKey: "meetingCalendar.standingConsentCalendars")
+            }
+            if !hasStandingConsentForCurrentScope { invalidateStandingConsent() }
+        }
         var found = discovery.meetings + manualMeetings
         var cloudFound: [CloudCalendarMeeting] = []
         var cloudFailure = false
@@ -206,10 +269,10 @@ final class MeetingJoinCoordinator: ObservableObject {
         guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
         found = found.filter { DesktopCalendarRouting.allowsLocal($0, routing: desktopRouting) }
         cloudMeetings = cloudFound.sorted { $0.start < $1.start }
-        if owner == nil { cloudCalendarStatus = "Sign in to see your cloud meetings." }
-        else if cloudFailure { cloudCalendarStatus = "Cloud meetings are unavailable. Check your connection and refresh." }
-        else if cloudFound.isEmpty { cloudCalendarStatus = "No upcoming or ongoing cloud meetings found." }
-        else { cloudCalendarStatus = "\(cloudFound.count) upcoming or ongoing cloud \(cloudFound.count == 1 ? "meeting" : "meetings")." }
+        if owner == nil { cloudCalendarStatus = "Sign in to see meetings for the Reel notetaker." }
+        else if cloudFailure { cloudCalendarStatus = "Reel notetaker meetings are unavailable. Check your connection and refresh." }
+        else if cloudFound.isEmpty { cloudCalendarStatus = "No upcoming meetings for the Reel notetaker." }
+        else { cloudCalendarStatus = "\(cloudFound.count) upcoming or ongoing \(cloudFound.count == 1 ? "meeting" : "meetings") for the Reel notetaker." }
         var seen = Set<String>()
         meetings = found.filter { $0.end > Date() && seen.insert(Self.key($0)).inserted }.sorted { $0.start < $1.start }
         if let selectedID, !meetings.contains(where: { $0.id == selectedID }) {
@@ -217,15 +280,19 @@ final class MeetingJoinCoordinator: ObservableObject {
         }
         await updateReminders()
         guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
-        if cloudFailure { calendarStatus = "Cloud routing could not be verified. Meet and Teams desktop joining are paused; local Zoom meetings remain available. Check your connection and Reel sign-in." }
-        else if !autoJoin { calendarStatus = "Automatic joining is off. Enable it below after connecting your desktop calendars and confirming participant consent." }
-        else if !standingConsent { calendarStatus = "Automatic joining needs participant consent for this Reel account." }
-        else if !AXIsProcessTrusted() { calendarStatus = "Automatic joining is blocked: allow Reel in System Settings → Privacy & Security → Accessibility." }
+        if cloudFailure { calendarStatus = "Reel couldn’t check which meetings the notetaker is handling. Chrome joining is available for Zoom. Check your connection and Reel sign-in." }
+        else if EKEventStore.authorizationStatus(for: .event) != .fullAccess &&
+                    (!hasStandingConsentForCurrentScope || meetings.allSatisfy({ $0.calendarID != "reel-cloud" })) {
+            calendarStatus = discovery.authorizationMessage
+        }
+        else if !hasStandingConsentForCurrentScope { calendarStatus = "Set up Chrome joining and confirm consent for the included calendars." }
+        else if !autoJoin { calendarStatus = "Joining in Chrome on this Mac is paused." }
+        else if !AXIsProcessTrusted() { calendarStatus = "To join in Chrome, allow Reel in System Settings → Privacy & Security → Accessibility." }
         else if CalendarSelection.identifiers(available: Set(discovery.calendars.map(\.id)), selected: ids, useAll: useAll).isEmpty && meetings.allSatisfy({ $0.calendarID != "reel-cloud" }) { calendarStatus = discovery.authorizationMessage }
-        else { calendarStatus = "Automatic joining is on. Reel checks every 20 seconds while this Mac is awake. \(meetings.filter { $0.calendarID != "manual" }.count) upcoming or ongoing meetings found." }
-        if autoJoin && standingConsent && !busy && AppModel.shared.phase == .idle {
+        else { calendarStatus = "Joining in Chrome is on while this Mac is awake. \(meetings.filter { $0.calendarID != "manual" }.count) upcoming or ongoing meetings found." }
+        if autoJoin && hasStandingConsentForCurrentScope && !busy && AppModel.shared.phase == .idle {
             if let due = meetings.first(where: {
-                $0.calendarID != "manual" && schedule.shouldAttempt(key: Self.key($0), start: $0.start, end: $0.end, now: Date()) && AppModel.shared.existingMeeting(forOccurrence: $0.id) == nil
+                hasStandingConsent(for: $0) && schedule.shouldAttempt(key: Self.key($0), start: $0.start, end: $0.end, now: Date()) && AppModel.shared.existingMeeting(forOccurrence: $0.id) == nil
             }) {
                 schedule.begin(key: Self.key(due), now: Date())
                 join(due, confirmed: true, includeMicrophone: false, automatic: true)
@@ -251,6 +318,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         guard AppModel.shared.existingMeeting(forOccurrence: meeting.id) == nil else { status = "This meeting is already in your Reel library."; return }
         busy = true; accessibilitySettingsURL = nil; status = "Opening meeting"
         log.notice("Meeting entry started; automatic=\(automatic, privacy: .public)")
+        let consentRevision = automaticConsentRevision
         joinTask = Task {
             var captureHandedOff = false
             var joinedWindowID: CGWindowID?
@@ -290,6 +358,7 @@ final class MeetingJoinCoordinator: ObservableObject {
                 }
                 try Task.checkCancellation()
                 if automatic {
+                    guard isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision) else { return }
                     guard AXIsProcessTrusted() else { throw LocalMeetingJoin.JoinError.accessibilityPermissionRequired }
                     // Ask the API that captures; CG preflight can disagree with it.
                     do { _ = try await ScreenCapture.shareableContent() }
@@ -299,8 +368,10 @@ final class MeetingJoinCoordinator: ObservableObject {
                         return
                     }
                 }
+                guard !automatic || isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision) else { return }
                 await markCloud(meeting, state: "requesting_entry", expectedOwner: owner)
                 try Task.checkCancellation()
+                guard !automatic || isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision) else { return }
                 let result = try await LocalMeetingJoin.join(url: meeting.joinURL, consentConfirmed: true) { self.status = $0 }
                 if case .joined(let id) = result { joinedWindowID = id }
                 try Task.checkCancellation()
@@ -323,7 +394,7 @@ final class MeetingJoinCoordinator: ObservableObject {
                     model.meetingMicrophoneEnabled = includeMicrophone
                     guard RecorderController.shared.start(window: window, focusWindowOnStart: false, authorization: {
                         self.accountIdentity == owner && model.account?.userID == owner &&
-                        (!automatic || (self.autoJoin && self.standingConsent))
+                        (!automatic || self.isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision))
                     }) else {
                         status = "A previous recording is still finishing setup cleanup. Try again shortly."
                         retryable = automatic
@@ -331,7 +402,8 @@ final class MeetingJoinCoordinator: ObservableObject {
                         return
                     }
                     captureHandedOff = true
-                    watchCapture(meeting, windowID: id, expectedOwner: owner, automatic: automatic)
+                    watchCapture(meeting, windowID: id, expectedOwner: owner, automatic: automatic,
+                                 consentRevision: consentRevision)
                     status = "Joined. Starting local meeting capture."
                 case .awaitingAdmission:
                     status = "Still waiting for the host. Join manually, then start meeting capture in Reel."
@@ -386,10 +458,15 @@ final class MeetingJoinCoordinator: ObservableObject {
         } catch { /* Local capture remains available if metadata sync is offline. */ }
     }
 
-    private func captureAuthorized(expectedOwner: String?, automatic: Bool) async -> Bool {
+    private func isAutomaticCaptureAuthorized(for meeting: CalendarMeeting, consentRevision: Int) -> Bool {
+        consentRevision == automaticConsentRevision && autoJoin && hasStandingConsent(for: meeting)
+    }
+
+    private func captureAuthorized(_ meeting: CalendarMeeting, expectedOwner: String?,
+                                   automatic: Bool, consentRevision: Int) async -> Bool {
         guard await CloudAuth.shared.current?.userID == expectedOwner,
               AppModel.shared.account?.userID == expectedOwner else { return false }
-        return !automatic || (autoJoin && standingConsent)
+        return !automatic || isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision)
     }
 
     @discardableResult
@@ -407,7 +484,8 @@ final class MeetingJoinCoordinator: ObservableObject {
         return true
     }
 
-    private func watchCapture(_ meeting: CalendarMeeting, windowID: CGWindowID, expectedOwner: String?, automatic: Bool) {
+    private func watchCapture(_ meeting: CalendarMeeting, windowID: CGWindowID, expectedOwner: String?,
+                              automatic: Bool, consentRevision: Int) {
         captureWatch?.cancel()
         captureWatch = Task {
             defer { LocalMeetingJoin.forget(windowID: windowID) }
@@ -419,7 +497,8 @@ final class MeetingJoinCoordinator: ObservableObject {
                 }
             }
             while !Task.isCancelled {
-                let authorized = await captureAuthorized(expectedOwner: expectedOwner, automatic: automatic)
+                let authorized = await captureAuthorized(meeting, expectedOwner: expectedOwner, automatic: automatic,
+                                                         consentRevision: consentRevision)
                 if !authorized {
                     status = "Meeting setup cancelled because the account or automatic-recording consent changed."
                     if !automatic { return }
@@ -447,7 +526,8 @@ final class MeetingJoinCoordinator: ObservableObject {
                   recording.meeting?.calendarOccurrenceID == meeting.id,
                   recording.meeting?.ownerUserID == expectedOwner,
                   AppModel.shared.phase == .recording || AppModel.shared.phase == .paused else { return }
-            guard await captureAuthorized(expectedOwner: expectedOwner, automatic: automatic) else {
+            guard await captureAuthorized(meeting, expectedOwner: expectedOwner, automatic: automatic,
+                                                         consentRevision: consentRevision) else {
                 status = "Meeting setup cancelled because the account or automatic-recording consent changed."
                 _ = stopRevokedCaptureIfOwned(meeting, windowID: windowID, expectedOwner: expectedOwner,
                                               automatic: automatic, authorizationValid: false)
@@ -463,7 +543,8 @@ final class MeetingJoinCoordinator: ObservableObject {
             var watchdog = MeetingCallWatchdog()
             while !Task.isCancelled, RecorderController.shared.currentRecordingID == recordingID,
                   AppModel.shared.phase == .recording || AppModel.shared.phase == .paused {
-                let authorized = await captureAuthorized(expectedOwner: expectedOwner, automatic: automatic)
+                let authorized = await captureAuthorized(meeting, expectedOwner: expectedOwner, automatic: automatic,
+                                                         consentRevision: consentRevision)
                 if !authorized {
                     status = "Meeting setup cancelled because the account or automatic-recording consent changed."
                     _ = stopRevokedCaptureIfOwned(meeting, windowID: windowID, expectedOwner: expectedOwner,

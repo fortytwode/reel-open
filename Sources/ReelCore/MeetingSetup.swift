@@ -41,3 +41,10 @@ public struct MeetingSetupReadiness: Equatable, Sendable {
 
     public var isReady: Bool { blockers.isEmpty }
 }
+
+public enum MeetingSetupJoining {
+    /// An absent preference is a first setup. A prior pause survives completed setup.
+    public static func enabledAfterCompletion(previousPreference: Bool?) -> Bool {
+        previousPreference ?? true
+    }
+}

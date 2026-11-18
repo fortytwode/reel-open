@@ -13,6 +13,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            ReelAppearancePicker()
             Section("Recording") {
                 Picker("Record", selection: $model.settings.mode) {
                     ForEach(CaptureMode.allCases, id: \.self) { Text($0.label).tag($0) }

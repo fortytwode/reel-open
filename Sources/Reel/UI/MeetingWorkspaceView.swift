@@ -5,6 +5,7 @@ import SwiftUI
 struct MeetingWorkspaceView: View {
     @ObservedObject var model: AppModel
     let showRecorder: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var joining = MeetingJoinCoordinator.shared
     @StateObject private var notes = ParticipantNotesLibrary()
     @State private var sharedOnly = false
@@ -14,6 +15,7 @@ struct MeetingWorkspaceView: View {
     @State private var manualConsent = false
     @State private var transcriptSelected = false
     @State private var readerFocused = false
+    @State private var joiningHelpShown = false
     @State private var refreshing = false
     @State private var lastRefresh: Date?
 
@@ -36,11 +38,11 @@ struct MeetingWorkspaceView: View {
     private var upcoming: [UpcomingCall] {
         let local = joining.visibleMeetings.filter { $0.calendarID != "manual" }.map {
             UpcomingCall(id: .upcoming($0.id), title: $0.title, start: $0.start,
-                         symbol: "video", status: $0.start <= Date() ? "Now · On this Mac" : platformName($0.platform))
+                         symbol: "macbook", status: $0.start <= Date() ? "Now · Join in Chrome" : "Join in Chrome")
         }
         let cloud = joining.visibleCloudMeetings.map {
             UpcomingCall(id: .cloud($0.id), title: $0.title, start: $0.start,
-                         symbol: "cloud", status: cloudStatus($0))
+                         symbol: "person.wave.2", status: cloudStatus($0))
         }
         return (local + cloud).filter { matches($0.title) }.sorted { $0.start < $1.start }
     }
@@ -73,7 +75,7 @@ struct MeetingWorkspaceView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .tint(Color(red: 0.08, green: 0.38, blue: 0.36))
+        .tint(colorScheme == .dark ? .teal : Color(red: 0.08, green: 0.38, blue: 0.36))
         .task(id: model.accountGeneration) {
             selection = nil
             readerFocused = false
@@ -103,10 +105,6 @@ struct MeetingWorkspaceView: View {
                     else {
                         if !joining.busy && !sharedOnly && search.isEmpty { calendarStatus }
                         if !sharedOnly && !upcoming.isEmpty { upcomingSection }
-                        if !sharedOnly && search.isEmpty && joining.visibleCloudMeetings.isEmpty {
-                            Label(joining.visibleCloudCalendarStatus, systemImage: "cloud")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
                         historySection
                     }
                 }.padding(16)
@@ -122,7 +120,7 @@ struct MeetingWorkspaceView: View {
             }.padding(.vertical, 22).padding(.horizontal, 10)
             sidebarButton("Meetings", symbol: "rectangle.stack", selected: !sharedOnly) {
                 sharedOnly = false; selection = nil
-            }
+            }.help("Find upcoming calls, summaries, and transcripts")
             sidebarButton("Shared with me", symbol: "person.2", selected: sharedOnly) {
                 sharedOnly = true; selection = nil
             }
@@ -130,9 +128,9 @@ struct MeetingWorkspaceView: View {
             sidebarButton("Calendar settings", symbol: "calendar", selected: false) {
                 (NSApp.delegate as? AppDelegate)?.showMeetings()
             }
-            sidebarButton("Local recordings", symbol: "film", selected: false) {
+            sidebarButton("Screen recordings", symbol: "film", selected: false) {
                 (NSApp.delegate as? AppDelegate)?.showLibrary()
-            }
+            }.help("Record and share screen or camera videos")
             Spacer()
             if let account = model.account {
                 Label {
@@ -143,8 +141,11 @@ struct MeetingWorkspaceView: View {
                 } icon: { Image(systemName: "person.crop.circle").font(.title2) }
                 .padding(10)
             }
-            sidebarButton("Settings", symbol: "gearshape", selected: false) {
-                (NSApp.delegate as? AppDelegate)?.showSettings()
+            HStack(spacing: 4) {
+                sidebarButton("Settings", symbol: "gearshape", selected: false) {
+                    (NSApp.delegate as? AppDelegate)?.showSettings()
+                }
+                ReelAppearanceMenu()
             }
         }
         .padding(12)
@@ -215,18 +216,41 @@ struct MeetingWorkspaceView: View {
     }
 
     private var calendarStatus: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(joining.autoJoin && joining.standingConsent ? "Joining on this Mac is on" : "Joining on this Mac is off",
-                      systemImage: "calendar.badge.clock").font(.callout.weight(.medium))
+                Text("Automatic joining").font(.callout.weight(.semibold))
                 Spacer()
-                Button("Manage") { (NSApp.delegate as? AppDelegate)?.showMeetings() }.controlSize(.small)
+                Button {
+                    joiningHelpShown.toggle()
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                }.buttonStyle(.plain)
+                    .accessibilityLabel("How automatic joining works")
+                    .help("How automatic joining works")
+                    .popover(isPresented: $joiningHelpShown, arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 13) {
+                            Label("Reel notetaker", systemImage: "person.wave.2").font(.headline)
+                            Text("Reel sends a notetaker to supported Google Meet and Teams calls from the Google Calendar you connect in Reel. It can join while your Mac is closed.")
+                            Label("Join in Chrome", systemImage: "macbook").font(.headline)
+                            Text("For other eligible calls, Reel can open Chrome and record from this Mac while it’s awake. Set up permissions and confirm recording consent once.")
+                        }.font(.callout).padding(16).frame(width: 320)
+                    }
             }
-            if joining.autoJoin || joining.busy {
-                Text(joining.visibleCalendarStatus).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Cloud meetings appear below. Manage local recording in Calendar settings.")
+            Label(joining.visibleCloudCalendarStatus, systemImage: "person.wave.2")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Label(joining.hasStandingConsentForCurrentScope
+                      ? joining.autoJoin ? "Join in Chrome is on" : "Join in Chrome is paused"
+                      : "Join in Chrome on this Mac", systemImage: "macbook")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                if joining.hasStandingConsentForCurrentScope {
+                    Button("Manage") { (NSApp.delegate as? AppDelegate)?.showMeetings() }.controlSize(.small)
+                } else {
+                    Button("Set up") { (NSApp.delegate as? AppDelegate)?.showMeetingSetup() }
+                        .controlSize(.small)
+                        .disabled(model.phase != .idle || joining.busy)
+                }
             }
             if !joining.visibleStatus.isEmpty {
                 Text(joining.busy ? joining.visibleStatus : "Last join update: \(joining.visibleStatus)")
@@ -357,13 +381,13 @@ struct MeetingWorkspaceView: View {
                 Text("Audio is sent to OpenAI for transcription and notes. Notes follow your Notion filing and participant sharing rules; video stays on this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("Include my microphone", isOn: $model.meetingMicrophoneEnabled)
-                if !joining.standingConsent {
+                if !joining.hasStandingConsent(for: meeting) {
                     Toggle("Participants have agreed to recording", isOn: $manualConsent)
                 }
                 Button("Join + record", systemImage: "video.badge.waveform") {
                     joining.join(meeting, confirmed: true, includeMicrophone: model.meetingMicrophoneEnabled)
                 }.buttonStyle(.borderedProminent)
-                    .disabled(model.isBusy || joining.busy || !(joining.standingConsent || manualConsent))
+                    .disabled(model.isBusy || joining.busy || !(joining.hasStandingConsent(for: meeting) || manualConsent))
                 Button("Already in this call? Prepare recording") { prepareRecording(meeting) }
                     .disabled(model.isBusy || joining.busy)
                 Text("Calendar invitees in your organization receive notes after processing, including invitees who did not attend.")
@@ -376,7 +400,7 @@ struct MeetingWorkspaceView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 detailHeading(meeting.title, date: meeting.start, subtitle: platformName(meeting.platform))
-                Label(cloudStatus(meeting), systemImage: "cloud").font(.headline)
+                Label(cloudStatus(meeting), systemImage: "person.wave.2").font(.headline)
                 people(meeting.attendeeEmails, title: "CALENDAR INVITEES")
                 Text("After the call, the summary and transcript appear in Past calls once processing finishes.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -386,14 +410,14 @@ struct MeetingWorkspaceView: View {
 
     private func cloudStatus(_ meeting: CloudCalendarMeeting) -> String {
         switch meeting.status {
-        case "recording": "Recording in the cloud"
-        case "joined": "Cloud bot joined"
+        case "recording": "Notetaker recording"
+        case "joined": "Notetaker joined"
         case "awaiting_admission": "Waiting for the host"
         case "awaiting_consent": "Recording approval needed"
-        case "dispatching", "requesting_entry": "Cloud bot joining"
-        case "completed": "Cloud recording ended"
-        case "failed": "Cloud recording failed"
-        default: meeting.start <= Date() ? "Cloud join pending" : "Cloud scheduled"
+        case "dispatching", "requesting_entry": "Notetaker joining"
+        case "completed": "Notetaker finished"
+        case "failed": "Notetaker recording failed"
+        default: meeting.start <= Date() ? "Notetaker pending" : "Reel notetaker"
         }
     }
 

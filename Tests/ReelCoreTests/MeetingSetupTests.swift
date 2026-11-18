@@ -30,6 +30,12 @@ final class MeetingSetupTests: XCTestCase {
         XCTAssertFalse(revoked.isReady)
     }
 
+    func testCompletionDefaultsOnAndRespectsPriorPreference() {
+        XCTAssertTrue(MeetingSetupJoining.enabledAfterCompletion(previousPreference: nil))
+        XCTAssertTrue(MeetingSetupJoining.enabledAfterCompletion(previousPreference: true))
+        XCTAssertFalse(MeetingSetupJoining.enabledAfterCompletion(previousPreference: false))
+    }
+
     func testCustomScopeWithNoAvailableSelectedCalendarsIsBlocked() {
         let readiness = MeetingSetupReadiness(calendarAccessAllowed: true, selectedCalendarCount: 0,
             screenCaptureVerified: true, accessibilityAllowed: true, chromeAvailable: true)
