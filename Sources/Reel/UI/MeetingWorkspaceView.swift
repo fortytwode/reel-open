@@ -13,8 +13,17 @@ struct MeetingWorkspaceView: View {
     @State private var showAllUpcoming = false
     @State private var manualConsent = false
     @State private var transcriptSelected = false
+    @State private var refreshing = false
+    @State private var lastRefresh: Date?
 
-    private enum Selection: Hashable { case upcoming(String), local(String), shared(String) }
+    private enum Selection: Hashable { case upcoming(String), cloud(String), local(String), shared(String) }
+    private struct UpcomingCall: Identifiable {
+        let id: Selection
+        let title: String
+        let start: Date
+        let symbol: String
+        let status: String
+    }
     private struct PastCall: Identifiable {
         let id: Selection
         let title: String
@@ -23,8 +32,16 @@ struct MeetingWorkspaceView: View {
         let status: String
         let shared: Bool
     }
-    private var upcoming: [CalendarMeeting] {
-        joining.visibleMeetings.filter { matches($0.title) }
+    private var upcoming: [UpcomingCall] {
+        let local = joining.visibleMeetings.filter { $0.calendarID != "manual" }.map {
+            UpcomingCall(id: .upcoming($0.id), title: $0.title, start: $0.start,
+                         symbol: "video", status: $0.start <= Date() ? "Now · On this Mac" : platformName($0.platform))
+        }
+        let cloud = joining.visibleCloudMeetings.map {
+            UpcomingCall(id: .cloud($0.id), title: $0.title, start: $0.start,
+                         symbol: "cloud", status: cloudStatus($0))
+        }
+        return (local + cloud).filter { matches($0.title) }.sorted { $0.start < $1.start }
     }
     private var history: [PastCall] {
         let remote = notes.meetings.filter { !sharedOnly || $0.localRecordingIDs.isEmpty }.map {
@@ -57,6 +74,10 @@ struct MeetingWorkspaceView: View {
                         else {
                             if !joining.busy && !sharedOnly && search.isEmpty { calendarStatus }
                             if !sharedOnly && !upcoming.isEmpty { upcomingSection }
+                            if !sharedOnly && search.isEmpty && joining.visibleCloudMeetings.isEmpty {
+                                Label(joining.visibleCloudCalendarStatus, systemImage: "cloud")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                             historySection
                         }
                     }.padding(24)
@@ -69,6 +90,7 @@ struct MeetingWorkspaceView: View {
         .tint(Color(red: 0.08, green: 0.38, blue: 0.36))
         .task(id: model.accountGeneration) {
             selection = nil
+            lastRefresh = nil
             notes.reset()
             await refresh()
         }
@@ -132,8 +154,14 @@ struct MeetingWorkspaceView: View {
             HStack {
                 Text(sharedOnly ? "Shared with me" : "Meetings").font(.system(size: 27, weight: .semibold))
                 Spacer()
+                if refreshing { ProgressView().controlSize(.small).accessibilityLabel("Refreshing meetings") }
+                else if let lastRefresh {
+                    Text("Checked \(lastRefresh.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
-                    .help("Refresh meetings and notes").disabled(notes.loading || joining.busy)
+                    .help("Refresh meetings and notes").accessibilityLabel("Refresh meetings and notes")
+                    .disabled(refreshing || notes.loading)
                 Button("Record an open call", systemImage: "record.circle") { prepareRecording(nil) }
                     .disabled(model.isBusy || joining.busy || model.account == nil)
             }
@@ -179,12 +207,17 @@ struct MeetingWorkspaceView: View {
     private var calendarStatus: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack {
-                Label(joining.autoJoin && joining.standingConsent ? "Automatic joining is on" : "Set up automatic joining",
+                Label(joining.autoJoin && joining.standingConsent ? "Joining on this Mac is on" : "Joining on this Mac is off",
                       systemImage: "calendar.badge.clock").font(.callout.weight(.medium))
                 Spacer()
                 Button("Manage") { (NSApp.delegate as? AppDelegate)?.showMeetings() }.controlSize(.small)
             }
-            Text(joining.visibleCalendarStatus).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if joining.autoJoin || joining.busy {
+                Text(joining.visibleCalendarStatus).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Cloud meetings appear below. Manage local recording in Calendar settings.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if !joining.visibleStatus.isEmpty {
                 Text(joining.busy ? joining.visibleStatus : "Last join update: \(joining.visibleStatus)")
                     .font(.caption).fixedSize(horizontal: false, vertical: true)
@@ -197,20 +230,20 @@ struct MeetingWorkspaceView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("UPCOMING").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             ForEach(showAllUpcoming ? upcoming : Array(upcoming.prefix(4))) { meeting in
-                Button { selection = .upcoming(meeting.id) } label: {
+                Button { selection = meeting.id } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "video").font(.title3).foregroundStyle(.tint).frame(width: 34)
+                        Image(systemName: meeting.symbol).font(.title3).foregroundStyle(.tint).frame(width: 34)
                         VStack(alignment: .leading, spacing: 5) {
                             Text(meeting.title).font(.callout.weight(.medium)).lineLimit(2)
                             Text("\(Self.dayLabel(meeting.start)) · \(meeting.start.formatted(date: .omitted, time: .shortened))")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(meeting.start <= Date() ? "Now" : platformName(meeting.platform))
+                        Text(meeting.status)
                             .font(.caption).foregroundStyle(.secondary)
                         Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
                     }.padding(14)
-                        .background(selection == .upcoming(meeting.id) ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                        .background(selection == meeting.id ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
                         .contentShape(Rectangle())
                 }.buttonStyle(.plain)
             }
@@ -272,7 +305,10 @@ struct MeetingWorkspaceView: View {
     @ViewBuilder private var detail: some View {
         switch selection {
         case .upcoming(let id):
-            if let meeting = upcoming.first(where: { $0.id == id }) { upcomingDetail(meeting) }
+            if let meeting = joining.visibleMeetings.first(where: { $0.id == id }) { upcomingDetail(meeting) }
+            else { emptyDetail }
+        case .cloud(let id):
+            if let meeting = joining.visibleCloudMeetings.first(where: { $0.id == id }) { cloudDetail(meeting) }
             else { emptyDetail }
         case .local(let id):
             if let recording = model.recording(id: id), let owner = model.account?.userID,
@@ -319,6 +355,31 @@ struct MeetingWorkspaceView: View {
                 Text("Calendar invitees in your organization receive notes after processing, including invitees who did not attend.")
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(24)
+        }
+    }
+
+    private func cloudDetail(_ meeting: CloudCalendarMeeting) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                detailHeading(meeting.title, date: meeting.start, subtitle: platformName(meeting.platform))
+                Label(cloudStatus(meeting), systemImage: "cloud").font(.headline)
+                people(meeting.attendeeEmails, title: "CALENDAR INVITEES")
+                Text("After the call, the summary and transcript appear in Past calls once processing finishes.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
+        }
+    }
+
+    private func cloudStatus(_ meeting: CloudCalendarMeeting) -> String {
+        switch meeting.status {
+        case "recording": "Recording in the cloud"
+        case "joined": "Cloud bot joined"
+        case "awaiting_admission": "Waiting for the host"
+        case "awaiting_consent": "Recording approval needed"
+        case "dispatching", "requesting_entry": "Cloud bot joining"
+        case "completed": "Cloud recording ended"
+        case "failed": "Cloud recording failed"
+        default: meeting.start <= Date() ? "Cloud join pending" : "Cloud scheduled"
         }
     }
 
@@ -369,10 +430,16 @@ struct MeetingWorkspaceView: View {
         showRecorder()
     }
     private func refresh() async {
+        let accountGeneration = model.accountGeneration
+        refreshing = true
+        defer { if accountGeneration == model.accountGeneration { refreshing = false } }
         model.reloadLibrary()
         async let calendar: Void = joining.refresh()
         await notes.refresh()
         await calendar
+        if accountGeneration == model.accountGeneration, !Task.isCancelled, notes.error == nil {
+            lastRefresh = Date()
+        }
     }
     private func matches(_ title: String) -> Bool { search.isEmpty || title.localizedCaseInsensitiveContains(search) }
     private func platformName(_ platform: MeetingPlatform) -> String {

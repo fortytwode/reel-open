@@ -7,42 +7,32 @@ struct MeetingSetupView: View {
     let onLater: () -> Void
     let onManageCalendars: () -> Void
 
-    init(setup: MeetingSetupModel, onFinish: @escaping () -> Void, onLater: @escaping () -> Void,
-         onManageCalendars: @escaping () -> Void) {
-        self.setup = setup
-        self.onFinish = onFinish
-        self.onLater = onLater
-        self.onManageCalendars = onManageCalendars
-    }
-
-    private let titles = ["Connect calendars", "Screen and system audio", "Accessibility and Chrome", "Review and enable"]
+    private let steps = [
+        (title: "Calendars", icon: "calendar"),
+        (title: "Recording", icon: "macwindow"),
+        (title: "Joining", icon: "cursorarrow.click"),
+        (title: "Review", icon: "checkmark.shield")
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("Automatic meeting recording").font(.title2.weight(.semibold))
-                Text("Reel can join calendar meetings in Chrome and record them on this Mac.")
-                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("Automatic meetings on this Mac").font(.title2.weight(.semibold))
+                Text("Reel joins scheduled meetings in Chrome and records the meeting window on this Mac.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(spacing: 7) {
-                ForEach(0..<4) { index in
-                    Capsule().fill(index <= setup.step ? Color.accentColor : Color.secondary.opacity(0.2))
-                        .frame(height: 4)
-                }
-            }.accessibilityLabel("Step \(setup.step + 1) of 4")
-            HStack {
-                Text("\(setup.step + 1). \(titles[setup.step])").font(.headline)
-                Spacer()
-                if setup.busy { ProgressView().controlSize(.small).accessibilityLabel("Checking setup") }
+
+            if !setup.enabled {
+                progressStrip
             }
+
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 12) {
                     if setup.enabled {
-                        Label("Automatic joining is enabled", systemImage: "checkmark.circle.fill")
-                            .font(.headline).foregroundStyle(.green)
-                        Text("Setup permissions are configured. Keep Reel open and this Mac awake for calendar meetings.")
-                        Text("Some meetings still need host admission or sign-in in Chrome.")
-                            .foregroundStyle(.secondary)
+                        setupCard("Automatic joining is on", icon: "checkmark.circle", detail: "Keep Reel open and this Mac awake. Chrome may still ask you to sign in or wait for the host.", state: .ready) {
+                            Button("Manage calendars…", action: onManageCalendars)
+                        }
                     } else {
                         switch setup.step {
                         case 0: calendars
@@ -52,136 +42,224 @@ struct MeetingSetupView: View {
                         }
                     }
                     if !setup.status.isEmpty {
-                        Text(setup.status).font(.callout).foregroundStyle(.secondary)
+                        Text(setup.status)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("meetingSetup.status")
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+
             Divider()
-            HStack {
-                Button("Later", action: onLater).keyboardShortcut(.cancelAction)
-                    .accessibilityHint("Close setup and leave automatic joining unchanged")
-                Spacer()
-                if setup.enabled {
-                    Button("Done", action: onFinish).keyboardShortcut(.defaultAction)
-                        .buttonStyle(.borderedProminent)
-                } else {
-                    if setup.step > 0 {
-                        Button("Back") { setup.step -= 1 }.disabled(setup.busy)
-                    }
-                    if setup.step < 3 {
-                        Button("Next") { setup.step += 1 }
-                            .disabled(setup.busy || !setup.canAdvance)
-                            .keyboardShortcut(.defaultAction)
-                            .buttonStyle(.borderedProminent)
-                    } else {
-                        Button("Enable automatic joining") { setup.enable() }
-                            .disabled(setup.busy || !setup.readiness.isReady || !setup.participantConsent)
-                            .keyboardShortcut(.defaultAction)
-                            .buttonStyle(.borderedProminent)
-                    }
-                }
-            }
+            footer
         }
         .padding(24)
         .frame(width: 620, height: 560)
         .task { await setup.monitorForeground() }
     }
 
-    private var calendars: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Reel finds Google Meet, Zoom and Teams links in calendars synced to Apple Calendar. You can use local joining without a Reel account.")
-            Text("For Google Calendar, open Apple Calendar → Settings → Accounts → Add Account → Google. Sign in and turn on Calendars, then return here.")
-                .font(.callout).foregroundStyle(.secondary)
-            HStack {
-                if setup.calendarNeedsSettings {
-                    Button("Open calendar settings") { setup.openSettings("Privacy_Calendars") }
-                } else if !setup.calendarAccessAllowed {
-                    Button("Connect calendars") { setup.connectCalendars() }.disabled(setup.busy)
-                }
-                Button("Open Apple Calendar") { setup.openCalendar() }
-                Button("Refresh") { setup.refreshCalendars() }.disabled(setup.busy)
+    private var progressStrip: some View {
+        HStack(spacing: 8) {
+            ForEach(steps.indices, id: \.self) { index in
+                let step = steps[index]
+                let current = setup.step == index
+                Label(step.title, systemImage: step.icon)
+                    .font(.subheadline.weight(current ? .semibold : .regular))
+                    .foregroundStyle(current ? Color.accentColor : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(current ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.07),
+                                in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityHidden(true)
             }
-            if setup.calendarAccessAllowed {
-                readinessRow("Calendar access", ready: true)
-                Text("\(setup.selectedCalendarCount) of \(setup.calendarCount) desktop calendars included · \(setup.meetingCount) desktop meetings in the next 7 days")
-                    .font(.callout)
-                Text(setup.useAllCalendars ? "All calendars on this Mac are included, including new calendars added later." : "Your existing custom calendar selection is preserved.")
-                    .font(.callout).foregroundStyle(.secondary)
-                if setup.selectedCalendarCount == 0 {
-                    Text("Add an account in Apple Calendar or choose at least one available calendar to continue.")
-                        .font(.callout)
-                }
-                Button("Choose calendars…", action: onManageCalendars)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Step \(setup.step + 1) of \(steps.count), \(steps[setup.step].title)")
+    }
+
+    private var footer: some View {
+        HStack {
+            if !setup.enabled {
+                Button(setup.step == steps.count - 1 ? "Done" : "Skip setup", action: onLater)
+                    .help("Close setup and keep your current recording settings")
+                    .keyboardShortcut(.cancelAction)
+            }
+            Spacer()
+            if setup.busy {
+                ProgressView().controlSize(.small).accessibilityLabel("Checking setup")
+            }
+            if setup.enabled {
+                Button("Done", action: onFinish)
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
             } else {
-                Text(setup.calendarNeedsSettings ? "Allow Reel in System Settings → Privacy & Security → Calendars, then return here. Full calendar access is required; write-only access cannot find meetings." : "Click Connect calendars and allow full access when macOS asks. This lets Reel find meeting links.")
-                    .font(.callout).foregroundStyle(.secondary)
+                if setup.step > 0 {
+                    Button("Back") { setup.step -= 1 }.disabled(setup.busy)
+                }
+                if setup.step < steps.count - 1 {
+                    Button("Continue") { setup.step += 1 }
+                        .disabled(setup.busy)
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Enable automatic joining") { setup.enable() }
+                        .disabled(setup.busy || !setup.readiness.isReady || !setup.participantConsent)
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                }
             }
-            Text("Google Calendar connected through the Reel website is also included. Those meetings are separate from your desktop calendar selection.")
-                .font(.callout).foregroundStyle(.secondary)
-        }.fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var calendars: some View {
+        let detail = setup.calendarAccessAllowed
+            ? "\(setup.selectedCalendarCount) of \(setup.calendarCount) calendars included · \(setup.meetingCount) meetings in the next 7 days"
+            : "Allow full calendar access so Reel can find Google Meet, Zoom and Teams links."
+        return VStack(alignment: .leading, spacing: 12) {
+            setupCard("Apple Calendar", icon: "calendar", detail: detail, state: .requirement(setup.calendarAccessAllowed && setup.selectedCalendarCount > 0)) {
+                if setup.calendarAccessAllowed && setup.selectedCalendarCount == 0 {
+                    Text("Choose an available calendar or add an account in Apple Calendar.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                HStack {
+                    if setup.calendarNeedsSettings {
+                        Button("Open calendar permissions") { setup.openSettings("Privacy_Calendars") }
+                    } else if !setup.calendarAccessAllowed {
+                        Button("Allow calendar access") { setup.connectCalendars() }.disabled(setup.busy)
+                    } else {
+                        Button("Choose calendars…", action: onManageCalendars)
+                    }
+                    Button("Open Apple Calendar") { setup.openCalendar() }
+                    if setup.calendarAccessAllowed {
+                        Button("Refresh") { setup.refreshCalendars() }.disabled(setup.busy)
+                    }
+                }
+            }
+            setupCard("Reel-connected Google Calendar", icon: "cloud",
+                      detail: "Calendars connected on the Reel website are included separately. Manage that connection on the website.") {
+                EmptyView()
+            }
+        }
     }
 
     private var screenRecording: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Allow Reel in System Settings → Privacy & Security → Screen & System Audio Recording.")
-            Text("Automatic capture records the meeting window and computer sound. Your microphone is off. No camera or microphone permission is needed for automatic recording.")
-                .font(.callout).foregroundStyle(.secondary)
-            readinessRow("Screen and system audio access checked", ready: setup.screenCaptureVerified)
+        setupCard("Screen & System Audio Recording", icon: "macwindow",
+                  detail: "Reel records the meeting window and computer sound. Your camera and microphone stay off.",
+                  state: .requirement(setup.screenCaptureVerified)) {
             HStack {
                 Button("Check access") { setup.checkScreenRecording() }.disabled(setup.busy)
-                Button("Open recording settings") { setup.openSettings("Privacy_ScreenCapture") }
+                Button("Open recording permissions") { setup.openSettings("Privacy_ScreenCapture") }
             }
-            Text("After you change access, macOS may require Reel to quit and reopen. You can reopen setup from the Reel menu. Checking access may show a macOS permission request.")
+            Text("If macOS asks you to restart Reel after granting access, reopen this guide from the Reel menu.")
                 .font(.callout).foregroundStyle(.secondary)
             Button("Quit and reopen Reel") { AppDelegate.relaunch() }.disabled(setup.busy)
-        }.fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var accessibilityAndChrome: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Reel uses Accessibility to operate the meeting's join controls in Google Chrome.")
-            readinessRow("Accessibility access", ready: setup.accessibilityAllowed)
-            Button("Allow Accessibility…") { setup.requestAccessibility() }
-            Text("Turn on Reel in System Settings → Privacy & Security → Accessibility, then return here.")
-                .font(.callout).foregroundStyle(.secondary)
-            Divider()
-            readinessRow("Google Chrome installed", ready: setup.chromeAvailable)
-            if setup.chromeAvailable {
-                Button("Open Chrome") { setup.openChrome() }
-            } else {
-                Link("Get Google Chrome", destination: URL(string: "https://www.google.com/chrome/")!)
+            setupCard("Accessibility", icon: "cursorarrow.click",
+                      detail: "Allows Reel to use the meeting’s join controls in Chrome.",
+                      state: .requirement(setup.accessibilityAllowed)) {
+                if !setup.accessibilityAllowed {
+                    Button("Allow Accessibility…") { setup.requestAccessibility() }
+                }
             }
-            Text("In Chrome, choose the profile you want Reel to use and sign in to your meeting services. Reel does not inspect unrelated browser tabs during setup.")
-                .font(.callout).foregroundStyle(.secondary)
-        }.fixedSize(horizontal: false, vertical: true)
+            setupCard("Google Chrome", icon: "globe",
+                      detail: "Open the Chrome profile you use for meetings and sign in to your meeting services.",
+                      state: .requirement(setup.chromeAvailable)) {
+                if setup.chromeAvailable {
+                    Button("Open Chrome") { setup.openChrome() }
+                } else {
+                    Link("Get Google Chrome", destination: URL(string: "https://www.google.com/chrome/")!)
+                }
+            }
+        }
     }
 
     private var review: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            readinessRow("\(setup.selectedCalendarCount) desktop calendars included", ready: setup.calendarAccessAllowed && setup.selectedCalendarCount > 0)
-            readinessRow("Screen and system audio checked", ready: setup.screenCaptureVerified)
-            readinessRow("Accessibility access", ready: setup.accessibilityAllowed)
-            readinessRow("Google Chrome installed", ready: setup.chromeAvailable)
-            Text("This also includes meetings from Google Calendar connected through the Reel website, independently of your desktop selection.")
-                .font(.callout).foregroundStyle(.secondary)
-            Text("Reel must stay open and this Mac awake. Meetings more than five minutes late are skipped. Host admission or sign-in may still require you to act in Chrome.")
-                .font(.callout).foregroundStyle(.secondary)
-            Text("Automatic recording captures computer sound with the microphone off. Meeting video stays on this Mac. When signed in to Reel, meeting audio is sent securely to OpenAI for transcription and AI notes. You can turn automatic joining off in Meeting calendars at any time.")
-                .font(.callout).foregroundStyle(.secondary)
-            Toggle("Participants in my selected desktop calendars and any Google Calendar connected in Reel have agreed to automatic recording", isOn: $setup.participantConsent)
-                .toggleStyle(.checkbox).fixedSize(horizontal: false, vertical: true)
-                .disabled(setup.busy)
-            Text("Enable checks access again and saves this consent for your current Reel account, or this Mac when signed out.")
-                .font(.caption).foregroundStyle(.secondary)
-        }.fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 12) {
+            setupCard("Setup checklist", icon: "list.bullet") {
+                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
+                    GridRow {
+                        requirement("Apple Calendar", ready: setup.calendarAccessAllowed && setup.selectedCalendarCount > 0, step: 0)
+                        requirement("Screen and system audio", ready: setup.screenCaptureVerified, step: 1)
+                    }
+                    GridRow {
+                        requirement("Accessibility", ready: setup.accessibilityAllowed, step: 2)
+                        requirement("Google Chrome", ready: setup.chromeAvailable, step: 2)
+                    }
+                }
+            }
+            setupCard("Recording and consent", icon: "checkmark.shield",
+                      detail: "Video stays on this Mac. When you’re signed in to Reel, meeting audio is sent to OpenAI for transcription and AI notes.") {
+                Text("Keep Reel open and this Mac awake. You can turn off automatic joining in Meeting calendars.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Toggle("Participants in my included Apple and Reel-connected Google calendars have agreed to automatic recording.",
+                       isOn: $setup.participantConsent)
+                    .toggleStyle(.checkbox)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .disabled(setup.busy)
+            }
+        }
     }
 
-    private func readinessRow(_ title: String, ready: Bool) -> some View {
-        Label(title, systemImage: ready ? "checkmark.circle.fill" : "circle")
+    private func requirement(_ title: String, ready: Bool, step: Int) -> some View {
+        Button { setup.step = step } label: {
+            readinessLabel(title, ready: ready)
+        }
+        .buttonStyle(.plain)
+        .disabled(setup.busy)
+        .accessibilityHint("Opens this setup step")
+    }
+
+    private enum CardState {
+        case information, ready, attention
+
+        static func requirement(_ ready: Bool) -> Self {
+            ready ? .ready : .attention
+        }
+    }
+
+    private func setupCard<Content: View>(_ title: String, icon: String, detail: String? = nil,
+                                          state: CardState = .information,
+                                          @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 19, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 38, height: 38)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(title).font(.headline)
+                    Spacer(minLength: 8)
+                    if state != .information {
+                        readinessLabel(state == .ready ? "Ready" : "Needs attention", ready: state == .ready)
+                    }
+                }
+                if let detail {
+                    Text(detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                content()
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func readinessLabel(_ title: String, ready: Bool) -> some View {
+        Label(title, systemImage: ready ? "checkmark.circle.fill" : "exclamationmark.circle")
+            .font(.callout)
             .foregroundStyle(ready ? Color.green : Color.secondary)
-            .accessibilityLabel("\(title): \(ready ? "ready" : "needs attention")")
+            .accessibilityLabel(title == "Ready" || title == "Needs attention" ? title :
+                "\(title), \(ready ? "ready" : "needs attention")")
     }
 }

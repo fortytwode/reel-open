@@ -20,6 +20,8 @@ final class MeetingJoinCoordinator: ObservableObject {
     @Published private(set) var status = ""
     @Published private(set) var busy = false
     @Published private(set) var calendarStatus = "Checking meeting calendars…"
+    @Published private(set) var cloudMeetings: [CloudCalendarMeeting] = []
+    @Published private(set) var cloudCalendarStatus = "Checking cloud meetings…"
     @Published private(set) var accessibilitySettingsURL: URL?
     @Published var reminders = OrganizationState.defaults.bool(forKey: "meetingCalendar.localReminders") {
         didSet { OrganizationState.defaults.set(reminders, forKey: "meetingCalendar.localReminders"); Task { await refresh() } }
@@ -50,16 +52,29 @@ final class MeetingJoinCoordinator: ObservableObject {
     private var routingRevision = 0
     private var scheduled = Set<String>()
     private var schedule = MeetingJoinSchedule()
-    private var refreshing = false
+    private struct RefreshScope: Equatable {
+        let generation: UInt64
+        let calendarIDs: Set<String>
+        let useAll: Bool
+    }
+    private var refreshTask: (scope: RefreshScope, task: Task<Void, Never>)?
+    private var refreshing: Bool { refreshTask != nil }
     private var manualMeetings: [CalendarMeeting] = []
     private var accountIdentity: String?
+    private var calendarAccountGeneration: UInt64 = 0
     private var consentOwner: String?
     private let base = CloudConfig.default.meetingServiceURL
 
-    var selected: CalendarMeeting? { meetings.first { $0.id == selectedID } }
+    var selected: CalendarMeeting? { visibleMeetings.first { $0.id == selectedID } }
 
-    private var hasCurrentAccount: Bool { accountIdentity == AppModel.shared.account?.userID }
+    private var hasCurrentAccount: Bool {
+        accountIdentity == AppModel.shared.account?.userID && calendarAccountGeneration == AppModel.shared.accountGeneration
+    }
     var visibleMeetings: [CalendarMeeting] { hasCurrentAccount ? meetings : [] }
+    var visibleCloudMeetings: [CloudCalendarMeeting] { hasCurrentAccount ? cloudMeetings : [] }
+    var visibleCloudCalendarStatus: String {
+        hasCurrentAccount ? cloudCalendarStatus : "Checking cloud meetings for this account…"
+    }
     var visibleStatus: String { hasCurrentAccount ? status : "" }
     var visibleCalendarStatus: String {
         hasCurrentAccount ? calendarStatus : "Refreshing calendars for this account…"
@@ -95,27 +110,50 @@ final class MeetingJoinCoordinator: ObservableObject {
     }
 
     func refresh() async {
-        guard !refreshing else { return }
-        refreshing = true
-        defer { refreshing = false }
+        if let refreshTask {
+            await refreshTask.task.value
+            if !Task.isCancelled, refreshTask.scope != refreshScope { await refresh() }
+            return
+        }
+        let scope = refreshScope
+        let task = Task {
+            defer { self.refreshTask = nil }
+            await self.reloadCalendars(scope: scope)
+        }
+        refreshTask = (scope, task)
+        await task.value
+        if !Task.isCancelled, scope != refreshScope { await refresh() }
+    }
+
+    private var refreshScope: RefreshScope {
+        let ids = Set(OrganizationState.defaults.stringArray(forKey: "meetingCalendar.selectedIDs") ?? [])
+        let mode = CalendarSelection.initialMode(
+            stored: OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool, selected: ids)
+        return RefreshScope(generation: AppModel.shared.accountGeneration, calendarIDs: ids, useAll: mode.useAll)
+    }
+
+    private func reloadCalendars(scope: RefreshScope) async {
         let owner = await CloudAuth.shared.current?.userID
+        guard refreshScope == scope, AppModel.shared.account?.userID == owner else { return }
         let currentConsentOwner = owner ?? "local:\(getuid())"
         consentOwner = currentConsentOwner
         if OrganizationState.defaults.string(forKey: "meetingCalendar.standingConsentOwner") != currentConsentOwner {
             standingConsent = false; autoJoin = false
         }
-        if owner != accountIdentity {
-            joinTask?.cancel(); selectedID = nil; consent = false; manualMeetings = []; meetings = []
-            if accountIdentity != nil {
+        if owner != accountIdentity || calendarAccountGeneration != scope.generation {
+            joinTask?.cancel(); selectedID = nil; consent = false; manualMeetings = []; meetings = []; cloudMeetings = []
+            cloudCalendarStatus = "Checking cloud meetings…"
+            status = ""; accessibilitySettingsURL = nil
+            if accountIdentity != nil, owner != accountIdentity {
                 autoJoin = false
                 standingConsent = false
             }
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: Array(scheduled))
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: Array(scheduled))
             scheduled = []; schedule.reset(); cloudIDs = [:]; desktopRouting = nil
-            routingRevision += 1; accountIdentity = owner
+            routingRevision += 1; accountIdentity = owner; calendarAccountGeneration = scope.generation
         }
-        let ids = Set(OrganizationState.defaults.stringArray(forKey: "meetingCalendar.selectedIDs") ?? [])
+        let ids = scope.calendarIDs
         let storedMode = OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool
         let mode = CalendarSelection.initialMode(stored: storedMode, selected: ids)
         if storedMode == nil {
@@ -127,8 +165,9 @@ final class MeetingJoinCoordinator: ObservableObject {
         // Never retain another refresh/account's authority while a routing request is pending.
         desktopRouting = nil; cloudIDs = [:]
         await discovery.refresh(selectedCalendarIDs: ids, useAllCalendars: useAll)
-        guard await CloudAuth.shared.current?.userID == owner else { return }
+        guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
         var found = discovery.meetings + manualMeetings
+        var cloudFound: [CloudCalendarMeeting] = []
         var cloudFailure = false
         if let session = await CloudAuth.shared.current {
             guard session.userID == owner else { return }
@@ -138,12 +177,13 @@ final class MeetingJoinCoordinator: ObservableObject {
                 var request = URLRequest(url: base.appendingPathComponent("calendar/desktop"), timeoutInterval: 15)
                 request.setValue("Bearer \(current.idToken)", forHTTPHeaderField: "Authorization")
                 let (data, response) = try await URLSession.shared.data(for: request, delegate: DesktopCalendarRedirectBlocker())
-                guard await CloudAuth.shared.current?.userID == current.userID else { return }
+                guard await CloudAuth.shared.current?.userID == current.userID, refreshScope == scope else { return }
                 if (response as? HTTPURLResponse)?.statusCode == 200,
                    let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let events = body["events"] as? [[String: Any]],
                    let routing = DesktopCalendarRouting(payload: body, now: Date()) {
                     desktopRouting = routing; routingRevision += 1
+                    cloudFound = routing.cloudMeetings
                     for event in events {
                         guard let id = event["id"] as? String, let title = event["title"] as? String,
                               let start = Self.date(event["start"]), let end = Self.date(event["end"]),
@@ -163,15 +203,20 @@ final class MeetingJoinCoordinator: ObservableObject {
             desktopRouting = DesktopCalendarRouting(payload: ["events": []], now: Date())
             routingRevision += 1
         }
-        guard await CloudAuth.shared.current?.userID == owner else { return }
+        guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
         found = found.filter { DesktopCalendarRouting.allowsLocal($0, routing: desktopRouting) }
+        cloudMeetings = cloudFound.sorted { $0.start < $1.start }
+        if owner == nil { cloudCalendarStatus = "Sign in to see your cloud meetings." }
+        else if cloudFailure { cloudCalendarStatus = "Cloud meetings are unavailable. Check your connection and refresh." }
+        else if cloudFound.isEmpty { cloudCalendarStatus = "No upcoming or ongoing cloud meetings found." }
+        else { cloudCalendarStatus = "\(cloudFound.count) upcoming or ongoing cloud \(cloudFound.count == 1 ? "meeting" : "meetings")." }
         var seen = Set<String>()
         meetings = found.filter { $0.end > Date() && seen.insert(Self.key($0)).inserted }.sorted { $0.start < $1.start }
         if let selectedID, !meetings.contains(where: { $0.id == selectedID }) {
             joinTask?.cancel(); self.selectedID = nil; consent = false
         }
         await updateReminders()
-        guard await CloudAuth.shared.current?.userID == owner else { return }
+        guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
         if cloudFailure { calendarStatus = "Cloud routing could not be verified. Meet and Teams desktop joining are paused; local Zoom meetings remain available. Check your connection and Reel sign-in." }
         else if !autoJoin { calendarStatus = "Automatic joining is off. Enable it below after connecting your desktop calendars and confirming participant consent." }
         else if !standingConsent { calendarStatus = "Automatic joining needs participant consent for this Reel account." }

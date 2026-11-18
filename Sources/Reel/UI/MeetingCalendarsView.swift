@@ -1,4 +1,5 @@
 import AppKit
+import EventKit
 import ReelCore
 import SwiftUI
 
@@ -13,47 +14,45 @@ struct MeetingCalendarsView: View {
     @State private var preparedMeetingTitle: String?
     @ObservedObject private var joining = MeetingJoinCoordinator.shared
     @State private var localLink = ""
+    @State private var updatingCalendars = false
+    @State private var lastCalendarUpdate: Date?
+    @State private var calendarActionMessage: String?
 
     private static let selectionKey = "meetingCalendar.selectedIDs"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Meeting calendars").font(.title2.weight(.semibold))
-                    Text(discovery.authorizationMessage).font(.callout).foregroundStyle(.secondary)
-                }
+                Text("Meeting calendars").font(.title2.weight(.semibold))
                 Spacer()
+                if updatingCalendars {
+                    ProgressView().controlSize(.small)
+                    Text("Updating calendars…").font(.caption).foregroundStyle(.secondary)
+                } else if let lastCalendarUpdate {
+                    Text("Last checked \(lastCalendarUpdate.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Button("Guided setup…") {
                     (NSApp.delegate as? AppDelegate)?.showMeetingSetup()
                 }
-                Button("Connect calendars") {
-                    Task {
-                        await discovery.connect()
-                        await refresh()
-                    }
-                }
-                if discovery.accessNeedsSettings {
-                    Button("Open calendar settings") {
-                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")!)
-                    }
-                }
-                Button("Refresh") { Task { await refresh() } }
+                Button("Refresh") { Task { await updateCalendars() } }
+                    .disabled(updatingCalendars)
+            }
+            if let calendarActionMessage {
+                Text(calendarActionMessage).font(.callout).foregroundStyle(.secondary)
             }
 
             GroupBox("Join and record on this Mac") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Uses your signed-in Chrome profile and records the meeting window locally. Keep Reel open and this Mac awake.")
-                    Text("Sign in to Reel for meeting transcription and AI notes. Meeting audio is sent securely to OpenAI; video stays on this Mac. Transcript seek times are approximate.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Reel joins in Chrome. Keep this Mac awake and Reel open for local automatic joining.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     HStack {
                         TextField("Or paste a Google Meet, Zoom or Teams link", text: $localLink)
                         Button("Use link") { joining.prepareLink(localLink) }.disabled(joining.busy)
                     }
                     Picker("Meeting", selection: $joining.selectedID) {
                         Text("Choose a meeting").tag(String?.none)
-                        ForEach(joining.meetings) { meeting in Text(meeting.title).tag(Optional(meeting.id)) }
+                        ForEach(joining.visibleMeetings) { meeting in Text(meeting.title).tag(Optional(meeting.id)) }
                     }
                     HStack {
                         Button("Join in Chrome and record") {
@@ -67,61 +66,80 @@ struct MeetingCalendarsView: View {
                             Button("Open Accessibility settings") { NSWorkspace.shared.open(url) }
                         }
                     }
-                    if !joining.status.isEmpty { Text(joining.status).font(.caption).fixedSize(horizontal: false, vertical: true) }
-                    Text(joining.calendarStatus).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    if !joining.visibleStatus.isEmpty { Text(joining.visibleStatus).font(.caption).fixedSize(horizontal: false, vertical: true) }
+                    Text(joining.visibleCalendarStatus).font(.callout).fixedSize(horizontal: false, vertical: true)
                     Toggle("Prompt when a calendar meeting starts", isOn: $joining.reminders)
                     Toggle("Participants in my selected desktop and Reel-connected Google calendars have agreed to recording", isOn: $joining.standingConsent)
                     Toggle("Automatically join and record calendar meetings on this Mac", isOn: $joining.autoJoin)
                         .disabled(!joining.standingConsent || joining.busy)
-                    Text("Enable automatic joining once for this Reel account after connecting calendars once. All desktop calendars are included by default. Meetings already in progress by more than five minutes are skipped. Reel cannot join while this Mac is asleep or the app is closed.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Text("Automatic capture records computer sound with the microphone off. Manual joining includes your microphone. Some calls require host admission or manual sign-in.")
+                    Text("Automatic recordings use computer sound with the microphone off. Reel skips calls more than five minutes late. Sign in to get transcripts and notes from OpenAI. Video stays on this Mac.")
                         .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }.padding(4)
             }
 
             GroupBox("Desktop calendars") {
                 VStack(alignment: .leading, spacing: 8) {
-                Toggle("Use all calendars on this Mac", isOn: $useAllCalendars)
-                    .onChange(of: useAllCalendars) { _, value in
-                        joining.standingConsent = false
-                        OrganizationState.defaults.set(value, forKey: "meetingCalendar.useAll")
-                        Task { await refresh(); await joining.refresh() }
+                    HStack {
+                        Text(discovery.authorizationMessage).font(.callout).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(desktopCalendarActionTitle, action: connectDesktopCalendars)
+                            .disabled(updatingCalendars)
                     }
-                if useAllCalendars {
-                    Text("Includes Google, Apple and other accounts synced to Apple Calendar. New calendars are included automatically.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if discovery.calendars.isEmpty {
-                    Text("Connect calendars once. No individual calendar selection is needed.")
-                        .font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 5)
-                } else if !useAllCalendars {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(discovery.calendars) { calendar in
-                                Toggle(isOn: selectionBinding(for: calendar.id)) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(calendar.title)
-                                        Text(calendar.accountName).font(.caption).foregroundStyle(.secondary)
+                    if hasDesktopCalendarAccess {
+                        Text("\(discovery.calendars.count) calendars found on this Mac")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Toggle("Use all calendars on this Mac", isOn: $useAllCalendars)
+                            .onChange(of: useAllCalendars) { _, value in
+                                joining.standingConsent = false
+                                OrganizationState.defaults.set(value, forKey: "meetingCalendar.useAll")
+                                Task { await refresh(); await joining.refresh() }
+                            }
+                        if !useAllCalendars && !discovery.calendars.isEmpty {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(discovery.calendars) { calendar in
+                                        Toggle(isOn: selectionBinding(for: calendar.id)) {
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(calendar.title)
+                                                Text(calendar.accountName).font(.caption).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        .toggleStyle(.checkbox)
                                     }
                                 }
-                                .toggleStyle(.checkbox)
                             }
+                            .frame(maxHeight: 145)
                         }
                     }
-                    .frame(maxHeight: 145)
                 }
+            }
+
+            GroupBox("Google Calendar in Reel") {
+                HStack {
+                    Text(joining.visibleCloudCalendarStatus)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    if CloudConfig.default.isConfigured {
+                        Button("Manage Google Calendar…", action: openCloudCalendar)
+                    }
                 }
             }
 
             HStack {
-                Text("Upcoming meetings").font(.headline)
+                Text("Upcoming desktop meetings").font(.headline)
                 Spacer()
-                Text("Next 7 days").font(.caption).foregroundStyle(.secondary)
+                Text("\(discovery.meetings.count) found · Next 7 days").font(.caption).foregroundStyle(.secondary)
             }
 
             if discovery.meetings.isEmpty {
-                ContentUnavailableView("No meetings found", systemImage: "calendar", description: Text("Connect your desktop calendars to find upcoming meetings with a supported call link."))
+                ContentUnavailableView(
+                    "No upcoming desktop meetings",
+                    systemImage: "calendar",
+                    description: Text(hasDesktopCalendarAccess
+                        ? "Reel looks for Google Meet, Zoom and Microsoft Teams links in your selected desktop calendars."
+                        : "Allow Reel to read calendars synced to Apple Calendar.")
+                )
             } else {
                 List(discovery.meetings) { meeting in
                     meetingRow(meeting)
@@ -129,8 +147,6 @@ struct MeetingCalendarsView: View {
                 .listStyle(.inset)
             }
 
-            Text("Google Calendar meetings connected in Reel also appear in the join selector when you are signed in. Other calendar accounts can be selected above after connecting them in macOS.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let preparedMeetingTitle {
                 Text("Ready to record: \(preparedMeetingTitle). Close this window and start the meeting recording in Reel.")
                     .font(.callout.weight(.medium)).foregroundStyle(.green)
@@ -139,7 +155,14 @@ struct MeetingCalendarsView: View {
         }
         .padding(18)
         .frame(width: 680, height: 760)
-        .task { await joining.refresh(); await refreshPeriodically() }
+        .task { await refreshPeriodically() }
+        .task(id: model.accountGeneration) {
+            preparedMeetingTitle = nil
+            await joining.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await refresh() }
+        }
     }
 
     private func meetingRow(_ meeting: CalendarMeeting) -> some View {
@@ -164,8 +187,59 @@ struct MeetingCalendarsView: View {
             OrganizationState.defaults.set(false, forKey: "meetingCalendar.standingConsent")
             if selected { selectedCalendarIDs.insert(id) } else { selectedCalendarIDs.remove(id) }
             OrganizationState.defaults.set(Array(selectedCalendarIDs), forKey: Self.selectionKey)
-            Task { await refresh() }
+            Task { await refresh(); await joining.refresh() }
         })
+    }
+
+    private var hasDesktopCalendarAccess: Bool {
+        EKEventStore.authorizationStatus(for: .event) == .fullAccess
+    }
+
+    private var desktopCalendarActionTitle: String {
+        if hasDesktopCalendarAccess { return "Open Apple Calendar…" }
+        if discovery.accessNeedsSettings { return "Open calendar privacy settings…" }
+        return "Connect desktop calendars"
+    }
+
+    private func connectDesktopCalendars() {
+        calendarActionMessage = nil
+        if hasDesktopCalendarAccess {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iCal"),
+               NSWorkspace.shared.open(url) {
+                calendarActionMessage = "In Apple Calendar, open Settings → Accounts to add or manage accounts."
+            } else {
+                calendarActionMessage = "Apple Calendar could not be opened. Manage your calendar accounts in System Settings → Internet Accounts."
+            }
+        } else if discovery.accessNeedsSettings {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars"),
+               NSWorkspace.shared.open(url) {
+                return
+            }
+            calendarActionMessage = "Open System Settings → Privacy & Security → Calendars and allow Reel."
+        } else {
+            Task { await updateCalendars(requestAccess: true) }
+        }
+    }
+
+    private func openCloudCalendar() {
+        calendarActionMessage = nil
+        let page = CloudConfig.default.viewerBase.appendingPathComponent("record")
+        guard var components = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return }
+        components.fragment = "meeting-calendar-panel"
+        if let url = components.url, NSWorkspace.shared.open(url) { return }
+        calendarActionMessage = "The Reel website could not be opened."
+    }
+
+    @MainActor
+    private func updateCalendars(requestAccess: Bool = false) async {
+        guard !updatingCalendars else { return }
+        updatingCalendars = true
+        defer { updatingCalendars = false }
+        calendarActionMessage = nil
+        if requestAccess { await discovery.connect() }
+        await refresh()
+        await joining.refresh()
+        lastCalendarUpdate = Date()
     }
 
     @MainActor
