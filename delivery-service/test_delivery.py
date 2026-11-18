@@ -80,6 +80,36 @@ class MessageTests(unittest.TestCase):
         self.assertIn('&lt;script&gt; &amp; more', html)
         self.assertIn('a=1&amp;b=2', html)
 
+    def test_renders_current_and_legacy_note_markup_in_both_parts(self):
+        from app import recap_message
+
+        summary = (
+            'Outcome\nAgreed to ship.\n\nKey points\n• Timeline: **Tuesday**\n'
+            '• Check *all* platforms.\n\n## Decisions\n1. Keep the existing plan.\n'
+            '2) Keep the existing dates.\n\n**Next steps:**\n- Alex: run `echo **` & verify.\n'
+            '```shell\necho ** <file>\n```\nRaw <img src=x> and unmatched ** stay.'
+        )
+        notes_url = 'https://example.com/reel#meetings/abc'
+        message = recap_message(['alex@rocketshiphq.com', 'sam@rocketshiphq.com'], 'Meeting',
+                                summary, notes_url, 'meeting@rocketshiphq.com')
+        plain, html = [part.get_payload(decode=True).decode() for part in message.get_payload()]
+
+        self.assertEqual(message['To'], 'alex@rocketshiphq.com, sam@rocketshiphq.com')
+        self.assertEqual(message['Message-ID'], '<meeting@rocketshiphq.com>')
+        self.assertEqual(message['Subject'], 'Meeting recap: Meeting')
+        self.assertIn('Outcome\nAgreed to ship.\n\nKey points\n• Timeline: Tuesday', plain)
+        self.assertIn('Decisions\n1. Keep the existing plan.\n2) Keep the existing dates.', plain)
+        self.assertIn('Next steps\n• Alex: run echo ** & verify.', plain)
+        self.assertIn('echo ** <file>\nRaw <img src=x> and unmatched ** stay.', plain)
+        self.assertIn('Meeting notes: ' + notes_url, plain)
+        self.assertIn('<h2>Outcome</h2><p>Agreed to ship.</p>', html)
+        self.assertIn('<ul><li>Timeline: <strong>Tuesday</strong></li><li>Check <em>all</em> platforms.</li></ul>', html)
+        self.assertIn('<h2>Decisions</h2><ol><li>Keep the existing plan.</li><li>Keep the existing dates.</li></ol>', html)
+        self.assertIn('<h2>Next steps</h2><ul><li>Alex: run <code>echo **</code> &amp; verify.</li></ul>', html)
+        self.assertIn('<pre><code>echo ** &lt;file&gt;</code></pre>', html)
+        self.assertIn('Raw &lt;img src=x&gt; and unmatched ** stay.', html)
+        self.assertIn(f'<a href="{notes_url}">Meeting notes</a>', html)
+
 @patch.dict('os.environ', ROCKETSHIP_CONFIG)
 class CalendarEndpointTests(unittest.TestCase):
     def test_lists_eligible_without_join_url_or_passcode(self):
