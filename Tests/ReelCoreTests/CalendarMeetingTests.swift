@@ -28,6 +28,21 @@ final class CalendarMeetingTests: XCTestCase {
          "capture_provider": capture]
     }
 
+    func testOngoingCloudRecordingIsVisibleAndStillExcludedFromLocalJoining() throws {
+        let call = routingMeeting(meet, start: now.addingTimeInterval(-240))
+        var event = routingEvent(call)
+        event["status"] = "recording"
+        event["attendees"] = ["invitee@example.net"]
+        let routing = try XCTUnwrap(DesktopCalendarRouting(payload: ["events": [],
+            "cloud_events": [event], "cloud_providers": ["google_meet"]], now: now))
+        let row = try XCTUnwrap(routing.cloudMeetings.first)
+        XCTAssertEqual(row.title, "Different server title")
+        XCTAssertEqual(row.status, "recording")
+        XCTAssertEqual(row.start, call.start)
+        XCTAssertEqual(row.attendeeEmails, ["invitee@example.net"])
+        XCTAssertFalse(DesktopCalendarRouting.allowsLocal(call, routing: routing))
+    }
+
     func testCloudOccurrenceExcludesEveryMergedCalendarCopyButRetainsOtherLocalMeetings() throws {
         let cloud = routingMeeting(teams)
         let outlook = routingMeeting("https://teams.microsoft.com/meet/123456789/?p=passcode", calendarID: "outlook")

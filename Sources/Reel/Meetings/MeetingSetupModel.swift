@@ -14,7 +14,6 @@ final class MeetingSetupModel: ObservableObject {
     @Published private(set) var calendarCount = 0
     @Published private(set) var selectedCalendarCount = 0
     @Published private(set) var meetingCount = 0
-    @Published private(set) var useAllCalendars = true
     @Published private(set) var screenCaptureVerified = false
     @Published private(set) var accessibilityAllowed = false
     @Published private(set) var chromeAvailable = false
@@ -40,15 +39,6 @@ final class MeetingSetupModel: ObservableObject {
         MeetingSetupReadiness(calendarAccessAllowed: calendarAccessAllowed,
             selectedCalendarCount: selectedCalendarCount, screenCaptureVerified: screenCaptureVerified,
             accessibilityAllowed: accessibilityAllowed, chromeAvailable: chromeAvailable)
-    }
-
-    var canAdvance: Bool {
-        switch step {
-        case 0: return calendarAccessAllowed && selectedCalendarCount > 0
-        case 1: return screenCaptureVerified
-        case 2: return accessibilityAllowed && chromeAvailable
-        default: return false
-        }
     }
 
     func cancelPendingActions() {
@@ -158,7 +148,6 @@ final class MeetingSetupModel: ObservableObject {
                 return
             }
             self.enabled = true
-            self.status = "Automatic joining is enabled. Setup permissions are configured."
         }
     }
 
@@ -192,6 +181,14 @@ final class MeetingSetupModel: ObservableObject {
         return Scope(ids: ids, useAll: all)
     }
 
+    private func hasStandingConsent(owner: String, scope: Scope) -> Bool {
+        let mode = CalendarSelection.initialMode(
+            stored: OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool,
+            selected: scope.ids)
+        return joining.standingConsent && !mode.expandsLegacyScope &&
+            OrganizationState.defaults.string(forKey: "meetingCalendar.standingConsentOwner") == owner
+    }
+
     private func refreshObservedState() async {
         let owner = await currentOwner()
         guard active, !Task.isCancelled else { return }
@@ -203,12 +200,7 @@ final class MeetingSetupModel: ObservableObject {
                 status = "Your account or calendar selection changed. Review and confirm consent again."
             }
         } else {
-            let expandsLegacyScope = CalendarSelection.initialMode(
-                stored: OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool,
-                selected: scope.ids).expandsLegacyScope
-            participantConsent = joining.standingConsent &&
-                !expandsLegacyScope &&
-                OrganizationState.defaults.string(forKey: "meetingCalendar.standingConsentOwner") == owner
+            participantConsent = hasStandingConsent(owner: owner, scope: scope)
         }
         observedOwner = owner
         observedScope = scope
@@ -217,23 +209,18 @@ final class MeetingSetupModel: ObservableObject {
         calendarNeedsSettings = authorization == .denied || authorization == .restricted || authorization == .writeOnly
         accessibilityAllowed = AXIsProcessTrusted()
         chromeAvailable = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil
-        if enabled && (!joining.autoJoin || !joining.standingConsent ||
-            OrganizationState.defaults.string(forKey: "meetingCalendar.standingConsentOwner") != owner ||
-            !calendarAccessAllowed || !accessibilityAllowed || !chromeAvailable) {
-            enabled = false
-            status = "Automatic joining is off or a setup requirement changed. Review setup before enabling again."
-        }
-        useAllCalendars = scope.useAll
         await discovery.refresh(selectedCalendarIDs: scope.ids, useAllCalendars: scope.useAll)
-        guard active, !Task.isCancelled, currentScope() == scope else { return }
+        guard active, !Task.isCancelled, observedOwner == owner, currentScope() == scope else { return }
         calendarCount = discovery.calendars.count
         selectedCalendarCount = CalendarSelection.identifiers(available: Set(discovery.calendars.map(\.id)),
             selected: scope.ids, useAll: scope.useAll).count
         meetingCount = discovery.meetings.count
-        if enabled && selectedCalendarCount == 0 {
-            enabled = false
-            status = "No included calendars are available. Review your calendar connection before enabling again."
+        let alreadyEnabled = joining.autoJoin && hasStandingConsent(owner: owner, scope: scope) &&
+            calendarAccessAllowed && selectedCalendarCount > 0 && accessibilityAllowed && chromeAvailable
+        if enabled && !alreadyEnabled {
+            status = "Automatic joining is off or a setup requirement changed. Review setup before enabling again."
         }
+        enabled = alreadyEnabled
     }
 
     private func verifyScreenRecording() async -> Bool {

@@ -106,6 +106,7 @@ actor CloudAuth {
                         "Fixture requires installed Chrome (nothing will launch)")
             try await observationDoesNotConsent()
             try await initialConsentOwnership()
+            try await alreadyEnabledSetup()
             try await validCommitAndGuards()
             try await invalidInitialRequirements()
             try await cancelDuringScreenCheck()
@@ -188,6 +189,24 @@ actor CloudAuth {
             try require(joining.commits.isEmpty && ScreenCapture.gate.entered == 0, "Consent restore performed enable/capture")
         }
         passed("standing consent restores only for current owner and unchanged explicit scope")
+    }
+
+    static func alreadyEnabledSetup() async throws {
+        let model = await fresh()
+        joining.standingConsent = true
+        joining.autoJoin = true
+        defaults["meetingCalendar.standingConsentOwner"] = "owner-a"
+        applyDefaults()
+        model.refreshCalendars()
+        try await settled(model)
+        try require(model.enabled, "Existing automatic joining did not show the completed setup")
+        try require(joining.commits.isEmpty && ScreenCapture.gate.entered == 0,
+                    "Opening completed setup performed enable or requested capture access")
+        await CloudAuth.shared.setOwner("owner-b")
+        model.refreshCalendars()
+        try await settled(model)
+        try require(!model.enabled && !model.participantConsent, "Completed setup leaked across accounts")
+        passed("completed setup observes the current owner without requesting access")
     }
 
     static func validCommitAndGuards() async throws {

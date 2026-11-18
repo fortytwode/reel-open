@@ -200,7 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
 
     private func togglePanel() {
         if let popover, popover.isShown { popover.performClose(nil); return }
-        guard let button = statusItem.button else { return }
+        presentRecorderPanel()
+    }
+
+    private func presentRecorderPanel() {
+        guard model.phase == .idle, popover?.isShown != true, let button = statusItem.button else { return }
         let p = NSPopover()
         p.behavior = .transient
         p.delegate = self
@@ -413,7 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             window.minSize = NSSize(width: 1060, height: 620)
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: MeetingWorkspaceView(model: model, showRecorder: { [weak self] in
-                self?.showRecorder()
+                self?.presentRecorderPanel()
             }))
             window.center()
             window.setFrameAutosaveName("ReelMeetingWorkspace")

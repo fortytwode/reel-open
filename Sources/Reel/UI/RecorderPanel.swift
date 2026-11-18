@@ -11,8 +11,7 @@ struct RecorderPanel: View {
     var signIn: () -> Void
     var copyLastLink: () -> Void
 
-    @State private var cameras: [AVCaptureDevice] = CaptureDevices.cameras()
-    @State private var microphones: [AVCaptureDevice] = CaptureDevices.microphones()
+    @State private var devices: (cameras: [DeviceInfo], microphones: [DeviceInfo], defaultMicID: String?)?
     @State private var previewSession: AVCaptureSession?
     @State private var processedFrame: CVPixelBuffer?
     @State private var showSettings = false
@@ -20,6 +19,13 @@ struct RecorderPanel: View {
 
     private var s: ReelSettings { model.effectiveSettings() }
     private var cameraOn: Bool { s.cameraEnabled || s.mode == .camera }
+    private var selectedCamera: DeviceInfo? {
+        DeviceDefaults.camera(from: devices?.cameras ?? [], savedID: s.cameraID)
+    }
+    private var selectedMic: DeviceInfo? {
+        DeviceDefaults.microphone(from: devices?.microphones ?? [], savedID: s.microphoneID,
+                                  systemDefaultID: devices?.defaultMicID)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -42,8 +48,9 @@ struct RecorderPanel: View {
         }
         .padding(16)
         .frame(width: 360)
-        .task(id: PreviewKey(on: cameraOn, cameraID: s.cameraID)) { await restartPreview() }
-        .task(id: MicKey(on: s.audio.usesMic && !model.meetingMode, micID: s.microphoneID)) { restartMeter() }
+        .task(id: model.meetingMode) { await loadRecordingDevices() }
+        .task(id: PreviewKey(on: cameraOn && devices != nil, cameraID: s.cameraID)) { await restartPreview() }
+        .task(id: MicKey(on: s.audio.usesMic && !model.meetingMode && devices != nil, micID: s.microphoneID)) { restartMeter() }
         .onDisappear {
             RecorderController.shared.stopPanelPreview()
             micLevel.stop()
@@ -127,11 +134,12 @@ struct RecorderPanel: View {
                 VStack(spacing: 8) {
                     Image(systemName: "video.slash").font(.system(size: 26))
                     if cameraOn {
-                        Text(cameras.isEmpty ? "No camera found" : "Starting camera…").font(.callout)
+                        Text(devices?.cameras.isEmpty == true ? "No camera found" : "Starting camera…").font(.callout)
                     } else {
                         Text("Camera is off").font(.callout)
-                        Button("Turn camera on") { setCamera(CaptureDevices.defaultCamera(savedID: s.cameraID)?.uniqueID) }
+                        Button("Turn camera on") { setCamera(selectedCamera?.id) }
                             .controlSize(.small)
+                            .disabled(devices == nil)
                     }
                 }
                 .foregroundStyle(.white.opacity(0.75))
@@ -176,15 +184,16 @@ struct RecorderPanel: View {
     private var cameraRow: some View {
         row(symbol: cameraOn ? "video.fill" : "video.slash", on: cameraOn) {
             Menu {
-                ForEach(cameras, id: \.uniqueID) { cam in Button(cam.localizedName) { setCamera(cam.uniqueID) } }
+                ForEach(devices?.cameras ?? []) { cam in Button(cam.name) { setCamera(cam.id) } }
             } label: {
-                Text(cameraOn ? (CaptureDevices.defaultCamera(savedID: s.cameraID)?.localizedName ?? "No camera found") : "No camera")
+                Text(cameraOn ? (selectedCamera?.name ?? (devices == nil ? "Loading cameras…" : "No camera found")) : "No camera")
             }
         } trailing: {
             if s.mode != .camera {
                 Toggle("", isOn: Binding(get: { s.cameraEnabled },
-                                         set: { $0 ? setCamera(CaptureDevices.defaultCamera(savedID: s.cameraID)?.uniqueID) : setCamera(nil) }))
+                                         set: { $0 ? setCamera(selectedCamera?.id) : setCamera(nil) }))
                     .toggleStyle(.switch).controlSize(.mini).labelsHidden().help("Camera on / off")
+                    .disabled(devices == nil)
             }
         }
     }
@@ -193,14 +202,14 @@ struct RecorderPanel: View {
         row(symbol: s.audio.usesMic ? "mic.fill" : "mic.slash", on: s.audio.usesMic) {
             VStack(alignment: .leading, spacing: 3) {
                 Menu {
-                    ForEach(microphones, id: \.uniqueID) { mic in
-                        Button(mic.localizedName) {
-                            model.settings.microphoneID = mic.uniqueID
+                    ForEach(devices?.microphones ?? []) { mic in
+                        Button(mic.name) {
+                            model.settings.microphoneID = mic.id
                             setMic(true)
                         }
                     }
                 } label: {
-                    Text(s.audio.usesMic ? (CaptureDevices.defaultMicrophone(savedID: s.microphoneID)?.localizedName ?? "No microphone found") : "No microphone")
+                    Text(s.audio.usesMic ? (selectedMic?.name ?? (devices == nil ? "Loading microphones…" : "No microphone found")) : "No microphone")
                 }
                 if s.audio.usesMic { LevelMeter(level: micLevel.level) }
             }
@@ -289,9 +298,21 @@ struct RecorderPanel: View {
 
     // MARK: Actions
 
+    private func loadRecordingDevices() async {
+        // The meeting form uses neither list, and cold camera discovery can block.
+        guard !model.meetingMode, devices == nil, !Task.isCancelled else { return }
+        let discovered = await Task.detached(priority: .userInitiated) {
+            (CaptureDevices.cameras().map(CaptureDevices.info),
+             CaptureDevices.microphones().map(CaptureDevices.info),
+             AVCaptureDevice.default(for: .audio)?.uniqueID)
+        }.value
+        guard !Task.isCancelled, !model.meetingMode else { return }
+        devices = discovered
+    }
+
     private func restartPreview() async {
         processedFrame = nil
-        guard cameraOn else {
+        guard cameraOn, devices != nil else {
             previewSession = nil
             RecorderController.shared.stopPanelPreview()
             return
@@ -302,7 +323,7 @@ struct RecorderPanel: View {
 
     private func restartMeter() {
         micLevel.stop()
-        guard !model.meetingMode, s.audio.usesMic,
+        guard !model.meetingMode, s.audio.usesMic, devices != nil,
               let mic = CaptureDevices.defaultMicrophone(savedID: s.microphoneID) else { return }
         Task {
             guard await Permissions.request(.audio) else { return }

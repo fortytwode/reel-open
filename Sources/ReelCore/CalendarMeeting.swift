@@ -263,10 +263,22 @@ public struct CalendarEventCandidate: Sendable {
     }
 }
 
+/// Display information from the signed-in account's cloud calendar feed.
+public struct CloudCalendarMeeting: Identifiable {
+    public let id: String
+    public let title: String
+    public let start: Date
+    public let end: Date
+    public let platform: MeetingPlatform
+    public let status: String
+    public let attendeeEmails: [String]
+}
+
 /// A fresh owner-scoped desktop feed. Only occurrence and active link identities retain cloud ownership.
 public struct DesktopCalendarRouting {
     private var cloudOccurrences: Set<String> = []
     private var activeCloudLinks: Set<String> = []
+    public private(set) var cloudMeetings: [CloudCalendarMeeting] = []
 
     public init?(payload: [String: Any], now: Date) {
         guard let events = payload["events"] as? [[String: Any]] else { return nil }
@@ -290,6 +302,11 @@ public struct DesktopCalendarRouting {
                 start: start, end: end, joinURL: link.url, platform: link.platform)
             cloudOccurrences.insert(occurrence.occurrenceIdentity)
             if start <= now { activeCloudLinks.insert(Self.linkIdentity(link.url)) }
+            if let title = event["title"] as? String, !title.isEmpty,
+               let status = event["status"] as? String {
+                cloudMeetings.append(CloudCalendarMeeting(id: id, title: title, start: start, end: end,
+                    platform: link.platform, status: status, attendeeEmails: event["attendees"] as? [String] ?? []))
+            }
         }
     }
 
