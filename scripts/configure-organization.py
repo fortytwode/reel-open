@@ -39,7 +39,7 @@ def valid_storage_bucket(value):
 
 
 def render(source, storage_fragment=None, root=ROOT):
-    config = json.loads(source.read_text())
+    config = json.loads(source.read_text(encoding="utf-8"))
     patterns = {"allowedEmailDomain": HOST, "projectID": r"[a-z][a-z0-9-]{4,28}[a-z0-9]",
                 "apiKey": r"[A-Za-z0-9_-]+", "authDomain": HOST,
                 "firestoreDatabase": r"(?:[a-z][a-z0-9-]*|\(default\))",
@@ -74,22 +74,22 @@ def render(source, storage_fragment=None, root=ROOT):
     # DNS labels contain only letters, digits and internal hyphens. Quote every dot in RE2.
     domain_pattern = client["allowedEmailDomain"].replace(".", "[.]")
     for name in ("firestore.rules", "storage.rules"):
-        template = (ROOT / "firebase" / name).read_text()
+        template = (ROOT / "firebase" / name).read_text(encoding="utf-8")
         marker = "false /* __ORGANIZATION_DOMAIN__ */"
         if template.count(marker) != 1:
             raise ValueError(f"missing domain predicate in {name}")
         predicate = r"request.auth.token.email.lower().matches('^[^@\\s<>]+@" + domain_pattern + "$')"
         rules[name] = template.replace(marker, predicate)
-    fragment = storage_fragment.read_text() if storage_fragment else ""
+    fragment = storage_fragment.read_text(encoding="utf-8") if storage_fragment else ""
     rules["storage.rules"] = rules["storage.rules"].replace("// __ADDITIONAL_STORAGE_RULES__", fragment)
-    cors = json.loads((ROOT / "firebase/cors.json").read_text())
+    cors = json.loads((ROOT / "firebase/cors.json").read_text(encoding="utf-8"))
     cors[0]["origin"] = origins
     rules["cors.json"] = json.dumps(cors, indent=2) + "\n"
     public = json.dumps(client, indent=2) + "\n"
     outputs = {name: public for name in (".reel/organization.json", "web/organization.json", "desktop-windows/organization.json")}
     outputs[".reel/backend.env"] = "".join(f"{key}={shlex.quote(value)}\n" for key, value in env.items())
     outputs.update({f".reel/firebase/{name}": data for name, data in rules.items()})
-    deployment = json.loads((ROOT / "firebase.json").read_text())
+    deployment = json.loads((ROOT / "firebase.json").read_text(encoding="utf-8"))
     deployment["storage"] = [{"target": "main", "rules": ".reel/firebase/storage.rules"}]
     deployment["firestore"] = [{"database": client["firestoreDatabase"], "rules": ".reel/firebase/firestore.rules"}]
     outputs["firebase.local.json"] = json.dumps(deployment, indent=2) + "\n"
@@ -97,7 +97,7 @@ def render(source, storage_fragment=None, root=ROOT):
     host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
     match = f"{parts.scheme}://{host}/record*"
     extension = ROOT / "browser-extension"
-    manifest = json.loads((extension / "manifest.json").read_text())
+    manifest = json.loads((extension / "manifest.json").read_text(encoding="utf-8"))
     manifest["homepage_url"] = client["webBase"]
     scope = hashlib.sha256(f'{client["projectID"]}\n{client["allowedEmailDomain"]}'.encode()).hexdigest()
     manifest["version_name"] = f'{manifest["version"]} ({scope})'
@@ -105,12 +105,12 @@ def render(source, storage_fragment=None, root=ROOT):
     manifest["content_scripts"].append({"matches": [match], "js": ["organization.js", "reel-relay.js"], "run_at": "document_idle"})
     outputs[".reel/browser-extension/manifest.json"] = json.dumps(manifest, indent=2) + "\n"
     for name in ("organization.js", "parser.js", "content.js", "background.js", "reel-relay.js"):
-        outputs[f".reel/browser-extension/{name}"] = (extension / name).read_text()
+        outputs[f".reel/browser-extension/{name}"] = (extension / name).read_text(encoding="utf-8")
     icon = (extension / "icon128.png").read_bytes()
     for name, data in outputs.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(data)
+        path.write_text(data, encoding="utf-8")
     (root / ".reel/browser-extension/icon128.png").write_bytes(icon)
 
 
