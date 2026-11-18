@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     private var model: AppModel { AppModel.shared }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ReelAppearance.shared.apply()
         // New status items go leftmost, which on a crowded notched menu bar hides them behind
         // the notch. Start near the right edge (points from it); ⌘-drag moves it and macOS saves that.
         let positionKey = "NSStatusItem Preferred Position Item-0"
@@ -132,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         file.addItem(.separator())
         let meetings = item("Meetings", #selector(showMeetingWorkspace)); meetings.keyEquivalent = "1"; file.addItem(meetings)
         let library = item("Web Library", #selector(openWebLibrary)); library.keyEquivalent = "l"; file.addItem(library)
-        file.addItem(item("Local Recordings…", #selector(showLibrary)))
+        file.addItem(item("Screen Recordings…", #selector(showLibrary)))
         file.addItem(item("Meeting Calendars…", #selector(showMeetings)))
         file.addItem(item("Set Up Automatic Meetings…", #selector(showMeetingSetup)))
         let close = NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -200,6 +201,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
 
     private func togglePanel() {
         if let popover, popover.isShown { popover.performClose(nil); return }
+        presentRecorderPanel()
+    }
+
+    func showScreenRecordingPanel() {
+        guard !model.isBusy else { return }
+        model.meetingMode = false
+        model.meetingTitle = ""
+        model.meetingAttendees = ""
+        model.meetingCalendarOccurrenceID = nil
+        model.meetingCalendarReference = nil
         presentRecorderPanel()
     }
 
@@ -344,7 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         lib.keyEquivalent = "l"
         menu.addItem(lib)
         menu.addItem(item("Meetings", #selector(showMeetingWorkspace)))
-        menu.addItem(item("Local Recordings…", #selector(showLibrary)))
+        menu.addItem(item("Screen Recordings…", #selector(showLibrary)))
         menu.addItem(item("Meeting Calendars…", #selector(showMeetings)))
         menu.addItem(item("Set Up Automatic Meetings…", #selector(showMeetingSetup)))
         let settings = item("Settings…", #selector(showSettings))
@@ -431,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     @objc func showLibrary() {
         if libraryWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 520), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-            w.title = "Reel Library"
+            w.title = "Screen Recordings"
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: LibraryView(model: model))
             w.center()

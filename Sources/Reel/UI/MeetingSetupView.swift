@@ -17,20 +17,25 @@ struct MeetingSetupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("Automatic meetings on this Mac").font(.title2.weight(.semibold))
-                Text("Reel joins scheduled meetings in Chrome and records the meeting window on this Mac.")
+                Text("Join in Chrome on this Mac").font(.title2.weight(.semibold))
+                Text("Use Chrome on this Mac for eligible calendar meetings. The Reel notetaker joins supported Google Meet and Teams calls even when your Mac is closed.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if !setup.enabled {
+            if !showResult {
                 progressStrip
             }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if setup.enabled {
-                        setupCard("Automatic joining is on", icon: "checkmark.circle", detail: "Keep Reel open and this Mac awake. Chrome may still ask you to sign in or wait for the host.", state: .ready) {
+                    if showResult {
+                        setupCard(setup.enabled ? "Joining in Chrome is on" : "Joining in Chrome is paused",
+                                  icon: "checkmark.circle",
+                                  detail: setup.enabled
+                                      ? "Keep Reel open and this Mac awake. Chrome may ask you to sign in or wait for the host."
+                                      : "Setup is complete. Resume joining in Meeting calendars when you’re ready.",
+                                  state: .ready) {
                             Button("Manage calendars…", action: onManageCalendars)
                         }
                     } else {
@@ -60,6 +65,8 @@ struct MeetingSetupView: View {
         .task { await setup.monitorForeground() }
     }
 
+    private var showResult: Bool { setup.completed || setup.enabled }
+
     private var progressStrip: some View {
         HStack(spacing: 8) {
             ForEach(steps.indices, id: \.self) { index in
@@ -81,8 +88,8 @@ struct MeetingSetupView: View {
 
     private var footer: some View {
         HStack {
-            if !setup.enabled {
-                Button(setup.step == steps.count - 1 ? "Done" : "Skip setup", action: onLater)
+            if !showResult {
+                Button("Skip setup", action: onLater)
                     .help("Close setup and keep your current recording settings")
                     .keyboardShortcut(.cancelAction)
             }
@@ -90,7 +97,7 @@ struct MeetingSetupView: View {
             if setup.busy {
                 ProgressView().controlSize(.small).accessibilityLabel("Checking setup")
             }
-            if setup.enabled {
+            if showResult {
                 Button("Done", action: onFinish)
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
@@ -104,7 +111,7 @@ struct MeetingSetupView: View {
                         .keyboardShortcut(.defaultAction)
                         .buttonStyle(.borderedProminent)
                 } else {
-                    Button("Enable automatic joining") { setup.enable() }
+                    Button("Complete setup") { setup.complete() }
                         .disabled(setup.busy || !setup.readiness.isReady || !setup.participantConsent)
                         .keyboardShortcut(.defaultAction)
                         .buttonStyle(.borderedProminent)
@@ -195,7 +202,9 @@ struct MeetingSetupView: View {
             }
             setupCard("Recording and consent", icon: "checkmark.shield",
                       detail: "Video stays on this Mac. When you’re signed in to Reel, meeting audio is sent to OpenAI for transcription and AI notes.") {
-                Text("Keep Reel open and this Mac awake. You can turn off automatic joining in Meeting calendars.")
+                Text(setup.willEnableJoining
+                    ? "Completing setup turns on Chrome joining. Keep Reel open and this Mac awake. You can pause Chrome joining in Meeting calendars."
+                    : "Chrome joining is paused. Completing setup saves your consent so you can resume joining in Meeting calendars.")
                     .font(.callout).foregroundStyle(.secondary)
                 Toggle("Participants in my included Apple and Reel-connected Google calendars have agreed to automatic recording.",
                        isOn: $setup.participantConsent)

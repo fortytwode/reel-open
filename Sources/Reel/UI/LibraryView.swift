@@ -10,16 +10,22 @@ struct LibraryView: View {
     @State private var sharing: Recording?
     @State private var trimming: Recording?
     @State private var search = ""
+    @State private var meetingVideos = false
     @State private var meetingNotes: Recording?
 
     private var filtered: [Recording] {
-        search.isEmpty ? model.recordings : model.recordings.filter { $0.title.localizedCaseInsensitiveContains(search) }
+        model.recordings.filter { recording in
+            (recording.meeting != nil) == meetingVideos &&
+                (search.isEmpty || recording.title.localizedCaseInsensitiveContains(search))
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button { RecorderController.shared.start() } label: { Label("New recording", systemImage: "record.circle") }
+                Button {
+                    (NSApp.delegate as? AppDelegate)?.showScreenRecordingPanel()
+                } label: { Label("New screen recording", systemImage: "record.circle") }
                     .disabled(model.isBusy)
                 Spacer()
                 TextField("Search", text: $search).textFieldStyle(.roundedBorder).frame(width: 200)
@@ -27,12 +33,22 @@ struct LibraryView: View {
                 Button { NSWorkspace.shared.open(model.library.root) } label: { Image(systemName: "folder") }.help("Show recordings folder")
             }
             .padding(12)
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Video type", selection: $meetingVideos) {
+                    Text("Screen recordings").tag(false)
+                    Text("Meeting videos").tag(true)
+                }.pickerStyle(.segmented).fixedSize()
+                Text(meetingVideos
+                     ? "Meeting videos saved on this Mac. Open Meetings for summaries and transcripts."
+                     : "Record your screen or camera and share a video link.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding([.horizontal, .bottom], 12)
             Divider()
             if filtered.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "video.badge.plus").font(.system(size: 36)).foregroundStyle(.secondary)
-                    Text(model.recordings.isEmpty ? "No recordings yet" : "No matches").font(.headline)
-                    Text("Press \(model.settings.shortcut.display) anywhere to start recording.").foregroundStyle(.secondary)
+                    Text(search.isEmpty ? (meetingVideos ? "No meeting videos saved on this Mac" : "No screen recordings yet") : "No matches")
+                        .font(.headline)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

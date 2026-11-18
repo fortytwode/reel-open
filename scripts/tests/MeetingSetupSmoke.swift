@@ -46,6 +46,7 @@ actor CloudAuth {
     enum Phase { case idle, recording }
     static let shared = AppModel()
     var phase = Phase.idle
+    var accountGeneration: UInt64 = 0
 }
 
 @MainActor final class CalendarDiscovery {
@@ -72,20 +73,29 @@ actor CloudAuth {
         let owner: String
         let ids: Set<String>
         let all: Bool
+        let included: Set<String>
         let consent: Bool
     }
     static let shared = MeetingJoinCoordinator()
     var gate = Suspension()
     var standingConsent = false
     var autoJoin = false
+    var setupWillEnableJoining = true
+    var hasStandingConsentForCurrentScope: Bool {
+        let defaults = OrganizationState.defaults
+        return standingConsent && defaults.object(forKey: "meetingCalendar.useAll") is Bool &&
+            defaults.string(forKey: "meetingCalendar.standingConsentOwner") == "owner-a"
+    }
     var acceptsCommit = true
     var commits: [Commit] = []
     func refresh() async { await gate.pauseIfHeld() }
     // Deliberately permissive: a stale/cancelled model must never reach this boundary.
-    func enableAutomaticJoiningForSetup(expectedOwner: String, selectedCalendarIDs: Set<String>,
-                                       useAllCalendars: Bool, consentConfirmed: Bool) -> Bool {
+    func completeSetup(expectedOwner: String, expectedGeneration: UInt64,
+                       selectedCalendarIDs: Set<String>, useAllCalendars: Bool,
+                       includedCalendarIDs: Set<String>, consentConfirmed: Bool) -> Bool {
         commits.append(Commit(owner: expectedOwner, ids: selectedCalendarIDs,
-                              all: useAllCalendars, consent: consentConfirmed))
+                              all: useAllCalendars, included: includedCalendarIDs, consent: consentConfirmed))
+        if acceptsCommit { autoJoin = setupWillEnableJoining }
         return acceptsCommit
     }
 }
@@ -108,11 +118,13 @@ actor CloudAuth {
             try await initialConsentOwnership()
             try await alreadyEnabledSetup()
             try await validCommitAndGuards()
+            try await completedSetupKeepsPriorPause()
             try await invalidInitialRequirements()
             try await cancelDuringScreenCheck()
             try await cancelDuringEnableScreenCheck()
             try await raceAtCoordinator("close") { $0.cancelPendingActions() }
             try await raceAtCoordinator("account switch") { _ in await CloudAuth.shared.setOwner("owner-b") }
+            try await raceAtCoordinator("account switched and returned") { _ in AppModel.shared.accountGeneration += 2 }
             try await raceAtCoordinator("calendar scope change") { _ in setScope(["calendar-b"], all: false) }
             try await raceAtCoordinator("all-calendars mode change") { _ in setScope(["calendar-a"], all: true) }
             try await raceAtCoordinator("calendar revoke") { _ in EKEventStore.authorization = .denied }
@@ -139,6 +151,7 @@ actor CloudAuth {
         applyDefaults()
         await CloudAuth.shared.setOwner("owner-a")
         AppModel.shared.phase = .idle
+        AppModel.shared.accountGeneration = 0
         EKEventStore.authorization = .fullAccess
         accessibilityGranted = true
         ScreenCapture.allowed = true
@@ -146,6 +159,7 @@ actor CloudAuth {
         joining.gate = Suspension()
         joining.standingConsent = false
         joining.autoJoin = false
+        joining.setupWillEnableJoining = true
         joining.acceptsCommit = true
         joining.commits = []
         return MeetingSetupModel()
@@ -212,30 +226,41 @@ actor CloudAuth {
     static func validCommitAndGuards() async throws {
         let model = try await ready()
         model.participantConsent = false
-        model.enable()
+        model.complete()
         try require(!model.busy && joining.commits.isEmpty, "Unchecked consent entered enable")
         model.participantConsent = true
         joining.gate.held = true
-        model.enable()
+        model.complete()
         try await until("coordinator refresh") { joining.gate.entered == 1 }
         let checksBefore = ScreenCapture.gate.entered
-        model.enable()
+        model.complete()
         try require(joining.gate.entered == 1 && ScreenCapture.gate.entered == checksBefore,
                     "A second enable ran while busy")
         joining.gate.release()
         try await settled(model)
-        try require(model.enabled && joining.commits.count == 1, "Valid enable did not commit exactly once")
+        try require(model.completed && model.enabled && joining.commits.count == 1, "Valid enable did not commit exactly once")
         let commit = joining.commits[0]
-        try require(commit.owner == "owner-a" && commit.ids == ["calendar-a"] && !commit.all && commit.consent,
+        try require(commit.owner == "owner-a" && commit.ids == ["calendar-a"] && commit.included == ["calendar-a"] && !commit.all && commit.consent,
                     "Enable committed a different owner, scope or consent")
         passed("valid explicit consent commits once; unchecked/busy enable is blocked")
 
         let rejected = try await ready()
         joining.acceptsCommit = false
-        rejected.enable()
+        rejected.complete()
         try await settled(rejected)
         try require(!rejected.enabled && joining.commits.count == 1, "Rejected coordinator commit reported enabled")
         passed("coordinator refusal does not report enabled")
+    }
+
+    static func completedSetupKeepsPriorPause() async throws {
+        let model = try await ready()
+        joining.setupWillEnableJoining = false
+        try require(!model.willEnableJoining, "Review said paused joining would turn on")
+        model.complete()
+        try await settled(model)
+        try require(model.completed && !model.enabled && joining.commits.count == 1,
+                    "Completing consent did not preserve the prior pause")
+        passed("completed setup preserves a prior pause")
     }
 
     static func cancelDuringScreenCheck() async throws {
@@ -249,7 +274,7 @@ actor CloudAuth {
         try require(!model.busy && !model.screenCaptureVerified && joining.commits.isEmpty,
                     "Closed screen check updated state")
         model.participantConsent = true
-        model.enable()
+        model.complete()
         try await drain()
         try require(joining.commits.isEmpty && !model.busy, "Closed setup accepted a new enable")
         passed("close during explicit capture check discards result and further actions")
@@ -270,7 +295,7 @@ actor CloudAuth {
             case "recording": AppModel.shared.phase = .recording
             default: break
             }
-            model.enable()
+            model.complete()
             try await settled(model)
             try require(joining.commits.isEmpty && !model.enabled, "Invalid initial \(name) committed")
             passed("initial \(name) blocks enable")
@@ -285,7 +310,7 @@ actor CloudAuth {
         let model = try await ready()
         joining.gate.held = true
         let screenChecks = ScreenCapture.gate.entered
-        model.enable()
+        model.complete()
         try await until("coordinator refresh for \(name)") { joining.gate.entered == 1 }
         try require(ScreenCapture.gate.entered == screenChecks,
                     "Capture access was checked before slow coordinator refresh completed (\(name))")
@@ -305,7 +330,7 @@ actor CloudAuth {
         let model = try await ready()
         ScreenCapture.gate.held = true
         let checks = ScreenCapture.gate.entered
-        model.enable()
+        model.complete()
         try await until("capture verification for \(name)") { ScreenCapture.gate.entered == checks + 1 }
         await mutate(model)
         ScreenCapture.gate.release()
