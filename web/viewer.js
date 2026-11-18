@@ -185,38 +185,72 @@ function renderSummary(meta) {
 }
 
 // ---------- transcript ----------
+const speakerAttributionStatuses = {
+  unavailable: "Speaker identification unavailable for this recording.",
+  partial: "Speaker identification is partial. Names are platform display labels. Timings are approximate.",
+  platform_captions: "Speaker identification uses platform captions. Names are platform display labels. Timings are approximate.",
+};
+function speakerAttribution(segment) {
+  const { speaker_attribution: attribution, speaker_coverage: coverage } = segment || {};
+  return typeof attribution === "string" && Object.hasOwn(speakerAttributionStatuses, attribution) &&
+    typeof coverage === "number" && coverage >= 0 && coverage <= 1 ? attribution : "";
+}
+function captionSpeakerName(segment) {
+  const name = segment.speaker_name;
+  if ((segment.speaker_source === "google_meet_caption" || segment.speaker_source === "teams_caption") &&
+      segment.speaker_match === "caption_text_match" && typeof name === "string" &&
+      Array.from(name).length <= 120 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name)) {
+    return name.trim();
+  }
+  return "";
+}
+function transcriptLine(segment, escapeLabel) {
+  const label = segment._speakerLabel;
+  return label ? (escapeLabel ? escapeCueMarkup(label) : label) + ": " + segment.text.trim() : segment.text;
+}
 function renderTranscript(t) {
   const list = $("segments"); list.textContent = "";
   S.timingGranularity = t && t.timingGranularity === "chunk" ? "chunk" : null;
+  const segments = Array.isArray(t && t.segments) ? t.segments : [];
+  const attribution = speakerAttribution(segments[0]);
+  const speakerStatus = speakerAttributionStatuses[attribution] || "";
   let timingNote = $("transcript-timing-note");
   if (!timingNote) {
-    timingNote = el("p", "muted small", "Cloud transcript times are approximate chunk ranges.");
+    timingNote = el("p", "muted small");
     timingNote.id = "transcript-timing-note";
     $("pane-transcript").insertBefore(timingNote, $("pane-transcript").firstChild);
   }
-  timingNote.hidden = !S.timingGranularity;
-  S.segments = Array.isArray(t && t.segments) ? t.segments
+  const chunkNote = S.timingGranularity && (!attribution || attribution === "unavailable")
+    ? "Cloud transcript times are approximate chunk ranges." : "";
+  timingNote.textContent = [speakerStatus, chunkNote].filter(Boolean).join(" ");
+  timingNote.hidden = !timingNote.textContent;
+  S.segments = segments
     .filter((seg) => seg && Number.isFinite(seg.start) && seg.start >= 0 && Number.isFinite(seg.end) && seg.end > seg.start && typeof seg.text === "string" && seg.text.trim())
-    .sort((a, b) => a.start - b.start) : [];
+    .sort((a, b) => a.start - b.start);
+  const labels = attribution === "unavailable" ? [] : S.segments.map(captionSpeakerName);
+  const showSpeakerLabels = !!attribution || labels.some(Boolean);
+  S.segments.forEach((seg, i) => { seg._speakerLabel = showSpeakerLabels ? labels[i] || "Speaker unknown" : ""; });
   if (S.timingGranularity) clearCaptionTrack(); else buildCaptionTrack();
   $("transcript-find").hidden = S.segments.length === 0;
   if (!S.segments.length) setSegmentsMessage(t && t.text ? t.text : "No speech was detected.");
   S.segments.forEach(function (seg) {
     const li = el("li"); li.tabIndex = 0;
-    li.appendChild(el("time", null, fmtTime(seg.start))); li.appendChild(el("span", null, seg.text));
+    li.appendChild(el("time", null, fmtTime(seg.start))); li.appendChild(el("span", null, transcriptLine(seg)));
     const go = function () { seekTo(seg.start); player.play().catch(function () {}); };
     li.addEventListener("click", go);
     li.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
     seg._el = li; list.appendChild(li);
   });
-  const full = (t && t.text) || S.segments.map((s) => s.text).join(" ");
+  const body = showSpeakerLabels && S.segments.length ? S.segments.map((seg) => transcriptLine(seg)).join("\n")
+    : (t && t.text) || S.segments.map((s) => s.text).join(" ");
+  const full = speakerStatus ? [speakerStatus, body].filter(Boolean).join("\n\n") : body;
   const btn = $("copy-transcript"); btn.disabled = !full;
   btn.onclick = function () {
     navigator.clipboard.writeText(full).then(function () { btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1500); }, function () {});
   };
   const json = $("transcript-json"); json.href = objectURL(S.base + "transcript.json"); json.hidden = false;
   renderTranscriptFind();
-  buildTranscriptDownloads();
+  buildTranscriptDownloads(speakerStatus);
   applyDimming();
 }
 function vttTime(seconds) {
@@ -226,9 +260,8 @@ function vttTime(seconds) {
   return String(hours).padStart(2, "0") + ":" + String(minutes).padStart(2, "0") + ":" +
     String(secs).padStart(2, "0") + "." + String(millis).padStart(3, "0");
 }
-function escapeVTTText(text) {
-  const normalized = normalizeTranscriptText(text);
-  return normalized.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function escapeCueMarkup(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 function normalizeTranscriptText(text) {
   return text.replace(/\r\n?/g, "\n").replace(/[\t ]+/g, " ").replace(/\n+/g, " ").trim();
@@ -239,9 +272,10 @@ function clippedTranscriptCues() {
     start: Math.max(segment.start, bounds[0]),
     end: Math.min(segment.end, bounds[1]),
     text: segment.text,
+    _speakerLabel: segment._speakerLabel,
   })).filter((cue) => cue.end > cue.start);
 }
-function buildTranscriptDownloads() {
+function buildTranscriptDownloads(speakerStatus) {
   for (const url of S.transcriptDownloadURLs) URL.revokeObjectURL(url);
   S.transcriptDownloadURLs = [];
   const cues = clippedTranscriptCues();
@@ -249,11 +283,11 @@ function buildTranscriptDownloads() {
   txt.hidden = cues.length === 0;
   srt.hidden = cues.length === 0 || S.timingGranularity === "chunk";
   if (!cues.length) return;
-  const txtBody = cues.map((cue) => vttTime(cue.start) + " --> " + vttTime(cue.end) + "\n" +
-    normalizeTranscriptText(cue.text)).join("\n\n") + "\n";
+  const txtBody = (speakerStatus ? speakerStatus + "\n\n" : "") + cues.map((cue) => vttTime(cue.start) + " --> " + vttTime(cue.end) + "\n" +
+    normalizeTranscriptText(transcriptLine(cue))).join("\n\n") + "\n";
   const srtBody = cues.map((cue, i) => (i + 1) + "\n" +
     vttTime(cue.start).replace(".", ",") + " --> " + vttTime(cue.end).replace(".", ",") + "\n" +
-    normalizeTranscriptText(cue.text)).join("\n\n") + "\n";
+    normalizeTranscriptText(transcriptLine(cue, true))).join("\n\n") + "\n";
   for (const [link, body, type] of [[txt, txtBody, "text/plain"], [srt, srtBody, "application/x-subrip"]]) {
     const url = URL.createObjectURL(new Blob([body], { type: type + ";charset=utf-8" }));
     S.transcriptDownloadURLs.push(url); link.href = url;
@@ -261,7 +295,7 @@ function buildTranscriptDownloads() {
 }
 function renderTranscriptFind() {
   const input = $("transcript-search"), query = input.value.trim().toLocaleLowerCase();
-  S.findMatches = query ? S.segments.filter((segment) => segment.text.toLocaleLowerCase().includes(query)) : [];
+  S.findMatches = query ? S.segments.filter((segment) => transcriptLine(segment).toLocaleLowerCase().includes(query)) : [];
   S.findIndex = -1;
   for (const segment of S.segments) {
     if (segment._el) segment._el.classList.remove("search-match", "search-current");
@@ -316,7 +350,7 @@ function buildCaptionTrack() {
   clearCaptionTrack();
   if (!cues.length) return;
   const body = cues.map((cue, i) => (i + 1) + "\n" + vttTime(cue.start) + " --> " + vttTime(cue.end) +
-    "\n" + escapeVTTText(cue.text)).join("\n\n");
+    "\n" + escapeCueMarkup(normalizeTranscriptText(transcriptLine(cue)))).join("\n\n");
   S.captionTrackURL = URL.createObjectURL(new Blob(["WEBVTT\n\n" + body + "\n"], { type: "text/vtt" }));
   const element = $("captions-track");
   element.addEventListener("error", () => { clearCaptionTrack(); }, { once: true });

@@ -100,6 +100,60 @@ def test_completed_execution_uses_immutable_transcript_summary_and_calendar_refe
     assert len(tasks) == 3
 
 
+def test_caption_labels_survive_saved_transcript_summary_and_delivery(setup, monkeypatch):
+    import speech
+    store, bucket, record, _, _, deliveries = setup
+    key = 'executions/' + record['execution_id']
+    saved, gen = store.load(key)
+    saved.update(provider='meet', captions_generation=4)
+    store.cas(key, saved, gen)
+    name = record['output_prefix'] + 'captions.json'
+    artifact = {'schema_version': 1, 'execution_id': record['execution_id'], 'provider': 'meet',
+                'status': 'captured', 'turns': [{'start': 0, 'end': .009, 'text': 'A clear decision',
+                'speaker_name': 'Ana', 'source': 'google_meet_caption'}]}
+    bucket.objects[name] = (json.dumps(artifact).encode(), 4)
+    summary_turns = []
+    def summarize(text, *args, **kwargs):
+        assert text == 'A clear decision'
+        summary_turns.extend(kwargs['speaker_turns'])
+        return {'summary': 'The decision', 'has_meeting_content': True}
+    monkeypatch.setattr(speech, 'summarize_text', summarize)
+    assert run(setup) == 'processing'
+    assert run(setup) == 'processing'
+    transcript = json.loads(bucket.objects[record['output_prefix'] + 'transcript.json'][0])
+    assert transcript['segments'][0]['speaker_name'] == 'Ana'
+    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0].endswith(b'\n\nAna: A clear decision')
+    # Later revisions or a caption upload cannot rewrite an immutable transcript.
+    bucket.objects[name] = (b'{}', 5)
+    assert run(setup) == 'processing'
+    assert run(setup) == 'delivered'
+    assert summary_turns == transcript['segments'] == deliveries[0][0]['segments']
+
+
+@pytest.mark.parametrize('failure', ['missing', 'changed', 'wrong_execution', 'wrong_provider', 'oversize'])
+def test_unusable_captions_preserve_audio_and_unnamed_delivery(setup, failure):
+    store, bucket, record, _, _, deliveries = setup
+    key = 'executions/' + record['execution_id']
+    saved, gen = store.load(key)
+    saved.update(provider='meet', captions_generation=4)
+    store.cas(key, saved, gen)
+    artifact = {'schema_version': 1, 'execution_id': record['execution_id'], 'provider': 'meet',
+                'status': 'captured', 'turns': [{'start': 0, 'end': .009, 'text': 'A clear decision',
+                'speaker_name': 'Ana', 'source': 'google_meet_caption'}]}
+    if failure == 'wrong_execution': artifact['execution_id'] = str(uuid.uuid4())
+    if failure == 'wrong_provider': artifact['provider'] = 'teams'
+    if failure != 'missing':
+        bucket.objects[record['output_prefix'] + 'captions.json'] = (
+            b' ' * (2 * 1024 * 1024 + 1) if failure == 'oversize' else json.dumps(artifact).encode(),
+            5 if failure == 'changed' else 4)
+    for _ in range(3): assert run(setup) == 'processing'
+    assert run(setup) == 'delivered'
+    assert deliveries[0][0]['segments'] == [{'start': 0, 'end': .01, 'text': 'A clear decision',
+                                           'speaker_attribution': 'unavailable', 'speaker_coverage': 0.0}]
+    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0].startswith(
+        b'Speaker identification unavailable for this recording.\n\nSpeaker unknown:')
+
+
 @pytest.mark.parametrize('source, expected_name', [
     ('record', 'Recorded Name'), ('event', 'Calendar Name'), ('legacy', None),
 ])
@@ -267,7 +321,7 @@ def test_oversized_transcript_is_downloadable_without_summary_or_delivery(setup,
     saved, _ = store.load('executions/' + record['execution_id'])
     assert saved['notion_status'] == 'transcript_too_long'
     assert saved['artifacts']['transcript.txt'] and saved['artifacts']['transcript.json']
-    assert len(bucket.objects[record['output_prefix'] + 'transcript.txt'][0]) == 200001
+    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0].endswith(b'x' * 200001)
     assert deliveries == []
 
 
@@ -351,7 +405,7 @@ def test_review_required_preserves_transcript_and_never_delivers_or_requeues(set
     saved, gen = store.load('executions/' + record['execution_id'])
     assert saved['notion_status'] == 'review_required' and saved['has_meeting_content'] is False
     assert saved['artifacts']['transcript.txt'] and saved['artifacts']['transcript.json']
-    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0] == b'A clear decision'
+    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0].endswith(b'Speaker unknown: A clear decision')
     assert json.loads(bucket.objects[record['output_prefix'] + 'processing/summary.json'][0])['has_meeting_content'] is False
     assert not saved['processing_enqueue_needed'] and deliveries == [] and len(calls) == 1
     saved['processing_enqueue_needed'] = True
@@ -393,7 +447,7 @@ def test_cached_acknowledgement_summary_is_held_for_review(setup, monkeypatch):
     saved, _ = store.load('executions/' + record['execution_id'])
     assert saved['has_meeting_content'] is False and saved['notion_status'] == 'review_required'
     assert saved['artifacts']['transcript.txt'] and not saved['artifacts'].get('summary.json')
-    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0] == b'Okay.'
+    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0].endswith(b'Speaker unknown: Okay.')
     assert json.loads(bucket.objects[record['output_prefix'] + 'processing/summary.json'][0])['has_meeting_content'] is True
     assert deliveries == []
 

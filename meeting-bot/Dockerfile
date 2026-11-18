@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY policy.py providers.py worker.py google_auth.py ./
+COPY policy.py providers.py worker.py google_auth.py captions.py browser_captions.py ./
 RUN chown -R pwuser:pwuser /app
 USER pwuser
 ENTRYPOINT ["tini", "--", "python", "/app/worker.py"]

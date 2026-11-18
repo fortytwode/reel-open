@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from captions import CAPTIONS_FILENAME, CaptionCapture, write_unavailable
+from captions import MAX_BYTES as MAX_CAPTION_BYTES, SOURCES as CAPTION_SOURCES
 from policy import validate_payload
 
 STOPPED = False
@@ -149,6 +151,19 @@ class Run:
             blob.upload_from_filename(str(file), content_type=mime, if_generation_match=0, timeout=300)
             self.artifacts[name] = {'gcs_uri': 'gs://' + self.p['output_bucket'] + '/' + blob.name,
                                     'size_bytes': file.stat().st_size, 'content_type': mime}
+        if self.p.get('provider') in CAPTION_SOURCES:
+            try:
+                file = root / CAPTIONS_FILENAME
+                if file.is_file() and 0 < (size := file.stat().st_size) <= MAX_CAPTION_BYTES:
+                    name = self.p['output_prefix'] + CAPTIONS_FILENAME
+                    self.bucket.blob(name).upload_from_filename(
+                        str(file), content_type='application/json', if_generation_match=0, timeout=5, retry=None)
+                    self.artifacts[CAPTIONS_FILENAME] = {
+                        'gcs_uri': 'gs://' + self.p['output_bucket'] + '/' + name,
+                        'size_bytes': size, 'content_type': 'application/json',
+                    }
+            except Exception:
+                pass
         return self.artifacts
 
 
@@ -199,11 +214,24 @@ async def execute(run, root):
     xvfb = None
     recording = None
     recording_ready = False
+    caption_capture = None
     browser = None
     page = None
     reason = None
     failure = None
     stage = 'media_start'
+
+    async def finish_recording():
+        nonlocal caption_capture
+        ended = time.monotonic()
+        stop_process(recording)
+        if caption_capture is not None:
+            capture, caption_capture = caption_capture, None
+            try:
+                await capture.finish(root, ended)
+            except Exception:
+                pass
+
     try:
         capture_remaining(run.p)
         google_state = None
@@ -260,6 +288,13 @@ async def execute(run, root):
                         stage = 'recording_start'
                         recording = start_recording(root)
                         recording_started = time.monotonic()
+                        if run.p.get('provider') in CAPTION_SOURCES:
+                            try:
+                                caption_capture = CaptionCapture(page, run.p['provider'], run.p['execution_id'],
+                                                                recording_started)
+                                caption_capture.start()
+                            except Exception:
+                                pass
                         await asyncio.sleep(1)
                         if recording.poll() is not None:
                             raise RuntimeError('recorder_start_failed')
@@ -287,13 +322,13 @@ async def execute(run, root):
                     # A healthy recording reaching its limit is complete: its
                     # uploaded audio must still enter processing and delivery.
                     reason = 'duration_limit'
-                stop_process(recording)
+                await finish_recording()
                 # Closing browser is definitive departure. Never click End meeting for everyone.
                 await browser.close()
                 browser = None
             except Exception:
                 # Stop capture before diagnostic or browser shutdown delays.
-                stop_process(recording)
+                await finish_recording()
                 # Capture while Playwright, context and browser are still alive.
                 if page is not None:
                     await run.diagnostic(page, 'failed')
@@ -316,6 +351,12 @@ async def execute(run, root):
                 pass
         stop_process(xvfb)
     if recording:
+        if run.p.get('provider') in CAPTION_SOURCES:
+            try:
+                if not (root / CAPTIONS_FILENAME).is_file():
+                    write_unavailable(root, run.p['execution_id'], run.p['provider'])
+            except Exception:
+                pass
         try:
             await asyncio.to_thread(run.upload, root)
         except Exception:

@@ -141,6 +141,19 @@ def bind_audio_generation(record):
     return int(blob.generation)
 
 
+def bind_captions_generation(record):
+    """Optional private sidecar; pin absence too so retries cannot adopt new names."""
+    from google.cloud import storage
+    try:
+        blob = storage.Client().bucket(record["output_bucket"]).blob(record["output_prefix"] + "captions.json")
+        blob.reload(timeout=10)
+        if blob.generation and 0 < blob.size <= 2 * 1024 * 1024:
+            return int(blob.generation)
+    except Exception:
+        pass
+    return 0
+
+
 class BotDispatcher:
     def __init__(self, store, clock=None):
         self.store = store
@@ -223,6 +236,7 @@ class BotDispatcher:
                    "capture_deadline": capture_deadline.isoformat()}
         attendees = saved["participant_roster"] if shared else event["attendees"]
         record = {"execution_id": execution, "owner_id": owner_uid, "owner_email": owner,
+                  "provider": provider,
                   "event_id": event["id"], "meeting_id": meeting_id, "title": event["title"],
                   "started_at": event["start"], "attendees": attendees, "status": "requesting_entry",
                   "callback_hash": digest(token), "output_prefix": prefix, "output_bucket": os.environ["BOT_BUCKET"],
@@ -697,6 +711,11 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                 return jsonify(error="Recording audio is unavailable"), 400
             if not record.get("audio_generation"):
                 record["audio_generation"] = bind_audio_generation(record)
+            if "captions_generation" not in record:
+                expected_captions = expected_audio.removesuffix("system-audio.wav") + "captions.json"
+                captions = (data.get("artifacts") or {}).get("captions.json")
+                record["captions_generation"] = (bind_captions_generation(record)
+                    if isinstance(captions, dict) and captions.get("gcs_uri") == expected_captions else 0)
         if status == "completed" and record.get("processing_status") not in ("delivered", "no_speech", "transcript_too_long", "review_required"):
             record["processing_enqueue_needed"] = True
         record["status"] = status

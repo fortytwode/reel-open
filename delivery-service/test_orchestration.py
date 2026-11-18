@@ -297,6 +297,65 @@ class SharedNotesTests(OrchestrationTests):
         self.assertEqual(self.get('/delivery/meetings').json['meetings'], [])
         self.assertEqual(self.get('/delivery/meetings/' + note_id).status_code, 404)
 
+    def test_speaker_names_reach_shared_note_and_notion_without_changing_segments(self):
+        meet = {'speaker_source':'google_meet_caption', 'speaker_match':'caption_text_match'}
+        self.payload['segments'] = [
+            {'start':0, 'end':1, 'text':'First turn', 'speaker_name':'Rina', **meet,
+             'speaker_attribution':'partial', 'speaker_coverage':0.5},
+            {'start':1, 'end':2, 'text':'No matching caption'},
+            {'start':2, 'end':3, 'text':'Invalid label', 'speaker_name':'Other\nName', **meet},
+            {'start':3, 'end':4, 'text':'Second platform', 'speaker_name':'Irene',
+             'speaker_source':'teams_caption', 'speaker_match':'caption_text_match'},
+        ]
+        self.providers.create_notion = Mock(wraps=self.providers.create_notion)
+        self.providers.verify_notion = Mock(wraps=self.providers.verify_notion)
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        note_id = result.json['notes_url'].split('/')[-1]
+        expected = ('Speaker identification is partial. Names are platform display labels. Timings are approximate.\n\n'
+                    'Rina: First turn\nSpeaker unknown: No matching caption\n'
+                    'Speaker unknown: Invalid label\nIrene: Second platform')
+        note = self.get('/delivery/meetings/' + note_id).json['meeting']
+        self.assertEqual(note['transcript_text'], expected)
+        self.assertEqual(note['segments'], self.payload['segments'])
+        self.assertEqual(self.providers.create_notion.call_args.args[-1], expected)
+        self.assertEqual(self.providers.verify_notion.call_args.args[-1], expected)
+        self.assertEqual(self.post().status_code, 200)
+        self.payload['segments'][0]['speaker_name'] = 'New label'
+        self.assertEqual(self.post().status_code, 409)
+
+    def test_unavailable_speaker_status_labels_each_turn_unknown(self):
+        self.payload['segments'] = [
+            {'start':0, 'end':1, 'text':'First turn', 'speaker_attribution':'unavailable', 'speaker_coverage':0},
+            {'start':1, 'end':2, 'text':'Second turn', 'speaker_name':'Unreconciled',
+             'speaker_source':'teams_caption', 'speaker_match':'caption_text_match'},
+        ]
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        note_id = result.json['notes_url'].split('/')[-1]
+        note = self.get('/delivery/meetings/' + note_id).json['meeting']
+        self.assertEqual(note['transcript_text'], 'Speaker identification unavailable for this recording.\n\n'
+                         'Speaker unknown: First turn\nSpeaker unknown: Second turn')
+        self.assertEqual(note['segments'], self.payload['segments'])
+
+    def test_only_invalid_speaker_names_keep_unlabelled_transcript(self):
+        meet = {'speaker_source':'google_meet_caption', 'speaker_match':'caption_text_match'}
+        self.payload['segments'] = [
+            {'start':0, 'end':1, 'text':'First\nline', 'speaker_attribution':'unavailable', 'speaker_coverage':True},
+            {'start':1, 'end':2, 'text':'  Spaced text ', 'speaker_name':'x' * 121, **meet},
+            {'start':2, 'end':3, 'text':'Last line', 'speaker_name':'Unsafe\u202ename', **meet},
+            {'start':3, 'end':4, 'text':'Attendee', 'speaker_name':'Attendee',
+             'speaker_source':'participant_list', 'speaker_match':'caption_text_match'},
+            {'start':4, 'end':5, 'text':'No match', 'speaker_name':'Caption',
+             'speaker_source':'teams_caption', 'speaker_match':'time_only',
+             'speaker_attribution':'unavailable', 'speaker_coverage':0},
+        ]
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        note_id = result.json['notes_url'].split('/')[-1]
+        note = self.get('/delivery/meetings/' + note_id).json['meeting']
+        self.assertEqual(note['transcript_text'], 'First\nline\n  Spaced text \nLast line\nAttendee\nNo match')
+
     def test_manual_only_owner_and_list_before_complete(self):
         self.assertEqual(self.get('/delivery/meetings').json['meetings'], [])
         self.payload['calendar'] = None

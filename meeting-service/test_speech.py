@@ -322,3 +322,118 @@ def test_duplicate_email_casing_and_unusable_spelling_hints_do_not_block_recogni
     context = attendee_context(['Alice@example.com', 'alice@example.com'])
     assert _grounded_owner('Alice', 'Alice will send it.', 'Alice will send it.', context, 'Send it') == 'Alice'
     assert attendee_keywords(['bad', 'alice@example.com'], {'other@example.com': 'Other', 'alice@example.com': 'Bad\nName'}) == ['alice']
+
+
+def speaker_turn(text, speaker=None, start=0, **fields):
+    turn = {'start': start, 'end': start + 10, 'text': text}
+    if speaker is not None:
+        turn.update(speaker_name=speaker, speaker_source='google_meet_caption', speaker_match='caption_text_match')
+    return {**turn, **fields}
+
+
+@pytest.fixture
+def speaker_notes(monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'secret-test')
+
+    def summarize(text, turns, *, owner='Ana', task='Send the build', evidence='', names=None):
+        names = {'ana@example.com': 'Ana Skopelja', 'bo@example.com': 'Bo Novak'} if names is None else names
+        notes = provider_notes(action_items=[{'owner': owner, 'task': task, 'due': '', 'evidence': evidence}])
+        requests = []
+
+        def handler(req):
+            requests.append(json.loads(req.content))
+            return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [
+                {'type': 'output_text', 'text': json.dumps(notes)}]}]})
+
+        result = summarize_text(text, attendees=list(names), attendee_names=names,
+                                speaker_turns=turns, transport=httpx.MockTransport(handler))
+        return result['action_items'][0]['owner'], json.loads(requests[0]['input']), requests[0]['instructions']
+
+    return summarize
+
+
+def test_matched_speaker_dialogue_is_sent_to_provider(speaker_notes):
+    commitment = 'I will send the build tomorrow.'
+    turns = [speaker_turn('Agreed. ', 'Bo Novak', speaker_source='teams_caption', speaker_id='platform-private-id'),
+             speaker_turn(commitment, 'Ana Skopelja', 10), speaker_turn('Thanks.', start=20)]
+    owner, context, instructions = speaker_notes('Agreed. ' + commitment + '\nThanks.', turns, evidence=commitment)
+    assert owner == 'Ana Skopelja'
+    assert context['speaker_attribution'] == 'caption_text_match'
+    assert context['dialogue'] == [
+        {'text': 'Agreed. ', 'speaker_name': 'Bo Novak', 'speaker_source': 'teams_caption', 'speaker_match': 'caption_text_match'},
+        {'text': commitment, 'speaker_name': 'Ana Skopelja', 'speaker_source': 'google_meet_caption', 'speaker_match': 'caption_text_match'},
+        {'text': 'Thanks.', 'speaker_name': None},
+    ]
+    assert 'caption_text_match' in instructions and 'roster order' in instructions
+    assert 'null speaker_name' in instructions and 'not proof of an email identity' in instructions
+
+
+@pytest.mark.parametrize('unsafe_metadata', [
+    {'speaker_source': 'calendar_roster'}, {'speaker_source': {}}, {'speaker_match': 'speaker_guess'},
+    {'speaker_name': 'Ana\nSkopelja'}, {'speaker_name': 'Ana\u200fSkopelja'}, {'speaker_name': 'A' * 121},
+])
+def test_invalid_speaker_labels_are_unknown(speaker_notes, unsafe_metadata):
+    commitment = 'I can send the build.'
+    turns = [speaker_turn('Approved.', 'Bo Novak'), speaker_turn(commitment, 'Ana Skopelja', 10, **unsafe_metadata)]
+    owner, context, _ = speaker_notes('Approved.\n' + commitment, turns, evidence=commitment)
+    assert owner == ''
+    assert context['dialogue'][1] == {'text': commitment, 'speaker_name': None}
+
+
+@pytest.mark.parametrize('turns', [
+    None, {}, [None], [speaker_turn('I will send the build.', start=0)],
+    [speaker_turn('Changed transcript.', 'Ana Skopelja')],
+    [speaker_turn('I will send', 'Ana Skopelja')],
+    [speaker_turn('the build.', 'Ana Skopelja'), speaker_turn('I will send', 'Ana Skopelja', 10)],
+    [speaker_turn('I will send', 'Ana Skopelja'), speaker_turn('the build.', 'Ana Skopelja', 5)],
+    [speaker_turn('I will send the build.', 'Ana Skopelja', end=float('inf'))],
+    [None] * 5001,
+])
+def test_incomplete_or_invalid_dialogue_uses_the_legacy_summary_input(speaker_notes, turns):
+    text = 'I will send the build.'
+    assert speaker_notes(text, turns, evidence=text) == speaker_notes(text, None, evidence=text)
+    owner, context, _ = speaker_notes(text, turns, evidence=text)
+    assert owner == '' and context['speaker_attribution'] == 'unavailable' and context['transcript'] == text
+    assert 'dialogue' not in context
+
+
+@pytest.mark.parametrize(('text', 'evidence', 'task', 'expected'), [
+    ('I can send the build.', 'I can send the build.', 'Send the build', 'Ana Skopelja'),
+    ('I’ll send the build tomorrow.', 'I’ll send the build', 'Send the build', 'Ana Skopelja'),
+    ('I will not send the build.', 'I will not send the build.', 'Send the build', ''),
+    ('If approved, I will send the build.', 'I will send the build', 'Send the build', ''),
+    ('I will send the build if approved.', 'I will send the build', 'Send the build', ''),
+    ('I will send the build?', 'I will send the build', 'Send the build', ''),
+    ('Bo said I will send the build.', 'I will send the build', 'Send the build', ''),
+    ('I will send the build.', 'I will send the build.', 'Send the build and invite Bo', ''),
+    ('I will send the new build.', 'I will send the new build.', 'Send the build', ''),
+])
+def test_first_person_ownership_requires_a_whole_unconditional_commitment(speaker_notes, text, evidence, task, expected):
+    owner, _, _ = speaker_notes(text, [speaker_turn(text, 'Ana Skopelja')], evidence=evidence, task=task)
+    assert owner == expected
+
+
+@pytest.mark.parametrize(('turns', 'evidence', 'names'), [
+    ([speaker_turn('I will send the build.', 'Bo Novak')], 'I will send the build.', None),
+    ([speaker_turn('I will send the build.', 'Ana Skopelja')], 'I will send the build.',
+     {'ana@example.com': 'Ana Skopelja', 'another@example.com': 'Ana Skopelja'}),
+    ([speaker_turn('I will send the build.', 'Ana Skopelja'), speaker_turn('Thanks.', 'Ana', 10)], 'I will send the build.',
+     {'ana@example.com': 'Ana Skopelja', 'ana.smith@example.com': 'Ana Smith'}),
+    ([speaker_turn('Ana, can you check the release?', 'Bo Novak'), speaker_turn('I will send the build.', start=10)],
+     'I will send the build.', None),
+    ([speaker_turn('I will send', 'Ana Skopelja'), speaker_turn('the build.', 'Bo Novak', 10)], 'I will send the build.', None),
+    ([speaker_turn('I will send the build.', 'Ana Skopelja'), speaker_turn('I will send the build.', 'Bo Novak', 10)],
+     'I will send the build.', None),
+    ([speaker_turn('I will send the build.', 'Ana Skopelja', speaker_id='first'),
+      speaker_turn('Thanks.', 'Ana Skopelja', 10, speaker_id='second')], 'I will send the build.', None),
+])
+def test_first_person_ownership_requires_a_unique_speaker_and_roster_match(speaker_notes, turns, evidence, names):
+    owner, context, _ = speaker_notes(' '.join(turn['text'] for turn in turns), turns, evidence=evidence, names=names)
+    assert context['speaker_attribution'] == 'caption_text_match' and owner == ''
+
+
+def test_public_summary_endpoint_rejects_supplied_speaker_context(setup):
+    client, _, requests = setup
+    result = client.post('/summary', json={'text': 'Approved.', 'speaker_turns': [speaker_turn('Approved.', 'Ana Skopelja')]},
+                         headers={'Authorization': 'Bearer token'})
+    assert result.status_code == 400 and not requests

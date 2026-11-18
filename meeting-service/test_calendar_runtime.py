@@ -368,6 +368,33 @@ def test_processing_endpoint_rejects_untrusted_and_extra_identity(setup, monkeyp
     assert post(client, '/internal/bot/process', {'execution_id': str(uuid.uuid4())}).status_code == 403
 
 
+@pytest.mark.parametrize('valid', [True, False])
+def test_captions_are_bound_once_only_for_exact_execution_path(setup, monkeypatch, valid):
+    import calendar_runtime as runtime
+    client, store, claims, _, _ = setup
+    execution, token = str(uuid.uuid4()), 'x' * 64
+    prefix = 'private/' + execution + '/'
+    key = 'executions/' + execution
+    store.cas(key, {'execution_id': execution, 'owner_id': claims['sub'], 'owner_email': claims['email'],
+        'event_id': 'event', 'callback_hash': hashlib.sha256(token.encode()).hexdigest(),
+        'created_at': datetime.now(UTC).isoformat(), 'status': 'recording',
+        'output_bucket': 'private-test-bucket', 'output_prefix': prefix}, 0)
+    bindings = []
+    monkeypatch.setattr(runtime, 'bind_audio_generation', lambda record: 17)
+    monkeypatch.setattr(runtime, 'bind_captions_generation', lambda record: bindings.append(1) or 23)
+    monkeypatch.setattr(runtime.CloudTasks, 'schedule_processing', lambda *args: None, raising=False)
+    uri = 'gs://private-test-bucket/' + prefix
+    body = {'execution_id': execution, 'owner_id': claims['sub'], 'status': 'completed', 'sequence': 3,
+            'artifacts': {'system-audio.wav': {'gcs_uri': uri + 'system-audio.wav'},
+                         'captions.json': {'gcs_uri': uri + 'captions.json' if valid else 'gs://other/captions.json'}}}
+    for _ in range(2):
+        assert client.post('/internal/bot/status', json=body, headers={'Authorization': 'Bearer ' + token}).status_code == 200
+        # A later callback cannot supply a different caption object after absence was pinned.
+        body['artifacts']['captions.json']['gcs_uri'] = uri + 'captions.json'
+    assert bindings == ([1] if valid else [])
+    assert store.load(key)[0]['captions_generation'] == (23 if valid else 0)
+
+
 def test_callback_replay_cannot_erase_or_invent_transcript_artifacts(setup, monkeypatch):
     import calendar_runtime as runtime
     client, store, claims, _, _ = setup

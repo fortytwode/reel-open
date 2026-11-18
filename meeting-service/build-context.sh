@@ -20,7 +20,7 @@ paths=(reel_organization.py deployment-adapter/README.md delivery-service/requir
   delivery-service/app.py delivery-service/providers.py delivery-service/standalone_providers.py)
 paths+=(meeting-service/Dockerfile meeting-service/app.py meeting-service/speech.py
   meeting-service/calendar_meetings.py meeting-service/calendar_runtime.py
-  meeting-service/cloud_processing.py meeting-service/requirements.txt)
+  meeting-service/cloud_processing.py meeting-service/speaker_alignment.py meeting-service/requirements.txt)
 for path in "${paths[@]}"; do
   git -C "$reel_repo" cat-file -e "$reel_commit:$path"
 done
