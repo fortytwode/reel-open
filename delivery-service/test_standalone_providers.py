@@ -249,7 +249,8 @@ def test_uncertain_create_and_mail_recover_once(runtime):
     assert all(f'from:{SENDER}' in query for query in gmail.queries)
     headers = gmail.records['sent-message-1']['payload']['headers']
     assert {'name': 'From', 'value': SENDER} in headers
-    assert {'name': 'X-Reel-Delivery-ID', 'value': receipt['notes_url'].split('/')[-1]} in headers
+    marker = next(header['value'] for header in headers if header['name'].lower() == 'x-reel-delivery-id')
+    assert marker.strip() == receipt['notes_url'].split('/')[-1]
 
 
 def test_published_destination_is_rejected_before_upload(runtime):

@@ -30,3 +30,5 @@ firestore-debug.log
 /desktop-windows/organization.json
 
 /firebase.local.json
+
+/web/vendor/mediapipe/selfie_segmenter.tflite

@@ -73,7 +73,7 @@ enum FoundationSummarizer {
         """
         let session = LanguageModelSession(instructions: instructions)
         let work = Task { () -> Output? in
-            try? await session.respond(to: prompt, generating: Output.self, options: GenerationOptions(samplingMode: .greedy)).content
+            try? await session.respond(to: prompt, generating: Output.self, options: GenerationOptions(sampling: .greedy)).content
         }
         let watchdog = Task {
             try await Task.sleep(for: .seconds(60))
