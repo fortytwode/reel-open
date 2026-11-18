@@ -169,6 +169,96 @@ class RecoveryEdgeTests(unittest.TestCase):
         self.assertEqual(self.post().status_code,409)
         self.assertEqual(self.providers.creates,0)
 
+
+class SlackRecapTests(unittest.TestCase):
+    setUp = OrchestrationTests.setUp
+    post = OrchestrationTests.post
+
+    def enable_slack(self):
+        self.slack = Mock()
+        self.slack.resolve_dm.side_effect = lambda email: {
+            'owner@rocketshiphq.com': 'DOWNER',
+            'nonattendee@rocketshiphq.com': 'DDECLINED',
+            'unanswered@rocketshiphq.com': None,
+        }[email]
+        self.slack.post_dm.return_value = '1000.001'
+        self.client = create_app(
+            lambda token: self.claims, lambda email: Service([self.event]), store=self.store,
+            providers=self.providers, clock=lambda: self.now, slack=self.slack).test_client()
+
+    def test_one_private_dm_per_matched_reel_recipient(self):
+        self.enable_slack()
+        self.event['attendees'].append({'email': 'unanswered@rocketshiphq.com', 'responseStatus': 'needsAction'})
+        self.payload['summary'] = 'Outcome\n**Approved** <@everyone>\n\nAction items\n• Review the draft'
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['slack'], {'sent': 2, 'unmatched': 1})
+        self.assertEqual([call.args[0] for call in self.slack.resolve_dm.call_args_list], [
+            'nonattendee@rocketshiphq.com', 'owner@rocketshiphq.com', 'unanswered@rocketshiphq.com'])
+        posts = [call.args for call in self.slack.post_dm.call_args_list]
+        self.assertEqual([channel for channel, _, _ in posts], ['DDECLINED', 'DOWNER'])
+        self.assertNotEqual(posts[0][2], posts[1][2])
+        message = posts[0][1]
+        self.assertIn('Approved', str(message))
+        self.assertIn('Review the draft', str(message))
+        self.assertIn(result.json['notes_url'], str(message))
+        self.assertNotIn('**', str(message))
+        self.assertNotIn('Full transcript', str(message))
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(self.slack.post_dm.call_count, 2)
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_slack_failure_does_not_repeat_or_block_email(self):
+        from slack_recaps import SlackError
+        self.enable_slack()
+        self.slack.post_dm.side_effect = [SlackError('timeout', uncertain=True), '1000.002']
+        self.slack.find_dm.return_value = None
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['slack'], {'sent': 1, 'unconfirmed': 1})
+        self.slack.find_dm.assert_called_once()
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(self.slack.post_dm.call_count, 2)
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_manual_meeting_dm_uses_only_the_owner(self):
+        self.enable_slack()
+        self.payload['calendar'] = None
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        self.slack.resolve_dm.assert_called_once_with('owner@rocketshiphq.com')
+        self.assertEqual(self.slack.post_dm.call_args.args[0], 'DOWNER')
+
+    def test_short_slack_budget_preserves_confirmed_recap(self):
+        self.enable_slack()
+        self.claims['exp'] = self.now + 56
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['slack'], {'not_attempted': 2})
+        self.slack.resolve_dm.assert_not_called()
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_slack_interruption_leaves_durable_email_receipt(self):
+        self.enable_slack()
+        self.slack.resolve_dm.side_effect = RuntimeError('Slack adapter interrupted')
+        result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json, self.post().json)
+        self.slack.resolve_dm.assert_called_once()
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_short_definitive_rate_limit_retries_once(self):
+        from slack_recaps import SlackError
+        self.enable_slack()
+        self.payload['calendar'] = None
+        self.slack.post_dm.side_effect = [SlackError('ratelimited', retry_after=1), '1000.003']
+        with patch('app.time.sleep') as wait:
+            result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['slack'], {'sent': 1})
+        self.assertEqual(self.slack.post_dm.call_args_list[0], self.slack.post_dm.call_args_list[1])
+        wait.assert_called_once_with(1)
+
 class MockReject:
     def __call__(self,*args): raise AssertionError('must reconcile existing draft')
 

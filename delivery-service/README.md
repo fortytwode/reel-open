@@ -24,10 +24,17 @@ The image installs dependencies from the hash-locked `delivery-service/requireme
 | `REEL_RECAP_SENDER` | An email address in `REEL_ORGANIZATION_DOMAIN`. |
 | `GOOGLE_CALENDAR_CREDENTIALS` | Path to the secret-mounted Workspace domain-wide delegated service-account JSON. Enable the Calendar and Gmail APIs and grant `calendar.readonly`, `gmail.compose` and `gmail.readonly` scopes. The service reads the verified caller's calendar and sends as the recap sender. |
 | `DELIVERY_RECEIPTS_BUCKET` | Private GCS bucket. Grant the runtime identity read, create and replacement access to its `delivery/` objects. |
+| `REEL_SLACK_BOT_TOKEN` | Optional Slack bot token, injected as a runtime secret. Leave unset to disable Slack delivery. |
 
 Keep the Cloud Run request timeout at 600 seconds and concurrency at 1. The image runs a synchronous one-thread Gunicorn worker with a 600-second timeout. Occurrence claims last 660 seconds. Provider calls use a bounded transport timeout and an active claim check.
 
 After an ambiguous provider result, retry with the same immutable recording payload. The service looks up the previously attempted Notion page or Gmail draft before doing further work. A confirmed receipt is reused. An unresolved create or send remains pending for reconciliation. Review the Notion data source's sharing settings before delivering notes. Recipients receive the authenticated Reel notes link.
+
+## Slack recap DMs
+
+Install a Slack bot in your workspace with `users:read.email`, `im:write`, `chat:write`, and `im:history` bot scopes and set its token as `REEL_SLACK_BOT_TOKEN`. Reel matches internal invitees and the organizer to active workspace members by exact email. A manually recorded meeting is shared only with its owner. Each matching recipient gets a private message with the outcome, action items, and authenticated notes link. Reel skips guests, unmatched addresses, and external accounts. Link previews are disabled.
+
+Slack DMs start with new recaps. Email and meeting notes remain available if Slack cannot deliver a DM. Reel records successful sends per meeting and recipient. If Slack's response is ambiguous, Reel checks the DM history and avoids sending the same recap again.
 
 ## Local tests
 
