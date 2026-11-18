@@ -1,5 +1,9 @@
 # Self-host Reel
 
+This guide applies to any individual or organization deploying Reel with their own resources. Use an email domain you control, your own Firebase project and Google OAuth clients, and your own Notion and Gmail credentials if you enable meeting delivery. Rocketship is one configured deployment of this public code; its accounts and private integrations are not required.
+
+Keep your deployment configuration outside the public repository. Browser client settings are readable by app users; service-account keys, API secrets and bot authentication sessions must stay in your private secret store. Never put those secrets in the generated client JSON.
+
 A domain name gives Reel a URL. For cloud sign-in and sharing, also provision Firebase Auth, Firestore, Cloud Storage and HTTPS hosting. The meeting APIs, delivery service and cloud recorder are optional workloads.
 
 ## Host the recording library
