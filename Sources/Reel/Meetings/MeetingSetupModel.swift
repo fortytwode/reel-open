@@ -219,7 +219,8 @@ final class MeetingSetupModel: ObservableObject {
         observedCalendarIDs = included
         selectedCalendarCount = included.count
         meetingCount = discovery.meetings.count
-        let standingConsent = joining.hasStandingConsentForCurrentScope
+        let standingConsent = joining.hasStandingConsentForCurrentScope &&
+            OrganizationState.defaults.string(forKey: "meetingCalendar.standingConsentOwner") == owner
         if firstObservation { participantConsent = standingConsent }
         let alreadyEnabled = joining.autoJoin && standingConsent &&
             calendarAccessAllowed && selectedCalendarCount > 0 && accessibilityAllowed && chromeAvailable
