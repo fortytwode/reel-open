@@ -11,12 +11,14 @@ public struct SharedMeetingNote: Decodable, Equatable, Identifiable, Sendable {
     public let transcriptStatus: String
     public let localRecordingIDs: [String]
     public let transcriptText: String?
+    public let transcriptSegments: [SharedMeetingTranscriptSegment]
+    public let transcriptAttribution: SharedMeetingTranscriptAttribution?
 
     private enum CodingKeys: String, CodingKey {
         case id, title, attendees, recipients, summary
         case startedAt = "started_at", durationSeconds = "duration_seconds"
         case transcriptStatus = "transcript_status", localRecordingIDs = "local_recording_ids"
-        case transcriptText = "transcript_text"
+        case transcriptText = "transcript_text", segments
     }
 
     public static func isValidRemoteID(_ id: String) -> Bool {
@@ -46,6 +48,81 @@ public struct SharedMeetingNote: Decodable, Equatable, Identifiable, Sendable {
         transcriptStatus = try c.decode(String.self, forKey: .transcriptStatus)
         localRecordingIDs = try c.decode([String].self, forKey: .localRecordingIDs)
         transcriptText = try c.decodeIfPresent(String.self, forKey: .transcriptText)
+        // Incomplete structured text would hide speech. Keep the complete plain-text
+        // representation available when a segment cannot be decoded.
+        let segments = (try? c.decode([SharedMeetingTranscriptSegment].self, forKey: .segments)) ?? []
+        transcriptAttribution = segments.first?.speakerAttribution
+        transcriptSegments = transcriptAttribution == .unavailable
+            ? segments.map { $0.withoutSpeakerName() }
+            : segments
+    }
+}
+
+public enum SharedMeetingTranscriptAttribution: String, Equatable, Sendable {
+    case unavailable, partial
+    case platformCaptions = "platform_captions"
+
+    public var notice: String {
+        switch self {
+        case .unavailable:
+            "Speaker identification unavailable for this recording."
+        case .partial:
+            "Speaker identification is partial. Names are platform display labels. Timings are approximate."
+        case .platformCaptions:
+            "Speaker identification uses platform captions. Names are platform display labels. Timings are approximate."
+        }
+    }
+}
+
+public struct SharedMeetingTranscriptSegment: Decodable, Equatable, Sendable {
+    public let text: String
+    public let speakerName: String?
+    public let start: Double?
+    fileprivate let speakerAttribution: SharedMeetingTranscriptAttribution?
+
+    public var approximateTimestamp: String? { start.map(Transcript.timestamp) }
+
+    private enum CodingKeys: String, CodingKey {
+        case text, start
+        case speakerName = "speaker_name", speakerSource = "speaker_source", speakerMatch = "speaker_match"
+        case speakerAttribution = "speaker_attribution", speakerCoverage = "speaker_coverage"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        text = try c.decode(String.self, forKey: .text)
+        let seconds = try? c.decode(Double.self, forKey: .start)
+        start = seconds.flatMap { $0.isFinite && $0 >= 0 && $0 < Double(Int.max) ? $0 : nil }
+        let coverage = try? c.decode(Double.self, forKey: .speakerCoverage)
+        speakerAttribution = coverage.map { (0...1).contains($0) } == true
+            ? (try? c.decode(String.self, forKey: .speakerAttribution)).flatMap(SharedMeetingTranscriptAttribution.init(rawValue:))
+            : nil
+
+        // Match the delivery service's rules for publishing speaker labels.
+        let source = try? c.decode(String.self, forKey: .speakerSource)
+        let match = try? c.decode(String.self, forKey: .speakerMatch)
+        if let source, ["google_meet_caption", "teams_caption"].contains(source),
+           match == "caption_text_match", let name = try? c.decode(String.self, forKey: .speakerName),
+           name.unicodeScalars.count <= 120,
+           !name.unicodeScalars.contains(where: {
+               [.control, .format, .lineSeparator, .paragraphSeparator].contains($0.properties.generalCategory)
+           }) {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            speakerName = trimmed.isEmpty ? nil : trimmed
+        } else {
+            speakerName = nil
+        }
+    }
+
+    fileprivate func withoutSpeakerName() -> Self {
+        Self(text: text, start: start, speakerAttribution: speakerAttribution)
+    }
+
+    private init(text: String, start: Double?, speakerAttribution: SharedMeetingTranscriptAttribution?) {
+        self.text = text
+        self.start = start
+        self.speakerAttribution = speakerAttribution
+        self.speakerName = nil
     }
 }
 

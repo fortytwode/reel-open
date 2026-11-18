@@ -21,6 +21,42 @@ final class SharedMeetingNoteTests: XCTestCase {
         XCTAssertEqual(index.localRecordingIDs, ["local"])
     }
 
+    func testStructuredTranscriptRetainsOriginalTextAndUsesSupportedMetadata() throws {
+        let extra = #"""
+        ,"transcript_text":"  Exact copy\n","segments":[
+            {"text":" First turn. ","start":65.8,"speaker_name":" Rina ","speaker_source":"google_meet_caption",
+             "speaker_match":"caption_text_match","speaker_attribution":"partial","speaker_coverage":0.5},
+            {"text":"Second turn.","start":"invalid","speaker_name":"Unconfirmed"},
+            {"text":"Third turn.","start":3600,"speaker_name":"Unsafe\nlabel","speaker_source":"teams_caption",
+             "speaker_match":"caption_text_match"}]
+        """#
+        let note = try JSONDecoder().decode(SharedMeetingNote.self, from: payload(extra: extra))
+        XCTAssertEqual(note.transcriptText, "  Exact copy\n")
+        XCTAssertEqual(note.transcriptAttribution, .partial)
+        XCTAssertEqual(note.transcriptSegments.map(\.text), [" First turn. ", "Second turn.", "Third turn."])
+        XCTAssertEqual(note.transcriptSegments.map(\.speakerName), ["Rina", nil, nil])
+        XCTAssertEqual(note.transcriptSegments.map(\.approximateTimestamp), ["1:05", nil, "1:00:00"])
+    }
+
+    func testMalformedSegmentTextFallsBackToCompleteTranscript() throws {
+        let extra = #","transcript_text":"First turn.\nSecond turn.","segments":[{"text":"First turn.","start":0},{}]"#
+        let note = try JSONDecoder().decode(SharedMeetingNote.self, from: payload(extra: extra))
+        XCTAssertEqual(note.transcriptText, "First turn.\nSecond turn.")
+        XCTAssertTrue(note.transcriptSegments.isEmpty)
+    }
+
+    func testUnavailableAttributionSuppressesEvenSupportedNames() throws {
+        let extra = #"""
+        ,"transcript_text":"Speaker unknown: Speech.","segments":[
+            {"text":"Speech.","start":0,"speaker_name":"Rina","speaker_source":"google_meet_caption",
+             "speaker_match":"caption_text_match","speaker_attribution":"unavailable","speaker_coverage":0}]
+        """#
+        let note = try JSONDecoder().decode(SharedMeetingNote.self, from: payload(extra: extra))
+        XCTAssertEqual(note.transcriptAttribution, .unavailable)
+        XCTAssertEqual(note.transcriptSegments.count, 1)
+        XCTAssertNil(note.transcriptSegments.first?.speakerName)
+    }
+
     func testInvalidIDsAndIncompletePayloadRejected() throws {
         XCTAssertTrue(SharedMeetingNote.isValidRemoteID(id))
         for invalid in ["reel_" + String(repeating: "A", count: 64), id + "/x", "reel_short"] {
