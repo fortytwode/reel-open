@@ -25,6 +25,8 @@ Anyone can self-host the same Reel code with their own organization domain, acco
 
 Use the [self-hosting guide](docs/self-hosting.md) to set up hosting, Google sign-in, recording storage and optional meeting services. Enter your own Firebase and Google Workspace settings in a local copy of [organization.example.json](organization.example.json).
 
+Teams and Google Meet cloud joining can serve every verified account in your configured organization domain. Each person signs in, connects their Google Calendar and chooses their recording consent setting. Downloading the source or desktop app does not provision cloud services or connect a calendar automatically.
+
 ## Run checks
 
 ```sh

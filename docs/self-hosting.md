@@ -33,6 +33,8 @@ Build the macOS app after rendering the organization configuration. Use the [Win
 
 Build and deploy the [meeting API](../meeting-service/README.md) and [optional delivery service](../delivery-service/README.md) as container services. Both build-context scripts accept a committed source ref and an empty directory. Set the organization settings from `.reel/backend.env` on each service. The standalone delivery provider sends through delegated Gmail and stores verified notes in a private Notion data source and participant library.
 
+The generated backend settings enable meeting access for every verified account in your configured email domain. With `MEETING_CLOUD_PROVIDERS=google_meet,teams` and the cloud worker configured, both providers are available throughout that domain. Remove optional cloud-owner pilot lists when opening the service to the whole organization. Each person then signs in to the browser recorder, opens Calendar, connects Google Calendar and chooses per-meeting approval or confirms standing participant consent. Merely downloading an app does not enroll their calendar. Domain-wide availability preserves private meeting-note access for the invited participants.
+
 For unattended recording, provision a Cloud Run Job, private GCS storage and Cloud Tasks for the [cloud worker](../meeting-bot/README.md). Start with an explicit owner and provider scope. Google Meet can use a dedicated Workspace bot account signed into official Google Chrome. The operator saves Playwright browser state to a private GCS object and the worker verifies the expected signed-in account before requesting admission. Meeting policy, consent and host admission still apply.
 
 ## Export a clean source snapshot

@@ -28,6 +28,7 @@ class OrganizationConfigurationTests(unittest.TestCase):
             self.assertNotIn("privateKey", client)
             env = (root / ".reel/backend.env").read_text()
             self.assertIn("REEL_ORGANIZATION_DOMAIN=research.second.example", env)
+            self.assertIn("REEL_MEETING_ALLOWED_DOMAIN=research.second.example", env)
             self.assertIn("REEL_FIREBASE_PROJECT=demo-second", env)
             for name in ("storage.rules", "firestore.rules"):
                 rules = (root / ".reel/firebase" / name).read_text()

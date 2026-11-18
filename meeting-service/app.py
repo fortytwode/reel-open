@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 import httpx
 from flask import Flask, Request, jsonify, request
 
-from reel_organization import firebase_project, is_internal_email, organization_domain, trusted_origins
+from reel_organization import explicit_meeting_owner, firebase_project, is_internal_email, meeting_owner_allowed, organization_domain, trusted_origins
 
 MAX_REQUEST = 300 * 1024
 MAX_TRANSCRIPT = 95_000
@@ -317,11 +317,10 @@ def sort_index(entries):
 
 
 def allowed_email(email, speech=False):
-    allowed = {x.strip().lower() for x in os.getenv("REEL_ALLOWED_EMAILS", "").split(",") if x.strip()}
-    if email in allowed:
-        return True
-    return (speech and os.getenv("REEL_SPEECH_ALLOWED_DOMAIN") == organization_domain()
-            and is_internal_email(email))
+    if speech:
+        return (explicit_meeting_owner(email)
+                or (os.getenv("REEL_SPEECH_ALLOWED_DOMAIN") == organization_domain() and is_internal_email(email)))
+    return meeting_owner_allowed(email)
 
 
 def verify_firebase(token, speech=False):

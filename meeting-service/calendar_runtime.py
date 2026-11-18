@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from flask import jsonify, request
 
 from calendar_meetings import (CalendarMeetingError, CalendarMeetings, GoogleCalendarFactory,
-                               canonical_join_url, cloud_capture_enabled, effective_cloud_providers)
+                               canonical_join_url, cloud_capture_enabled, cloud_requires_calendar, effective_cloud_providers)
 
 
 def digest(value):
@@ -270,7 +270,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         providers = effective_cloud_providers(claims["email"].lower())
         return {"calendar": bool(os.getenv("CALENDAR_TASK_QUEUE") and
                                   (calendar_factory or os.path.isfile(os.getenv("GOOGLE_CALENDAR_CREDENTIALS", "")))),
-                "bot": (os.getenv("MEETING_CAPTURE_PROVIDER") != "desktop" or bool(providers)) and bool(os.getenv("BOT_JOB_NAME") and os.getenv("BOT_BUCKET")),
+                "bot": (not cloud_requires_calendar() or bool(providers)) and bool(os.getenv("BOT_JOB_NAME") and os.getenv("BOT_BUCKET")),
                 "provider": os.getenv("MEETING_CAPTURE_PROVIDER", "independent"),
                 "cloud_providers": providers if os.getenv("BOT_JOB_NAME") and os.getenv("BOT_BUCKET") else []}
 
@@ -531,7 +531,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         now = datetime.now(UTC)
         if not cloud_capture_enabled(owner, link[0]):
             raise CalendarMeetingError("Open Reel on your computer for desktop capture")
-        if os.getenv("MEETING_CAPTURE_PROVIDER") == "desktop":
+        if cloud_requires_calendar():
             state, _ = owner_state(claims)
             config = (state or {}).get("config") or {}
             matches = [event for event in (state or {}).get("events", {}).values()
@@ -622,10 +622,23 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             app.logger.error("Processing reconciliation failed")
             queued, queue_failures = 0, 1
         prefix = store.prefix + "/calendar/" if store.prefix else "calendar/"
+        cursor_key = "calendar-sweep/cursor"
+        cursor, generation = store.load(cursor_key, timeout=1)
+        start = (cursor or {}).get("after", "")
+        if not isinstance(start, str) or (start and not start.startswith(prefix)):
+            start = ""
+        limit = 25
+        # Look one item ahead to wrap immediately when the last page is full.
+        blobs = list(store.bucket.list_blobs(prefix=prefix, start_offset=start + "\0" if start else prefix,
+                                             max_results=limit + 1, page_size=limit + 1, timeout=1, retry=None))
         count, failures = 0, 0
-        for blob in store.bucket.list_blobs(prefix=prefix):
-            if count + failures >= 25:
-                break
+        for blob in blobs[:limit]:
+            # Checkpoint before slow owner I/O so a terminated worker cannot pin the sweep.
+            try:
+                generation = store.cas(cursor_key, {"after": blob.name}, generation, timeout=1)
+            except Exception:
+                app.logger.warning("Calendar sync cursor update could not be confirmed")
+                return jsonify(error="Calendar sync progress is unavailable; retry pending"), 503
             try:
                 claims = stored_claims(blob.name.rsplit("/", 1)[-1].removesuffix(".json"))
                 config = service().settings(claims)
@@ -634,6 +647,11 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                     count += 1
             except Exception:
                 failures += 1
+        if len(blobs) <= limit:
+            try:
+                store.cas(cursor_key, {"after": ""}, generation, timeout=1)
+            except Exception:
+                app.logger.warning("Calendar sync cursor wrap could not be confirmed")
         return jsonify(synced=count, failed=failures, processing_queued=queued, processing_failed=queue_failures)
 
     @app.post("/internal/bot/status")
