@@ -2,6 +2,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -131,6 +132,63 @@ def test_internal_routes_reject_firebase_identity(setup):
     for path in ["/internal/calendar/due", "/internal/calendar/sync"]:
         assert post(client, path, {}).status_code == 403
     assert calls == []
+
+
+def test_calendar_sync_reaches_every_connected_owner_and_wraps(setup, monkeypatch):
+    import calendar_runtime as runtime
+    from google.oauth2 import id_token
+
+    client, store, _, dispatches, tasks = setup
+    owners = sorted((f"owner-{i}@example.com" for i in range(30)), key=runtime.digest)
+    disabled, failing, *healthy = owners
+    monkeypatch.setenv("REEL_ALLOWED_EMAILS", ",".join(owners))
+    account = "scheduler@example.iam.gserviceaccount.com"
+    monkeypatch.setenv("INTERNAL_SERVICE_ACCOUNT", account)
+    monkeypatch.setenv("MEETING_SERVICE_URL", "https://meeting-service.example.com")
+    monkeypatch.setattr(id_token, "verify_oauth2_token",
+                        lambda *args, **kwargs: {"email": account, "email_verified": True})
+    monkeypatch.setattr(runtime, "reconcile_processing", lambda *args: (2, 1))
+    store.prefix = "organization"
+    for owner in owners:
+        store.cas("calendar/" + runtime.digest(owner), {
+            "identity": {"owner_email": owner, "owner_uid": owner + "-uid"},
+            "config": {"enabled": owner != disabled, "calendar_ids": ["primary"], "consent_mode": "ask"},
+        }, 0)
+
+    def list_blobs(prefix, start_offset="", max_results=None, **kwargs):
+        names = sorted(f"{store.prefix}/{key}.json" for key in store.data)
+        return [SimpleNamespace(name=name) for name in names if name.startswith(prefix)
+                and name >= start_offset][:max_results]
+
+    attempts = []
+    start = datetime.now(UTC) + timedelta(minutes=5)
+
+    def calendar_for_owner(owner, _calendar_ids):
+        attempts.append(owner)
+        if owner == failing:
+            raise RuntimeError("Calendar unavailable for this owner")
+        return SimpleNamespace(list_events=lambda *args: [{
+            "id": "meeting", "summary": "Planning", "organizer": {"email": owner},
+            "start": {"dateTime": start.isoformat()},
+            "end": {"dateTime": (start + timedelta(minutes=30)).isoformat()},
+            "hangoutLink": "https://meet.google.com/abc-defg-hij",
+        }])
+
+    store.bucket = SimpleNamespace(list_blobs=list_blobs)
+    monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: calendar_for_owner)
+    first = post(client, "/internal/calendar/sync", {})
+    second = post(client, "/internal/calendar/sync", {})
+    assert first.status_code == second.status_code == 200
+    assert attempts == [failing, *healthy]
+    assert first.json == {"synced": 23, "failed": 1, "processing_queued": 2, "processing_failed": 1}
+    assert second.json == {"synced": 5, "failed": 0, "processing_queued": 2, "processing_failed": 1}
+    assert {owner_hash for owner_hash, *_ in tasks} == {runtime.digest(owner) for owner in healthy}
+    assert dispatches == []
+
+    attempts.clear()
+    third = post(client, "/internal/calendar/sync", {})
+    assert third.json == first.json
+    assert attempts == [failing, *healthy[:23]]
 
 
 def test_execution_callback_checks_token_owner_sequence_and_terminal_state(setup):

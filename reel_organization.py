@@ -20,6 +20,24 @@ def is_internal_email(address):
                 and re.fullmatch(r"[^@\s<>]+@" + re.escape(domain), address.lower()))
 
 
+def explicit_meeting_owner(address):
+    """Retain explicitly configured account access for restricted deployments."""
+    if not isinstance(address, str):
+        return False
+    allowed = {value.strip().lower() for value in os.getenv("REEL_ALLOWED_EMAILS", "").split(",") if value.strip()}
+    return address.lower() in allowed
+
+
+def meeting_domain_enabled():
+    domain = organization_domain()
+    return bool(domain and os.getenv("REEL_MEETING_ALLOWED_DOMAIN", "").strip().lower() == domain)
+
+
+def meeting_owner_allowed(address):
+    """Use a deployment's domain opt-in or its explicit account list."""
+    return explicit_meeting_owner(address) or (meeting_domain_enabled() and is_internal_email(address))
+
+
 def firebase_project():
     project = os.getenv("REEL_FIREBASE_PROJECT", "").strip()
     return project if re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", project) else ""

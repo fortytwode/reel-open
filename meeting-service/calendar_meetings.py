@@ -7,17 +7,18 @@ import re
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
+from reel_organization import meeting_domain_enabled, meeting_owner_allowed
+
 
 class CalendarMeetingError(Exception):
     pass
 
 
 def owner_identity(claims):
-    """Accept only the server-verified, allowlisted Firebase email identity."""
+    """Accept only a server-verified identity authorized by deployment policy."""
     email = claims.get("email", "").strip().lower() if isinstance(claims, dict) else ""
-    allowed = {x.strip().lower() for x in os.getenv("REEL_ALLOWED_EMAILS", "").split(",") if x.strip()}
     if (not claims or claims.get("email_verified") is not True or not claims.get("sub")
-            or not email or email not in allowed):
+            or not meeting_owner_allowed(email)):
         raise CalendarMeetingError("Owner identity is not authorized")
     return email
 
@@ -73,7 +74,7 @@ def canonical_join_url(value):
 
 
 def effective_cloud_providers(owner):
-    """Explicit cloud pilot override, scoped to an authenticated calendar owner."""
+    """Configured cloud providers, scoped to an authenticated calendar owner."""
     owners = {item.strip().lower() for item in os.getenv("MEETING_CLOUD_OWNER_EMAILS", "").split(",") if item.strip()}
     if owners and owner.lower() not in owners:
         return []
@@ -83,12 +84,16 @@ def effective_cloud_providers(owner):
             and (provider != "google_meet" or not google_owners or owner.lower() in google_owners)]
 
 
+def cloud_requires_calendar():
+    return os.getenv("MEETING_CAPTURE_PROVIDER") == "desktop" or meeting_domain_enabled()
+
+
 def cloud_capture_enabled(owner, join_url):
     """Choose a capture route only for a canonical, supported meeting URL."""
     safe = canonical_join_url(join_url)
     if not safe:
         return False
-    if os.getenv("MEETING_CAPTURE_PROVIDER") != "desktop":
+    if not cloud_requires_calendar():
         return True
     host = urlsplit(safe[0]).hostname
     provider = {"teams.microsoft.com": "teams", "teams.live.com": "teams",

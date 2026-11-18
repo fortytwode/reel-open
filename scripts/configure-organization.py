@@ -69,6 +69,7 @@ def render(source, storage_fragment=None, root=ROOT):
     notes = url(config["notesBaseURL"], local=True)
     client["notesBaseURL"] = notes
     env = {"REEL_ORGANIZATION_DOMAIN": client["allowedEmailDomain"], "REEL_FIREBASE_PROJECT": client["projectID"],
+           "REEL_MEETING_ALLOWED_DOMAIN": client["allowedEmailDomain"],
            "REEL_ALLOWED_ORIGINS": ",".join(origins), "REEL_NOTES_BASE_URL": notes}
     rules = {}
     # DNS labels contain only letters, digits and internal hyphens. Quote every dot in RE2.
