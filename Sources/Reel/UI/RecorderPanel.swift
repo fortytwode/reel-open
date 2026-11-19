@@ -10,6 +10,8 @@ struct RecorderPanel: View {
     var start: (SCWindow?, CGRect?) -> Void
     var signIn: () -> Void
     var copyLastLink: () -> Void
+    var setSelectingOnDesktop: (Bool) -> Void = { _ in }
+    var setPanelHeight: (CGFloat) -> Void = { _ in }
 
     @State private var devices: (cameras: [DeviceInfo], microphones: [DeviceInfo], defaultMicID: String?)?
     @State private var previewSession: AVCaptureSession?
@@ -18,7 +20,8 @@ struct RecorderPanel: View {
     @State private var selectedArea: CGRect?
     @State private var selectionTask: Task<Void, Never>?
     @State private var selectionError: String?
-    @State private var microphoneAccessDenied = false
+    @State private var micAccess = Permissions.status(.audio)
+    @State private var needsScreenAccess = false
     @StateObject private var micLevel = MicLevelMonitor()
 
     private var s: ReelSettings { model.effectiveSettings() }
@@ -46,10 +49,20 @@ struct RecorderPanel: View {
                 .frame(width: 360)
             }
         }
-        .onChange(of: s.mode) { _, _ in selectionError = nil }
+        .onChange(of: s.mode) { _, _ in
+            selectionError = nil
+            needsScreenAccess = false
+        }
         .task(id: model.meetingMode) { await loadRecordingDevices() }
         .task(id: PreviewKey(on: cameraOn && devices != nil, cameraID: s.cameraID)) { await restartPreview() }
-        .task(id: MicKey(on: s.audio.usesMic && !model.meetingMode && devices != nil, micID: s.microphoneID)) { await restartMeter() }
+        .task(id: MicKey(on: s.audio.usesMic && micAccess == .authorized && devices != nil, micID: s.microphoneID)) { restartMeter() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            micAccess = Permissions.status(.audio)
+            if needsScreenAccess && Permissions.screenRecording {
+                needsScreenAccess = false
+                selectionError = nil
+            }
+        }
         .onDisappear {
             selectionTask?.cancel()
             RecorderController.shared.stopPanelPreview()
@@ -57,68 +70,185 @@ struct RecorderPanel: View {
         }
     }
 
+    private let recorderInk = Color(red: 18 / 255, green: 21 / 255, blue: 26 / 255)
+    private let recorderAccent = Color(red: 114 / 255, green: 231 / 255, blue: 212 / 255)
+
     private var desktopControls: some View {
-        HStack(alignment: .top, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             if cameraOn {
-                cameraPreview.frame(width: 148)
+                cameraPreview.frame(width: 176)
                     .accessibilityLabel("Camera preview")
+                    .padding([.top, .leading], 14)
             }
-            VStack(alignment: .leading, spacing: 10) {
-                Picker("Capture mode", selection: $model.settings.mode) {
-                    Text("Display").tag(CaptureMode.screen)
-                    Text("Window").tag(CaptureMode.window)
-                    Text("Area").tag(CaptureMode.area)
-                    Text("Camera").tag(CaptureMode.camera)
+            HStack(spacing: 10) {
+                captureModes
+                Spacer(minLength: 6)
+                deviceButton(cameraOn ? "Camera on" : "Camera off", symbol: cameraOn ? "video.fill" : "video.slash",
+                             active: cameraOn) { setCamera(cameraOn ? nil : selectedCamera?.id) }
+                    .disabled(s.mode == .camera || selectedCamera == nil)
+                deviceButton(s.audio.usesMic ? "Microphone on" : "Microphone off", symbol: s.audio.usesMic ? "mic.fill" : "mic.slash",
+                             active: s.audio.usesMic) { setMic(!s.audio.usesMic) }
+                recorderOptions
+                Button(action: runPrimaryAction) {
+                    Label(primaryAction, systemImage: desktopReady ? "record.circle.fill" : "cursorarrow.rays")
+                        .font(.callout.weight(.bold))
+                        .padding(.horizontal, 13)
+                        .frame(height: 40)
+                        .foregroundStyle(recorderInk)
+                        .background(recorderAccent, in: RoundedRectangle(cornerRadius: 9))
                 }
-                .pickerStyle(.segmented)
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.isBusy || (s.mode == .camera && selectedCamera == nil))
+                .opacity(s.mode == .camera && selectedCamera == nil ? 0.45 : 1)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            Divider().overlay(.white.opacity(0.1))
+            HStack(spacing: 12) {
                 sourceControls
-                if let selectionError {
-                    Text(selectionError).font(.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Label(audioStatus, systemImage: s.audio.usesMic ? "mic" : (s.audio.usesSystem ? "speaker.wave.2" : "mic.slash"))
+                    .lineLimit(1)
+                    .help(audioStatus)
+                if s.audio.usesMic && micAccess == .authorized {
+                    LevelMeter(level: micLevel.level)
+                        .frame(width: 45)
+                        .accessibilityLabel("Microphone input level")
                 }
-                Divider()
-                HStack(alignment: .top, spacing: 12) {
-                    cameraRow.frame(maxWidth: .infinity, alignment: .leading)
-                    VStack(alignment: .leading, spacing: 3) {
-                        micRow
-                        if microphoneAccessDenied && s.audio.usesMic {
-                            Text("Microphone access is off")
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else if !s.audio.usesMic {
-                            Text(s.audio.usesSystem ? "Computer sound only" : "Audio off")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .frame(minHeight: 36)
+
+            if let selectionError {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    Text(selectionError).fixedSize(horizontal: false, vertical: true)
+                    if needsScreenAccess {
+                        Button("Open Screen Recording Settings") { Permissions.openSettings("Privacy_ScreenCapture") }
+                            .buttonStyle(.link)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Menu {
-                        Toggle("Record computer sound", isOn: Binding(get: { s.audio.usesSystem }, set: setSystemAudio))
-                        Button("Settings…") { (NSApp.delegate as? AppDelegate)?.showSettings() }
-                        Button("Meetings and notes") { (NSApp.delegate as? AppDelegate)?.showMeetingWorkspace() }
-                        if model.account == nil { Button("Sign in", action: signIn) }
-                    } label: {
-                        Label("More options", systemImage: "ellipsis.circle").labelStyle(.iconOnly)
-                    }
-                    .fixedSize()
                 }
-                HStack {
-                    if s.mode == .window {
-                        Text("Includes tabs you switch to in this window.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button(action: startDesktopRecording) {
-                        Label("Record", systemImage: "record.circle.fill").font(.headline)
-                            .padding(.horizontal, 10)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!desktopReady)
-                }
+                .font(.caption)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
             }
         }
-        .padding(16)
         .frame(width: 620)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(recorderInk)
+        .environment(\.colorScheme, .dark)
         .disabled(selectionTask != nil)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { setPanelHeight($0) }
+    }
+
+    private var captureModes: some View {
+        HStack(spacing: 3) {
+            ForEach(CaptureMode.allCases, id: \.self) { mode in
+                let selected = s.mode == mode
+                Button { model.settings.mode = mode } label: {
+                    Label(modeTitle(mode), systemImage: modeSymbol(mode))
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .frame(height: 34)
+                        .foregroundStyle(selected ? recorderAccent : Color.white.opacity(0.78))
+                        .background(selected ? Color.white.opacity(0.11) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(3)
+        .background(.black.opacity(0.32), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Capture mode")
+    }
+
+    private func modeTitle(_ mode: CaptureMode) -> String {
+        switch mode {
+        case .screen: "Screen"
+        case .window: "Window"
+        case .area: "Area"
+        case .camera: "Camera"
+        }
+    }
+
+    private func modeSymbol(_ mode: CaptureMode) -> String {
+        switch mode {
+        case .screen: "display"
+        case .window: "macwindow"
+        case .area: "rectangle.dashed"
+        case .camera: "person.crop.rectangle"
+        }
+    }
+
+    private func deviceButton(_ title: String, symbol: String, active: Bool,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .labelStyle(.iconOnly)
+                .font(.system(size: 16, weight: .medium))
+                .frame(width: 33, height: 36)
+                .foregroundStyle(active ? recorderAccent : Color.white.opacity(0.68))
+                .background(active ? recorderAccent.opacity(0.11) : .clear, in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help(title)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+
+    private var recorderOptions: some View {
+        Menu {
+            Section("Microphone") {
+                ForEach(devices?.microphones ?? []) { mic in
+                    Button(mic.name) { model.settings.microphoneID = mic.id; setMic(true) }
+                }
+                Button("Turn microphone off") { setMic(false) }
+                if s.audio.usesMic && micAccess == .denied {
+                    Button("Microphone Settings…") { Permissions.openSettings("Privacy_Microphone") }
+                }
+            }
+            Section("Camera") {
+                ForEach(devices?.cameras ?? []) { cam in Button(cam.name) { setCamera(cam.id) } }
+                if s.mode != .camera { Button("Turn camera off") { setCamera(nil) } }
+            }
+            Toggle("Record computer sound", isOn: Binding(get: { s.audio.usesSystem }, set: setSystemAudio))
+            Divider()
+            Button("Screen Recordings…") { (NSApp.delegate as? AppDelegate)?.showLibrary() }
+            Button("Meetings and notes") { (NSApp.delegate as? AppDelegate)?.showMeetingWorkspace() }
+            Button("Set Up Automatic Meetings…") { (NSApp.delegate as? AppDelegate)?.showMeetingSetup() }
+            Button("Settings…") { (NSApp.delegate as? AppDelegate)?.showSettings() }
+            if model.account == nil { Button("Sign in", action: signIn) }
+        } label: {
+            Label("Recording options", systemImage: "ellipsis").labelStyle(.iconOnly)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var audioStatus: String {
+        if s.audio.usesMic {
+            if micAccess != .authorized { return "Mic access needed" }
+            let name = selectedMic?.name ?? "No mic found"
+            return s.audio.usesSystem ? "\(name) + computer sound" : name
+        }
+        return s.audio.usesSystem ? "Computer sound only" : "Audio off"
+    }
+
+    private var primaryAction: String {
+        if s.mode == .window && selectedWindow == nil { return "Choose window" }
+        if s.mode == .area && selectedArea == nil { return "Choose area" }
+        return "Record"
+    }
+
+    private func runPrimaryAction() {
+        if s.mode == .window && selectedWindow == nil { selectWindow(onDesktop: true) }
+        else if s.mode == .area && selectedArea == nil { selectArea() }
+        else { startDesktopRecording() }
     }
 
     private var desktopReady: Bool {
@@ -161,52 +291,64 @@ struct RecorderPanel: View {
     @ViewBuilder private var sourceControls: some View {
         switch s.mode {
         case .window:
-            HStack {
-                Text(selectedWindow.map { $0.title.flatMap { $0.isEmpty ? nil : $0 } ?? $0.owningApplication?.applicationName ?? "Selected window" }
-                     ?? "Choose a window")
-                    .font(.callout.weight(.medium)).lineLimit(1)
-                Spacer()
-                Button(selectedWindow == nil ? "Select on desktop" : "Change window") { selectWindow(onDesktop: true) }
-                Button("Browse windows") { selectWindow(onDesktop: false) }
+            if let selectedWindow {
+                let name = selectedWindow.title.flatMap { $0.isEmpty ? nil : $0 }
+                    ?? selectedWindow.owningApplication?.applicationName ?? "Selected window"
+                Label(name, systemImage: "macwindow")
+                    .lineLimit(1)
+                    .help("\(name). Records the whole window, including tabs you switch to.")
+                Button("Change") { selectWindow(onDesktop: true) }.buttonStyle(.link)
             }
+            Button("Browse windows…") { selectWindow(onDesktop: false) }.buttonStyle(.link)
         case .area:
-            HStack {
-                Text(selectedArea.map { "\(Int($0.width)) × \(Int($0.height)) area" } ?? "Choose an area")
-                    .font(.callout.weight(.medium))
-                Spacer()
-                Button(selectedArea == nil ? "Select area" : "Change area") { selectArea() }
+            if let selectedArea {
+                Label("\(Int(selectedArea.width)) × \(Int(selectedArea.height)) area", systemImage: "rectangle.dashed")
+                Button("Change") { selectArea() }.buttonStyle(.link)
             }
         case .screen:
-            displayRow
+            Menu {
+                Button("Screen with the pointer") { setDisplay(nil) }
+                ForEach(NSScreen.screens, id: \.self) { screen in
+                    Button(screen.localizedName) { setDisplay(RecorderController.displayID(of: screen)) }
+                }
+            } label: {
+                Label(s.displayID.flatMap { id in NSScreen.screens.first { RecorderController.displayID(of: $0) == id }?.localizedName }
+                      ?? "Screen with the pointer", systemImage: "display")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
         case .camera:
-            Label("Camera only", systemImage: "person.crop.square").font(.callout.weight(.medium))
+            Label(selectedCamera?.name ?? "No camera found", systemImage: "video").lineLimit(1)
         }
     }
 
     private func selectWindow(onDesktop: Bool) {
         selectionError = nil
+        needsScreenAccess = false
         selectionTask = Task {
             defer { selectionTask = nil }
             do {
                 let content = try await ScreenCapture.shareableContent()
                 guard !Task.isCancelled, model.phase == .idle, s.mode == .window else { return }
                 let items = WindowPicker.candidates(content)
-                if onDesktop && !items.contains(where: { $0.window.isOnScreen }) {
-                    selectionError = "No windows are visible on this desktop. Browse windows to see other Spaces."
+                guard !items.isEmpty else {
+                    selectionError = "Open a window to record, then try again."
                     return
                 }
+                if onDesktop { setSelectingOnDesktop(true) }
+                defer { if onDesktop { setSelectingOnDesktop(false) } }
                 let target = if onDesktop { await WindowPicker.pickOnDesktop(items: items) } else { await WindowPicker.pick(items: items) }
                 guard !Task.isCancelled, model.phase == .idle, s.mode == .window else { return }
                 if let target {
                     selectedWindow = try await ScreenCapture.refreshedWindow(target)
                     guard !Task.isCancelled, model.phase == .idle, s.mode == .window else { selectedWindow = nil; return }
-                } else if items.isEmpty {
-                    selectionError = "No recordable windows are open."
                 }
             } catch {
                 guard !Task.isCancelled else { return }
                 selectedWindow = nil
-                selectionError = "The window is unavailable. Check Screen Recording access or choose another window."
+                let captureError = error as NSError
+                needsScreenAccess = captureError.domain == SCStreamErrorDomain && captureError.code == SCStreamError.Code.userDeclined.rawValue
+                selectionError = needsScreenAccess ? "Allow Reel to record your screen to choose a window." : "That window is unavailable. Choose another window."
             }
         }
     }
@@ -214,7 +356,8 @@ struct RecorderPanel: View {
     private func selectArea() {
         selectionError = nil
         selectionTask = Task {
-            defer { selectionTask = nil }
+            setSelectingOnDesktop(true)
+            defer { setSelectingOnDesktop(false); selectionTask = nil }
             guard let newArea = await AreaSelector.select(previous: s.lastArea?.cg), !Task.isCancelled,
                   model.phase == .idle, s.mode == .area else { return }
             selectedArea = newArea.rect
@@ -303,59 +446,7 @@ struct RecorderPanel: View {
                 .foregroundStyle(.white.opacity(0.75))
             }
         }
-        .frame(height: 186)
-    }
-
-    private var displayRow: some View {
-        row(symbol: "display.2", on: true) {
-            Menu {
-                Button("Screen with the pointer") { setDisplay(nil) }
-                ForEach(NSScreen.screens, id: \.self) { screen in
-                    Button(screen.localizedName) { setDisplay(RecorderController.displayID(of: screen)) }
-                }
-            } label: {
-                Text(s.displayID.flatMap { id in NSScreen.screens.first { RecorderController.displayID(of: $0) == id }?.localizedName }
-                     ?? "Screen with the pointer")
-            }
-        } trailing: { EmptyView() }
-    }
-
-    private var cameraRow: some View {
-        row(symbol: cameraOn ? "video.fill" : "video.slash", on: cameraOn) {
-            Menu {
-                ForEach(devices?.cameras ?? []) { cam in Button(cam.name) { setCamera(cam.id) } }
-            } label: {
-                Text(cameraOn ? (selectedCamera?.name ?? (devices == nil ? "Loading cameras…" : "No camera found")) : "No camera")
-            }
-        } trailing: {
-            if s.mode != .camera {
-                Toggle("", isOn: Binding(get: { s.cameraEnabled },
-                                         set: { $0 ? setCamera(selectedCamera?.id) : setCamera(nil) }))
-                    .toggleStyle(.switch).controlSize(.mini).labelsHidden().help("Camera on / off")
-                    .disabled(devices == nil)
-            }
-        }
-    }
-
-    private var micRow: some View {
-        row(symbol: s.audio.usesMic ? "mic.fill" : "mic.slash", on: s.audio.usesMic) {
-            VStack(alignment: .leading, spacing: 3) {
-                Menu {
-                    ForEach(devices?.microphones ?? []) { mic in
-                        Button(mic.name) {
-                            model.settings.microphoneID = mic.id
-                            setMic(true)
-                        }
-                    }
-                } label: {
-                    Text(s.audio.usesMic ? (selectedMic?.name ?? (devices == nil ? "Loading microphones…" : "No microphone found")) : "No microphone")
-                }
-                if s.audio.usesMic { LevelMeter(level: micLevel.level) }
-            }
-        } trailing: {
-            Toggle("", isOn: Binding(get: { s.audio.usesMic }, set: { setMic($0) }))
-                .toggleStyle(.switch).controlSize(.mini).labelsHidden().help("Microphone on / off")
-        }
+        .frame(height: desktop ? 110 : 186)
     }
 
     private var footer: some View {
@@ -397,17 +488,11 @@ struct RecorderPanel: View {
         previewSession = await RecorderController.shared.startPanelPreview()
     }
 
-    private func restartMeter() async {
+    private func restartMeter() {
         micLevel.stop()
-        microphoneAccessDenied = false
-        guard !model.meetingMode, s.audio.usesMic, devices != nil,
+        guard !model.meetingMode, s.audio.usesMic, micAccess == .authorized, devices != nil,
               let mic = CaptureDevices.defaultMicrophone(savedID: s.microphoneID) else { return }
-        let granted = await Permissions.request(.audio)
-        guard !Task.isCancelled, model.phase == .idle,
-              !model.meetingMode, s.audio.usesMic,
-              CaptureDevices.defaultMicrophone(savedID: s.microphoneID)?.uniqueID == mic.uniqueID else { return }
-        microphoneAccessDenied = !granted
-        if granted { micLevel.start(device: mic) }
+        micLevel.start(device: mic)
     }
 
     private func setCamera(_ id: String?) {
@@ -424,6 +509,12 @@ struct RecorderPanel: View {
     private func setMic(_ on: Bool) {
         let system = model.settings.audio.usesSystem
         model.settings.audio = on ? (system ? .micAndSystem : .micOnly) : (system ? .systemOnly : .none)
+        if on && micAccess == .notDetermined {
+            Task {
+                _ = await Permissions.request(.audio)
+                micAccess = Permissions.status(.audio)
+            }
+        }
     }
 
     private func setSystemAudio(_ on: Bool) {
@@ -437,19 +528,6 @@ struct RecorderPanel: View {
     }
 
     // MARK: Helpers
-
-    private func row<Content: View, Trailing: View>(symbol: String, on: Bool, @ViewBuilder content: () -> Content,
-                                                    @ViewBuilder trailing: () -> Trailing) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol).frame(width: 20).foregroundStyle(on ? Color.primary : Color.secondary)
-            content().menuStyle(.borderlessButton).frame(maxWidth: .infinity, alignment: .leading)
-            trailing()
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .frame(minHeight: 34)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-    }
 
     private struct PreviewKey: Equatable { var on: Bool; var cameraID: String? }
     private struct MicKey: Equatable { var on: Bool; var micID: String? }

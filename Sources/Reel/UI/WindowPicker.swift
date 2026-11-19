@@ -46,33 +46,55 @@ enum WindowPicker {
         await pick(items: candidates(content))
     }
 
-    /// Use the same SCWindow identifiers as capture on every supported macOS version.
-    /// CoreGraphics supplies front-to-back ordering for the visible portion of each window.
+    static func desktopItem(at point: NSPoint, below overlayWindowNumber: Int,
+                            items: [CGWindowID: Item]) -> (item: Item, frame: NSRect)? {
+        // AppKit uses actual mouse hit-testing, so a click-through panel or a
+        // transparent part of another window cannot hide the window underneath.
+        let number = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: overlayWindowNumber)
+        guard let id = CGWindowID(exactly: number), let item = items[id],
+              let row = (CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]])?.first,
+              row[kCGWindowOwnerPID as String] as? pid_t == item.window.owningApplication?.processID,
+              let rawBounds = row[kCGWindowBounds as String] as? [String: Any],
+              let cgFrame = CGRect(dictionaryRepresentation: rawBounds as CFDictionary),
+              let primary = NSScreen.screens.first else { return nil }
+        let frame = VideoGeometry.appKitRect(
+            fromCG: Rect(x: cgFrame.minX, y: cgFrame.minY, width: cgFrame.width, height: cgFrame.height),
+            primaryHeight: primary.frame.height)
+        return (item, NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height))
+    }
+
+    private enum DesktopChoice {
+        case selected(SCWindow), browse, cancelled
+    }
+
     static func pickOnDesktop(items: [Item]) async -> SCWindow? {
         let visible = items.filter { $0.window.isOnScreen }
-        guard !visible.isEmpty, !NSScreen.screens.isEmpty, cancelActiveSelection == nil else { return nil }
-        return await withCheckedContinuation { continuation in
+        guard cancelActiveSelection == nil else { return nil }
+        guard !visible.isEmpty, !NSScreen.screens.isEmpty else { return await pick(items: items) }
+        let choice: DesktopChoice = await withCheckedContinuation { continuation in
             var panels: [NSPanel] = []
             var finished = false
-            let finish: (SCWindow?) -> Void = { window in
+            let finish: (DesktopChoice) -> Void = { choice in
                 guard !finished else { return }
                 finished = true
                 cancelActiveSelection = nil
                 panels.forEach { $0.orderOut(nil) }
                 panels.removeAll()
-                continuation.resume(returning: window)
+                continuation.resume(returning: choice)
             }
-            cancelActiveSelection = { finish(nil) }
+            cancelActiveSelection = { finish(.cancelled) }
             for screen in NSScreen.screens {
                 let panel = WindowSelectionPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
                                                  backing: .buffered, defer: false)
+                panel.appearance = NSAppearance(named: .darkAqua)
                 panel.isOpaque = false
                 panel.backgroundColor = .clear
                 panel.level = .screenSaver
                 panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
                 panel.hidesOnDeactivate = false
                 panel.acceptsMouseMovedEvents = true
-                panel.contentView = DesktopPickerView(screen: screen, items: visible, finish: finish)
+                panel.contentView = DesktopPickerView(screen: screen, items: visible,
+                    select: { finish(.selected($0)) }, browse: { finish(.browse) }, cancel: { finish(.cancelled) })
                 panel.setFrame(screen.frame, display: false)
                 panels.append(panel)
                 panel.orderFrontRegardless()
@@ -80,6 +102,12 @@ enum WindowPicker {
             let keyPanel = panels.first { $0.frame.contains(NSEvent.mouseLocation) } ?? panels.first
             keyPanel?.makeKey()
             keyPanel?.makeFirstResponder(keyPanel?.contentView)
+            (keyPanel?.contentView as? DesktopPickerView)?.refreshTarget()
+        }
+        switch choice {
+        case .selected(let window): return window
+        case .browse: return Task.isCancelled ? nil : await pick(items: items)
+        case .cancelled: return nil
         }
     }
 
@@ -224,16 +252,42 @@ private final class WindowSelectionPanel: NSPanel {
 private final class DesktopPickerView: NSView {
     private let screen: NSScreen
     private let items: [CGWindowID: WindowPicker.Item]
-    private let finish: (SCWindow?) -> Void
-    private var target: (WindowPicker.Item, NSRect)?
+    private let select: (SCWindow) -> Void
+    private let browse: () -> Void
+    private let cancel: () -> Void
+    private let selectButton = NSButton(title: "Select window", target: nil, action: nil)
+    private var target: (item: WindowPicker.Item, frame: NSRect)?
     private var tracking: NSTrackingArea?
-    private var lastUpdate = 0.0
+    private var lastHoverCheck = 0.0
 
-    init(screen: NSScreen, items: [WindowPicker.Item], finish: @escaping (SCWindow?) -> Void) {
+    init(screen: NSScreen, items: [WindowPicker.Item], select: @escaping (SCWindow) -> Void,
+         browse: @escaping () -> Void, cancel: @escaping () -> Void) {
         self.screen = screen
-        self.items = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        self.finish = finish
+        self.items = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        self.select = select
+        self.browse = browse
+        self.cancel = cancel
         super.init(frame: NSRect(origin: .zero, size: screen.frame.size))
+
+        selectButton.target = self
+        selectButton.action = #selector(confirmTarget)
+        selectButton.bezelStyle = .rounded
+        selectButton.controlSize = .large
+        selectButton.bezelColor = .systemTeal
+        selectButton.isHidden = true
+        addSubview(selectButton)
+
+        let controls = NSStackView(views: [
+            NSButton(title: "Browse windows…", target: self, action: #selector(showList)),
+            NSButton(title: "Cancel", target: self, action: #selector(cancelSelection))
+        ])
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        controls.spacing = 8
+        addSubview(controls)
+        NSLayoutConstraint.activate([
+            controls.centerXAnchor.constraint(equalTo: centerXAnchor),
+            controls.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -30)
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -249,58 +303,78 @@ private final class DesktopPickerView: NSView {
         tracking = area
     }
 
-    override func mouseEntered(with event: NSEvent) { updateTarget() }
+    override func mouseEntered(with event: NSEvent) {
+        if let window, !window.isKeyWindow {
+            window.makeKey()
+            window.makeFirstResponder(self)
+        }
+        refreshTarget()
+    }
     override func mouseMoved(with event: NSEvent) {
-        let now = ProcessInfo.processInfo.systemUptime
-        if now - lastUpdate >= 1.0 / 45 { updateTarget() }
+        guard event.timestamp - lastHoverCheck >= 1 / 60 else { return }
+        lastHoverCheck = event.timestamp
+        refreshTarget()
     }
-    override func mouseExited(with event: NSEvent) { target = nil; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { showTarget(nil) }
     override func mouseDown(with event: NSEvent) {
-        updateTarget()
-        if let target { finish(target.0.window) }
+        guard let window else { return }
+        refreshTarget(at: window.convertPoint(toScreen: event.locationInWindow))
+        confirmTarget()
     }
-    override func cancelOperation(_ sender: Any?) { finish(nil) }
+    override func cancelOperation(_ sender: Any?) { cancel() }
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { cancelOperation(nil) } else { super.keyDown(with: event) }
+        switch event.keyCode {
+        case 53: cancel()
+        case 36, 76:
+            refreshTarget()
+            confirmTarget()
+        default: super.keyDown(with: event)
+        }
     }
 
-    private func updateTarget() {
-        lastUpdate = ProcessInfo.processInfo.systemUptime
-        let point = NSEvent.mouseLocation
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-        let ownPID = ProcessInfo.processInfo.processIdentifier
-        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                  kCGNullWindowID) as? [[String: Any]] ?? []
-        target = nil
-        for row in windows {
-            guard let id = row[kCGWindowNumber as String] as? CGWindowID,
-                  let pid = row[kCGWindowOwnerPID as String] as? pid_t, pid != ownPID,
-                  (row[kCGWindowAlpha as String] as? Double ?? 1) > 0,
-                  let rawBounds = row[kCGWindowBounds as String] as? [String: Any],
-                  let cgFrame = CGRect(dictionaryRepresentation: rawBounds as CFDictionary) else { continue }
-            let frame = VideoGeometry.appKitRect(fromCG: Rect(cgFrame), primaryHeight: primaryHeight).cg
-            guard frame.contains(point) else { continue }
-            if let item = items[id], item.window.owningApplication?.processID == pid {
-                target = (item, frame.offsetBy(dx: -screen.frame.minX, dy: -screen.frame.minY))
-            }
-            break // Never select a window under a different window that occupies this point.
+    @objc private func showList() { browse() }
+    @objc private func cancelSelection() { cancel() }
+    @objc private func confirmTarget() { if let target { select(target.item.window) } }
+
+    func refreshTarget(at point: NSPoint = NSEvent.mouseLocation) {
+        guard let window else { return }
+        guard screen.frame.contains(point),
+              let hit = WindowPicker.desktopItem(at: point, below: window.windowNumber, items: items) else {
+            showTarget(nil)
+            return
+        }
+        showTarget((hit.item, hit.frame.offsetBy(dx: -screen.frame.minX, dy: -screen.frame.minY)))
+    }
+
+    private func showTarget(_ newValue: (item: WindowPicker.Item, frame: NSRect)?) {
+        guard target?.item.id != newValue?.item.id || target?.frame != newValue?.frame else { return }
+        target = newValue
+        selectButton.isHidden = newValue == nil
+        if let (item, frame) = newValue {
+            let available = frame.intersection(bounds)
+            selectButton.title = "Select \(item.app)"
+            selectButton.toolTip = item.title.isEmpty ? nil : item.title
+            selectButton.sizeToFit()
+            selectButton.setFrameOrigin(NSPoint(x: available.midX - selectButton.frame.width / 2,
+                                                 y: available.midY - selectButton.frame.height / 2))
         }
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.black.withAlphaComponent(0.24).setFill()
-        bounds.fill()
+        bounds.fill(using: .copy)
         if let (_, frame) = target {
-            NSGraphicsContext.current?.compositingOperation = .clear
-            frame.fill()
-            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            // Keep the highlighted interior clickable. Fully transparent pixels
+            // send the mouse-down to the underlying application instead.
+            NSColor.systemMint.withAlphaComponent(0.08).setFill()
+            frame.fill(using: .copy)
             NSColor.systemMint.setStroke()
             let outline = NSBezierPath(roundedRect: frame.insetBy(dx: 2, dy: 2), xRadius: 8, yRadius: 8)
             outline.lineWidth = 4
             outline.stroke()
         }
-        let label = (target.map { "Select \($0.0.app)  ·  Esc to cancel" } ?? "Point to a window to select it  ·  Esc to cancel") as NSString
+        let label = "Click a window to select it  ·  Esc to cancel" as NSString
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 15, weight: .semibold), .foregroundColor: NSColor.white]
         let size = label.size(withAttributes: attrs)
         let badge = NSRect(x: bounds.midX - size.width / 2 - 16, y: bounds.maxY - size.height - 60,

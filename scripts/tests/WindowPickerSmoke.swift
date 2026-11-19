@@ -3,10 +3,13 @@ import CoreImage
 import ScreenCaptureKit
 
 // Requires Screen Recording access and a normal app window on another desktop/Space.
-// Run from the repository root:
-// swiftc -parse-as-library Sources/Reel/Log.swift Sources/Reel/Capture/ScreenCapture.swift \
+// Build ReelCore first, then set PRODUCTS to the build products directory containing
+// ReelCore.swiftmodule and ReelCore.o. Run from the repository root:
+// swiftc -parse-as-library -I "$PRODUCTS" "$PRODUCTS/ReelCore.o" \
+//   Sources/Reel/Log.swift Sources/Reel/Capture/ScreenCapture.swift \
 //   Sources/Reel/UI/WindowPicker.swift scripts/tests/WindowPickerSmoke.swift -o /tmp/reel-window-picker-smoke
 // /tmp/reel-window-picker-smoke
+// Add --desktop-hit-test-only to run without the other-Space fixture.
 // Add --show-picker to inspect the production picker with a generated, non-private fixture.
 @main @MainActor
 struct WindowPickerSmoke {
@@ -19,7 +22,11 @@ struct WindowPickerSmoke {
             window.title = "Reel accessory window fixture"
             window.isReleasedWhenClosed = false
             window.orderFrontRegardless()
-            app.run()
+            let passthrough = floatingFixture(frame: window.frame, ignoresMouseEvents: true)
+            let blocker = floatingFixture(frame: NSRect(x: window.frame.minX, y: window.frame.minY,
+                                                        width: window.frame.width / 2, height: window.frame.height),
+                                          ignoresMouseEvents: false)
+            withExtendedLifetime([window, passthrough, blocker]) { app.run() }
             return
         }
         app.setActivationPolicy(.regular)
@@ -33,7 +40,22 @@ struct WindowPickerSmoke {
         app.run()
     }
 
+    static func floatingFixture(frame: NSRect, ignoresMouseEvents: Bool) -> NSWindow {
+        let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.level = .floating
+        window.ignoresMouseEvents = ignoresMouseEvents
+        window.backgroundColor = ignoresMouseEvents ? NSColor.systemOrange.withAlphaComponent(0.08) : .systemOrange
+        window.isOpaque = !ignoresMouseEvents
+        window.hasShadow = false
+        window.orderFrontRegardless()
+        return window
+    }
+
     static func run() async throws {
+        if CommandLine.arguments.contains("--desktop-hit-test-only") {
+            try await checkAccessoryWindow()
+            return
+        }
         let all = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         let pid = ProcessInfo.processInfo.processIdentifier
         let items = WindowPicker.candidates(all)
@@ -90,15 +112,57 @@ struct WindowPickerSmoke {
             }) {
                 guard NSRunningApplication(processIdentifier: fixture.processIdentifier)?.activationPolicy == .accessory,
                       window.isOnScreen,
-                      WindowPicker.candidates(content).contains(where: { $0.id == window.windowID }) else {
+                      let item = WindowPicker.candidates(content).first(where: { $0.id == window.windowID }) else {
                     throw Failure(message: "Visible accessory-app window was excluded from the picker.")
                 }
-                print("Visible accessory-app window remained selectable.")
+                try checkDesktopHitTesting(item, fixturePID: fixture.processIdentifier)
                 return
             }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw Failure(message: "Accessory-app fixture window was not discoverable.")
+    }
+
+    static func checkDesktopHitTesting(_ item: WindowPicker.Item, fixturePID: pid_t) throws {
+        guard let screen = NSScreen.screens.first else { throw Failure(message: "No fixture screen.") }
+        let bounds = item.window.frame
+        let frame = NSRect(x: bounds.minX, y: screen.frame.height - bounds.maxY,
+                           width: bounds.width, height: bounds.height)
+        let exposed = NSPoint(x: frame.midX + frame.width / 4, y: frame.midY)
+        let blocked = NSPoint(x: frame.midX - frame.width / 4, y: frame.midY)
+        let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                              kCGNullWindowID) as? [[String: Any]] ?? []
+        // Verify the old bounds sweep would stop at the higher, non-candidate window.
+        let quartzPoint = CGPoint(x: exposed.x, y: screen.frame.height - exposed.y)
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let covers = rows.filter { row in
+            guard let pid = row[kCGWindowOwnerPID as String] as? pid_t, pid != ownPID,
+                  (row[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = row[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return false }
+            return bounds.contains(quartzPoint)
+        }
+        let fixtureCover = covers.first { $0[kCGWindowOwnerPID as String] as? pid_t == fixturePID }
+        guard let firstID = covers.first?[kCGWindowNumber as String] as? CGWindowID,
+              let coverID = fixtureCover?[kCGWindowNumber as String] as? CGWindowID,
+              firstID != item.id, coverID != item.id else {
+            throw Failure(message: "Pass-through fixture did not mask the target in the old bounds sweep.")
+        }
+
+        let overlay = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+                              backing: .buffered, defer: false)
+        overlay.level = .screenSaver
+        overlay.backgroundColor = NSColor.black.withAlphaComponent(0.24)
+        overlay.orderFrontRegardless()
+        defer { overlay.orderOut(nil) }
+        let items = [item.id: item]
+        guard WindowPicker.desktopItem(at: exposed, below: overlay.windowNumber, items: items)?.item.id == item.id else {
+            throw Failure(message: "Desktop pointer did not select the exposed fixture window through its pass-through cover.")
+        }
+        guard WindowPicker.desktopItem(at: blocked, below: overlay.windowNumber, items: items) == nil else {
+            throw Failure(message: "Desktop pointer selected a fixture window behind an interactive cover.")
+        }
+        print("Desktop hit testing selected fixture \(item.id) through pass-through window \(coverID) and rejected the blocked point.")
     }
 
     static func checkFrameTimeout() async throws {

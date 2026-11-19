@@ -72,8 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         Task { _ = await Recovery.run() }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.model.phase == .idle else { return }
-            if MeetingSetupIntroduction.shouldPresent(lastPresentedVersion: OrganizationState.defaults.integer(forKey: MeetingSetupIntroduction.defaultsKey)) {
-                self.showMeetingSetup()
+            let recorderIntroKey = "recorder.hasOpenedOnLaunch"
+            if !OrganizationState.defaults.bool(forKey: recorderIntroKey) {
+                OrganizationState.defaults.set(true, forKey: recorderIntroKey)
+                self.showScreenRecordingPanel()
             } else { self.showMeetingWorkspace() }
         }
     }
@@ -103,7 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showMeetingWorkspace()
+        if flag { return true }
+        if model.isBusy { showMeetingWorkspace() } else { showScreenRecordingPanel() }
         return false
     }
 
@@ -120,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         let reel = submenu("Reel")
         reel.addItem(NSMenuItem(title: "About Reel", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
         reel.addItem(.separator())
+        reel.addItem(item("New Screen Recording…", #selector(showRecorder)))
         let settings = item("Settings…", #selector(showSettings)); settings.keyEquivalent = ","
         reel.addItem(settings)
         if Updater.shared.isAvailable {
@@ -130,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         reel.addItem(.separator())
         let quit = item("Quit Reel", #selector(quit)); quit.keyEquivalent = "q"; reel.addItem(quit)
         let file = submenu("File")
-        file.addItem(item("New Recording", #selector(showRecorder)))
+        file.addItem(item("New Screen Recording…", #selector(showRecorder)))
         file.addItem(item("Stop and Share", #selector(stopRecording)))
         file.addItem(item("Pause Recording", #selector(pauseResume)))
         file.addItem(item("Cancel Recording…", #selector(cancelRecording)))
@@ -167,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         }
     }
 
-    @objc private func showRecorder() { if model.phase == .idle { togglePanel() } }
+    @objc private func showRecorder() { showScreenRecordingPanel() }
     @objc private func openWebLibrary() {
         guard CloudConfig.default.isConfigured else { return }
         NSWorkspace.shared.open(CloudConfig.default.notesBaseURL)
@@ -206,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     private func togglePanel() {
         if let desktopRecorder, desktopRecorder.isVisible { desktopRecorder.close(); return }
         if let popover, popover.isShown { popover.performClose(nil); return }
-        if model.meetingMode { presentRecorderPanel() } else { showScreenRecordingPanel() }
+        showScreenRecordingPanel()
     }
 
     func showScreenRecordingPanel() {
@@ -221,21 +225,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             desktopRecorder.makeKeyAndOrderFront(nil)
             return
         }
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 224),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 101),
                             styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
         panel.title = "Reel Recorder"
+        panel.titlebarAppearsTransparent = true
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.backgroundColor = NSColor(srgbRed: 18 / 255, green: 21 / 255, blue: 26 / 255, alpha: 1)
+        panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.delegate = self
+        var hiddenWindows: [NSWindow] = []
         panel.contentView = NSHostingView(rootView: RecorderPanel(model: model, desktop: true,
             start: { [weak panel] window, area in
                 panel?.close()
                 RecorderController.shared.start(window: window, area: area)
             },
             signIn: { [weak self, weak panel] in panel?.close(); self?.signIn() },
-            copyLastLink: { [weak self] in self?.copyLastLink() }))
+            copyLastLink: { [weak self] in self?.copyLastLink() },
+            setSelectingOnDesktop: { [weak self, weak panel] selecting in
+                if selecting {
+                    guard let self, let panel else { return }
+                    hiddenWindows = [self.workspaceWindow, self.libraryWindow, self.finishedClip].compactMap { $0 }.filter(\.isVisible)
+                    hiddenWindows.forEach { $0.orderOut(nil) }
+                    panel.alphaValue = 0
+                    panel.ignoresMouseEvents = true
+                } else {
+                    hiddenWindows.reversed().forEach { $0.orderFront(nil) }
+                    hiddenWindows.removeAll()
+                    guard let self, let panel else { return }
+                    panel.alphaValue = 1
+                    panel.ignoresMouseEvents = false
+                    if self.desktopRecorder === panel, self.model.phase == .idle { panel.makeKeyAndOrderFront(nil) }
+                }
+            },
+            setPanelHeight: { [weak panel] height in
+                guard let panel, height > 0, abs((panel.contentView?.bounds.height ?? 0) - height) > 0.5 else { return }
+                let origin = panel.frame.origin
+                panel.setContentSize(NSSize(width: 620, height: height))
+                panel.setFrameOrigin(origin)
+            }))
         panel.contentView?.layoutSubtreeIfNeeded()
         if let size = panel.contentView?.fittingSize, size.height > 0 {
             panel.setContentSize(NSSize(width: 620, height: size.height))
@@ -356,7 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         case .idle:
             break
         }
-        menu.addItem(item("Start Recording  (\(s.shortcut.display))", #selector(startRecording)))
+        menu.addItem(item("New Screen Recording…", #selector(showRecorder)))
         menu.addItem(.separator())
         for mode in CaptureMode.allCases {
             let i = item(mode.label, #selector(selectMode(_:)))
@@ -451,14 +482,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
         i.target = self
         return i
-    }
-
-    @objc private func startRecording() {
-        if !model.meetingMode {
-            showScreenRecordingPanel()
-        } else {
-            RecorderController.shared.start()
-        }
     }
 
     func handleRecordShortcut() {
