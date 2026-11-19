@@ -472,9 +472,10 @@ def test_reselect_rearms_schedule_and_stale_callbacks_cannot_use_new_selection(s
     assert service.dispatch_callback(CLAIMS, rearmed["event"], rearmed["start"], rearmed["generation"]) == "awaiting_consent"
 
 
-def test_provider_revocation_clears_pending_schedule_and_prevents_entry(setup):
+@pytest.mark.parametrize("first_check", ["sync", "due"])
+def test_provider_revocation_clears_pending_schedule_and_rearms_after_restored_access(setup, first_check):
     from calendar_meetings import CalendarUnavailable
-    service, _, calendar, scheduler, joined, _ = setup
+    service, _, calendar, scheduler, joined, clock = setup
     connect(service)
     service.sync(CLAIMS)
     task = scheduler.tasks[0]
@@ -483,10 +484,18 @@ def test_provider_revocation_clears_pending_schedule_and_prevents_entry(setup):
         assert calendar_id == "primary"
         raise CalendarUnavailable("access revoked")
 
+    original = calendar.list_events
     calendar.list_events = deny
-    assert service.sync(CLAIMS) == 0
+    clock["now"] += timedelta(minutes=10)
+    if first_check == "sync":
+        assert service.sync(CLAIMS) == 0
     assert service.dispatch_callback(CLAIMS, task["event"], task["start"]) == "cancelled"
     assert joined == []
+    calendar.list_events = original
+    assert service.sync(CLAIMS) == 1
+    rearmed = scheduler.tasks[-1]
+    assert rearmed["generation"] and len(scheduler.tasks) == 2
+    assert service.dispatch_callback(CLAIMS, rearmed["event"], rearmed["start"], rearmed["generation"]) == "awaiting_consent"
 
 
 @pytest.mark.parametrize("action", ["callback", "approval"])

@@ -147,6 +147,33 @@ def test_standing_consent_rejects_a_stale_tab_even_when_scope_changes_back(setup
     assert same == result.json["config"]
 
 
+def test_excluded_cloud_recap_requires_explicit_retry_after_selection_returns(setup, monkeypatch):
+    import calendar_runtime as runtime
+    client, store, claims, _, _ = setup
+    connected = post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
+    event_id = connected.json["events"][0]["id"]
+    owner_key = "calendar/" + runtime.digest(claims["email"])
+    state, generation = store.load(owner_key)
+    state["events"][event_id].update(status="completed", attempted=True, execution_id="saved")
+    store.cas(owner_key, state, generation)
+    store.cas("executions/saved", {"execution_id": "saved", "owner_id": claims["sub"], "status": "completed",
+              "processing_status": "calendar_selection_required", "audio_generation": 1, "processing_step": 3,
+              "artifacts": {"transcript.txt": True, "recording.mp4": True}}, 0)
+    response = post(client, "/calendar/disconnect", {})
+    old_capture = response.json["events"][0]
+    assert old_capture["video_available"] and old_capture["transcript_available"]
+    retry = f"/calendar/meetings/{event_id}/notion"
+    assert post(client, retry, {}).status_code == 400
+    post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
+    scheduled = []
+    monkeypatch.setattr(runtime, "CloudTasks", lambda: SimpleNamespace(schedule_processing=scheduled.append))
+    result = post(client, retry, {})
+    assert result.json["status"] == "processing"
+    assert scheduled == ["saved"]
+    saved, _ = store.load("executions/saved")
+    assert saved["processing_step"] == 3 and saved["artifacts"]["transcript.txt"]
+
+
 def test_new_uid_cannot_read_previous_calendar_for_same_email(setup):
     client, _, claims, _, _ = setup
     assert post(client, "/calendar/connect", {"calendar_ids": ["primary"]}).status_code == 200

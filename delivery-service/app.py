@@ -106,7 +106,7 @@ def selected_calendar_ids(store, owner_email, owner_uid):
 def _calendar_unavailable(exc):
     status = getattr(getattr(exc, 'resp', None), 'status', None)
     if status != 403:
-        return status in (404, 410)
+        return status in (401, 404, 410)
     transient = {'quotaExceeded', 'rateLimitExceeded', 'userRateLimitExceeded', 'dailyLimitExceeded'}
     return not any(isinstance(detail, dict) and detail.get('reason') in transient
                    for detail in (getattr(exc, 'error_details', None) or []))

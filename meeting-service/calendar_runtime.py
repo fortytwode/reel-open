@@ -633,6 +633,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                  "join_url": link[0], "passcode": link[1], "attendees": [owner],
                  "calendar_id": "browser", "status": "dispatching", "attempted": True}
         def reserve(state):
+            core._verify_binding(state, claims)
             for previous in state.setdefault("events", {}).values():
                 if (previous.get("join_url") == link[0]
                         and previous.get("status") not in {"completed", "failed", "cancelled"}):

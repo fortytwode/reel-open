@@ -372,12 +372,14 @@ class CalendarMeetings:
 
     def settings(self, claims):
         state, _ = self._load(owner_identity(claims))
+        self._verify_binding(state, claims)
         config = state.get("config")
         return {"scope_revision": "legacy", **{k: v for k, v in config.items() if k != "owner_uid"}} if config else None
 
     def disconnect(self, claims):
         owner = owner_identity(claims)
         def stop(state):
+            self._verify_binding(state, claims)
             config = state.get("config")
             if not config:
                 return False, {"enabled": False}
@@ -389,6 +391,7 @@ class CalendarMeetings:
     def sync(self, claims):
         owner = owner_identity(claims)
         state, _ = self._load(owner)
+        self._verify_binding(state, claims)
         config = state.get("config")
         if not config or not config.get("enabled") or not config.get("calendar_ids"):
             raise CalendarMeetingError("Connect and select calendars before syncing")
@@ -397,15 +400,16 @@ class CalendarMeetings:
         horizon = now + timedelta(hours=48)
         fetched, inaccessible = {}, set()
         for calendar_id in config["calendar_ids"]:
+            current_events = {}
             try:
-                events = list(client.list_events(calendar_id, now.isoformat(), horizon.isoformat()))
+                for raw in client.list_events(calendar_id, now.isoformat(), horizon.isoformat()):
+                    event = normalize_event(calendar_id, raw, owner, now)
+                    if event and _parse_time({"dateTime": event["start"]}) <= horizon:
+                        current_events[event["id"]] = event
             except CalendarUnavailable:
                 inaccessible.add(calendar_id)
                 continue
-            for raw in events:
-                event = normalize_event(calendar_id, raw, owner, now)
-                if event and _parse_time({"dateTime": event["start"]}) <= horizon:
-                    fetched[event["id"]] = event
+            fetched.update(current_events)
         def update(current):
             latest_config = current.get("config") or {}
             if (latest_config.get("enabled") is not True or latest_config.get("scope_revision") != config.get("scope_revision")
@@ -508,6 +512,7 @@ class CalendarMeetings:
     def approve(self, claims, event_id):
         owner = owner_identity(claims)
         config, state, _ = self._get_config_state(owner)
+        self._verify_binding(state, claims)
         if not config.get("enabled"):
             raise CalendarMeetingError("Calendar connection is disabled")
         now = _now(self.clock())
@@ -556,7 +561,8 @@ class CalendarMeetings:
 
     def dispatch_callback(self, claims, event_id, occurrence_start, task_generation=None):
         owner = owner_identity(claims)
-        config, _, _ = self._get_config_state(owner)
+        config, state, _ = self._get_config_state(owner)
+        self._verify_binding(state, claims)
         now = _now(self.clock())
         # Re-read the selected calendars at dispatch time so a stale task cannot join a
         # meeting that was cancelled or moved since the last sync.

@@ -254,6 +254,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
         request("/calendar/meetings", "GET", undefined, uid).catch((error) => ({ _error: error })),
       ]);
       if (state.uid !== uid || state.disposed) return;
+      const previous = state.config;
       state.config = settings.config || null;
       state.events = Array.isArray(settings.events) ? settings.events : [];
       state.capabilities = settings.capabilities || { calendar: false, bot: false };
@@ -261,6 +262,10 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       state.due = Array.isArray(due) ? due : Array.isArray(due.meetings) ? due.meetings : Array.isArray(due.events) ? due.events : [];
       if (due._error) state.error = due._error.message;
       else state.error = "";
+      if (previous?.scope_revision !== state.config?.scope_revision || previous?.enabled !== state.config?.enabled) {
+        state.picker = null;
+        onSelectionChange?.();
+      }
       render();
     } catch (error) { if (!state.disposed) notifyError(error); }
   }
@@ -301,7 +306,6 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
         const result = await request("/calendar/connect", "POST", { calendar_ids: [...state.picker.selected] }, uid);
         syncError = result.sync_error;
         state.picker = null;
-        onSelectionChange?.();
       } else if (action === "save-consent") {
         const mode = selectedMode;
         const payload = { consent_mode: mode };
@@ -314,7 +318,6 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       } else if (action === "disconnect") {
         await request("/calendar/disconnect", "POST", {}, uid);
         state.picker = null;
-        onSelectionChange?.();
       } else if (action === "sync") {
         await request("/calendar/sync", "POST", {}, uid);
       } else if (action === "approve") {
