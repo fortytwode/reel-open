@@ -59,6 +59,7 @@ def setup(monkeypatch):
     app = types.ModuleType('canonical_delivery.app')
     app.GCSStateStore = lambda _: object()
     app.calendar_service = object()
+    app.configured_slack_recaps = lambda: None
     app.CalendarSelectionRequired = type('CalendarSelectionRequired', (Exception,), {})
     app.selected_calendar_ids = lambda store, owner, uid: ('primary',)
     app.deliver = lambda payload, owner, *args, **kw: deliveries.append((payload, owner, kw['followup_items'])) or {'url': 'https://notes'}
@@ -84,9 +85,9 @@ def setup(monkeypatch):
     return store, bucket, record, scheduler, tasks, deliveries
 
 
-def run(setup):
+def run(setup, now=100):
     store, _, record, scheduler, _, _ = setup
-    return processing.process_step(store, record['execution_id'], scheduler, clock=lambda: 100)
+    return processing.process_step(store, record['execution_id'], scheduler, clock=lambda: now)
 
 
 def test_completed_execution_uses_immutable_transcript_summary_and_calendar_reference(setup):
@@ -494,3 +495,68 @@ def test_cached_acknowledgement_cannot_deliver_from_later_step(setup, monkeypatc
     assert run(setup) == 'review_required'
     saved, _ = store.load('executions/' + record['execution_id'])
     assert saved['notion_status'] == 'review_required' and deliveries == []
+
+def test_cloud_delivery_uses_slack_and_retries_without_retranscribing(setup, monkeypatch):
+    app = sys.modules['canonical_delivery.app']
+    slack = object()
+    monkeypatch.setattr(app, 'configured_slack_recaps', lambda: slack, raising=False)
+    calls = []
+    def deliver(payload, owner, *args, **kwargs):
+        calls.append(kwargs)
+        return {'url': 'https://notes', 'slack_retry_pending': len(calls) == 1}
+    monkeypatch.setattr(app, 'deliver', deliver)
+    for _ in range(3): assert run(setup) == 'processing'
+    assert run(setup) == 'delivered'
+    store, _, record, _, _, _ = setup
+    key = 'executions/' + record['execution_id']
+    saved, _ = store.load(key)
+    assert saved['notion_status'] == 'delivered' and saved['slack_retry_pending']
+    assert run(setup) == 'delivered'  # duplicate task before the retry window is a no-op
+    assert len(calls) == 1
+    assert run(setup, now=160) == 'delivered'
+    saved, _ = store.load(key)
+    assert saved['notion_status'] == 'delivered' and not saved['slack_retry_pending']
+    assert len(calls) == 2 and all(c['slack'] is slack and c['retry_slack'] for c in calls)
+
+
+def test_cloud_slack_unresolved_is_bounded_and_primary_delivery_stays_delivered(setup, monkeypatch):
+    app = sys.modules['canonical_delivery.app']
+    monkeypatch.setattr(app, 'configured_slack_recaps', lambda: object())
+    monkeypatch.setattr(app, 'deliver', lambda *args, **kwargs: {'url': 'https://notes', 'slack_retry_pending': True})
+    for _ in range(3): assert run(setup) == 'processing'
+    for now in (100, 160, 220, 280): assert run(setup, now=now) == 'delivered'
+    store, _, record, _, _, _ = setup
+    saved, _ = store.load('executions/' + record['execution_id'])
+    assert saved['notion_status'] == 'delivered'
+    assert saved['slack_retry_status'] == 'unresolved'
+    assert not saved['slack_retry_pending'] and not saved['processing_enqueue_needed']
+
+def test_slack_retry_provider_outage_never_reverts_delivery(setup, monkeypatch):
+    app = sys.modules['canonical_delivery.app']
+    monkeypatch.setattr(app, 'configured_slack_recaps', lambda: object())
+    calls = []
+    def deliver(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return {'url': 'https://notes', 'slack_retry_pending': True}
+        raise RuntimeError('offline')
+    monkeypatch.setattr(app, 'deliver', deliver)
+    for _ in range(3): assert run(setup) == 'processing'
+    for now in (100, 160, 220, 280): assert run(setup, now=now) == 'delivered'
+    store, _, record, _, _, _ = setup
+    saved, _ = store.load('executions/' + record['execution_id'])
+    assert saved['notion_status'] == 'delivered' and saved['notion_url'] == 'https://notes'
+    assert saved['slack_retry_status'] == 'unresolved' and not saved['slack_retry_pending']
+
+
+def test_slack_retry_outbox_uses_delay_and_preserves_primary_status(setup, monkeypatch):
+    app = sys.modules['canonical_delivery.app']
+    monkeypatch.setattr(app, 'configured_slack_recaps', lambda: object())
+    monkeypatch.setattr(app, 'deliver', lambda *args, **kwargs: {'url': 'https://notes', 'slack_retry_pending': True})
+    store, _, record, _, _, _ = setup
+    scheduled = []
+    scheduler = types.SimpleNamespace(schedule_processing=lambda *args, **kwargs: scheduled.append((args, kwargs)))
+    for _ in range(4): assert processing.process_step(store, record['execution_id'], scheduler, clock=lambda: 100) in ('processing', 'delivered')
+    assert scheduled[-1][1]['delay_seconds'] == 60
+    saved, _ = store.load('executions/' + record['execution_id'])
+    assert saved['processing_status'] == saved['notion_status'] == 'delivered'

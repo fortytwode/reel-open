@@ -56,7 +56,7 @@ class CloudTasks:
             response.raise_for_status()
         return name
 
-    def schedule_processing(self, execution, *, timeout=10):
+    def schedule_processing(self, execution, *, timeout=10, delay_seconds=0):
         queue = os.environ["PROCESSING_TASK_QUEUE"]
         task = {"dispatchDeadline": "600s", "httpRequest": {
             "url": os.environ["MEETING_SERVICE_URL"] + "/internal/bot/process",
@@ -64,6 +64,8 @@ class CloudTasks:
             "body": base64.b64encode(json.dumps({"execution_id": execution}).encode()).decode(),
             "oidcToken": {"serviceAccountEmail": os.environ["INTERNAL_SERVICE_ACCOUNT"],
                           "audience": os.environ["MEETING_SERVICE_URL"]}}}
+        if delay_seconds:
+            task["scheduleTime"] = (datetime.now(UTC) + timedelta(seconds=delay_seconds)).isoformat().replace('+00:00', 'Z')
         session = self.sweep_session if timeout == 1 else cloud_session()
         response = session.post("https://cloudtasks.googleapis.com/v2/" + queue + "/tasks",
                                 json={"task": task}, timeout=timeout)
@@ -75,18 +77,20 @@ def enqueue_processing(store, execution, scheduler, *, bounded=False):
     key = "executions/" + execution
     options = {"timeout": 1} if bounded else {}
     record, generation = store.load(key, **options)
+    slack_retry = bool(record and record.get("processing_status") == "delivered" and record.get("slack_retry_pending"))
     if (not record or record.get("status") != "completed" or not record.get("processing_enqueue_needed")
-            or record.get("processing_status") in PROCESSING_TERMINAL_STATES):
+            or (record.get("processing_status") in PROCESSING_TERMINAL_STATES and not slack_retry)):
         return False
     step = record.get("processing_step", 0)
-    if bounded:
-        scheduler.schedule_processing(execution, timeout=1)
-    else:
-        scheduler.schedule_processing(execution)
+    schedule_options = {"timeout": 1} if bounded else {}
+    if slack_retry:
+        schedule_options["delay_seconds"] = 60
+    scheduler.schedule_processing(execution, **schedule_options)
     # Do not clear a later stage's outbox when its task ran concurrently.
     current, generation = store.load(key, **options)
     if (current and current.get("processing_enqueue_needed")
-            and current.get("processing_step", 0) == step):
+            and current.get("processing_step", 0) == step
+            and current.get("slack_retry_attempts", 0) == record.get("slack_retry_attempts", 0)):
         current["processing_enqueue_needed"] = False
         try:
             store.cas(key, current, generation, **options)

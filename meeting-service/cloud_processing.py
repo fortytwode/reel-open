@@ -104,7 +104,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
     """Run one bounded stage. All identities and paths come from saved state."""
     from google.cloud import storage
     from speech import attendee_keywords, transcribe_audio, summarize_text
-    from canonical_delivery.app import CalendarSelectionRequired, GCSStateStore, calendar_service, deliver, selected_calendar_ids
+    from canonical_delivery.app import CalendarSelectionRequired, GCSStateStore, calendar_service, configured_slack_recaps, deliver, selected_calendar_ids
     from canonical_delivery.providers import configured_providers
 
     started = clock()
@@ -115,6 +115,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
     owner, owner_id, event_id = record.get('owner_email'), record.get('owner_id'), record.get('event_id')
     if not isinstance(owner, str) or not owner or not isinstance(owner_id, str) or not owner_id or not event_id:
         raise ValueError('Execution owner is unavailable')
+    is_slack_retry = record.get('processing_status') == 'delivered' and record.get('slack_retry_pending') is True
     from calendar_runtime import digest
     expected_prefix = 'reel-meetings/bot/' + digest(owner_id) + '/' + execution + '/'
     if (record.get('output_bucket') != os.environ.get('BOT_BUCKET') or record.get('output_prefix') != expected_prefix
@@ -129,10 +130,16 @@ def process_step(store, execution, scheduler, *, clock=time.time):
     occurrence = event.get('start') if manual else (event or {}).get('occurrence_start')
     if (identity.get('owner_uid') != owner_id or identity.get('owner_email') != owner or not event
             or event.get('execution_id') != execution or occurrence != record.get('started_at')):
+        if is_slack_retry:
+            record.update(slack_retry_pending=False, slack_retry_status='unresolved', processing_enqueue_needed=False)
+            store.cas(key, record, generation)
+            return 'delivered'
         raise ValueError('Execution owner or occurrence changed')
     from calendar_runtime import PROCESSING_TERMINAL_STATES
-    if record.get('processing_status') in PROCESSING_TERMINAL_STATES:
+    if record.get('processing_status') in PROCESSING_TERMINAL_STATES and not is_slack_retry:
         return record['processing_status']
+    if is_slack_retry and clock() < record.get('slack_retry_not_before', 0):
+        return 'delivered'
     if record.get('processing_lease_until', 0) > clock():
         raise RuntimeError('Processing is already in progress')
     attendee_names = record.get('attendee_names', event.get('attendee_names'))
@@ -227,19 +234,40 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                     try:
                         receipt = deliver(payload, owner, delivery_store,
                                           configured_providers(store=delivery_store), calendar_service, time.time,
-                                          deadline=started + 570, followup_items=summary.get('action_items'),
+                                          deadline=started + 570, slack=configured_slack_recaps(), retry_slack=True, defer_slack=not is_slack_retry,
+                                          followup_items=summary.get('action_items'),
                                           calendar_selection=lambda: selected_calendar_ids(store, owner, owner_id))
                     except CalendarSelectionRequired:
-                        state_name = 'calendar_selection_required'
+                        if is_slack_retry:
+                            record['slack_pending_result'] = False
+                            record['slack_retry_status'] = 'unresolved'
+                            state_name = 'delivered'
+                        else:
+                            state_name = 'calendar_selection_required'
+                    except Exception:
+                        if not is_slack_retry:
+                            raise
+                        record['slack_pending_result'] = True
+                        state_name = 'delivered'
                     else:
+                        record['slack_pending_result'] = bool(receipt.get('slack_retry_pending') and not receipt.get('suppressed_duplicate'))
                         record['notion_url'] = receipt['url']
                         record['notion_status'] = 'delivered'
                         state_name = 'delivered'
         current, gen = store.load(key)
         if current.get('processing_lease_until') != record['processing_lease_until']:
             raise RuntimeError('Processing claim expired')
-        next_step = index if state_name == 'calendar_selection_required' else index + 1
-        current.update(processing_status=state_name, processing_step=next_step, processing_lease_until=0, processing_enqueue_needed=(state_name == 'processing'))
+        pending = bool(record.get('slack_pending_result')) if state_name == 'delivered' else False
+        attempts = int(record.get('slack_retry_attempts', 0)) + (1 if is_slack_retry else 0)
+        unresolved = record.get('slack_retry_status') == 'unresolved' or (pending and attempts >= 3)
+        pending = pending and not unresolved
+        next_step = index if state_name == 'calendar_selection_required' or pending else index + 1
+        current.update(processing_status=state_name, processing_step=next_step, processing_lease_until=0,
+                       processing_enqueue_needed=(state_name == 'processing' or pending))
+        if state_name == 'delivered' and ('slack_pending_result' in record or is_slack_retry):
+            current.update(slack_retry_pending=pending, slack_retry_attempts=attempts,
+                           slack_retry_not_before=clock() + 60 if pending else 0,
+                           slack_retry_status='unresolved' if unresolved else 'pending' if pending else 'complete')
         if 'has_meeting_content' in record:
             current['has_meeting_content'] = record['has_meeting_content']
         if record.get('transcript_available'):
@@ -247,15 +275,29 @@ def process_step(store, execution, scheduler, *, clock=time.time):
         if record.get('summary_available'):
             current.setdefault('artifacts', {})['summary.json'] = True
         if state_name == 'delivered':
-            current.update(notion_url=record['notion_url'], notion_status='delivered')
+            current.update(notion_url=record.get('notion_url', current.get('notion_url')), notion_status='delivered')
         elif state_name in PROCESSING_TERMINAL_STATES:
             current['notion_status'] = state_name
         store.cas(key, current, gen)
-        if state_name == 'processing':
+        if state_name == 'processing' or pending:
             from calendar_runtime import enqueue_processing
             enqueue_processing(store, execution, scheduler)
         return state_name
     except Exception:
+        if is_slack_retry:
+            current, gen = store.load(key)
+            if current and current.get('processing_lease_until') == record['processing_lease_until']:
+                attempts = int(current.get('slack_retry_attempts', 0)) + 1
+                pending = attempts < 3
+                current.update(slack_retry_attempts=attempts, slack_retry_pending=pending,
+                               slack_retry_not_before=clock() + 60 if pending else 0,
+                               slack_retry_status='pending' if pending else 'unresolved',
+                               processing_lease_until=0, processing_enqueue_needed=pending)
+                store.cas(key, current, gen)
+                if pending:
+                    from calendar_runtime import enqueue_processing
+                    enqueue_processing(store, execution, scheduler)
+                return 'delivered'
         # A crashed process may continue until the Gunicorn deadline. Keep the lease
         # until then so a retry cannot start a competing provider operation.
         raise

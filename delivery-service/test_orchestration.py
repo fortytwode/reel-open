@@ -843,3 +843,115 @@ class OrganizationTests(unittest.TestCase):
                 self.assertEqual(self.client.get('/delivery/meetings', headers=self.headers).json['meetings'], [])
         self.assertEqual(self.complete().status_code, 200)
         self.assertEqual(self.providers.sends, 1)
+
+class CloudSlackRetryTests(unittest.TestCase):
+    setUp = OrchestrationTests.setUp
+    def test_pending_ambiguous_dm_reconciles_on_duplicate_without_repeating_email(self):
+        from slack_recaps import SlackError
+        slack = Mock()
+        slack.resolve_dm.return_value = 'DOWNER'
+        slack.post_dm.side_effect = SlackError('transport_failure', uncertain=True)
+        slack.find_dm.side_effect = [None, '1000.001']
+        self.payload['calendar'] = None
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        first = deliver(*args, slack=slack, retry_slack=True)
+        self.assertTrue(first['slack_retry_pending'])
+        second = deliver(*args, slack=slack, retry_slack=True)
+        self.assertFalse(second['slack_retry_pending'])
+        self.assertEqual(second['slack'], {'sent': 1})
+        self.assertEqual(slack.post_dm.call_count, 1)
+        self.assertEqual(self.providers.creates, 1)
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_existing_receipt_is_never_backfilled(self):
+        self.payload['calendar'] = None
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        deliver(*args)
+        slack = Mock()
+        deliver(*args, slack=slack, retry_slack=True)
+        slack.resolve_dm.assert_not_called()
+
+    def test_transient_rejection_retries_once_without_repeating_email(self):
+        from slack_recaps import SlackError
+        slack = Mock()
+        slack.resolve_dm.return_value = 'DOWNER'
+        slack.post_dm.side_effect = [SlackError('ratelimited', retry_after=3), '1000.001']
+        self.payload['calendar'] = None
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        first = deliver(*args, slack=slack, retry_slack=True)
+        self.assertTrue(first['slack_retry_pending'])
+        second = deliver(*args, slack=slack, retry_slack=True)
+        self.assertFalse(second['slack_retry_pending'])
+        self.assertEqual(second['slack'], {'sent': 1})
+        self.assertEqual(slack.post_dm.call_count, 2)
+        self.assertEqual(slack.post_dm.call_args_list[0].args[2], slack.post_dm.call_args_list[1].args[2])
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_pending_receipt_does_not_authorize_another_recording_to_retry(self):
+        from slack_recaps import SlackError
+        slack = Mock()
+        slack.resolve_dm.return_value = 'DOWNER'
+        slack.post_dm.side_effect = SlackError('transport_failure', uncertain=True)
+        slack.find_dm.return_value = None
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        self.assertTrue(deliver(*args, slack=slack, retry_slack=True, calendar_selection=lambda: ('primary',))['slack_retry_pending'])
+        other = {**self.payload, 'id': 'be5ecec6-e403-4163-8f95-b503e3648c40'}
+        result = deliver(other, *args[1:], slack=slack, retry_slack=True, calendar_selection=lambda: ('primary',))
+        self.assertTrue(result['suppressed_duplicate'])
+        self.assertEqual(slack.post_dm.call_count, 2)
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_cloud_defers_slack_until_after_confirmed_receipt(self):
+        slack = Mock()
+        slack.resolve_dm.return_value = 'DOWNER'
+        slack.post_dm.return_value = '1000.001'
+        self.payload['calendar'] = None
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        first = deliver(*args, slack=slack, retry_slack=True, defer_slack=True)
+        self.assertTrue(first['verified'] and first['slack_retry_pending'])
+        slack.resolve_dm.assert_not_called()
+        second = deliver(*args, slack=slack, retry_slack=True)
+        self.assertFalse(second['slack_retry_pending'])
+        self.assertEqual(self.providers.sends, 1)
+
+    def test_preexisting_sent_email_is_not_enrolled_for_slack(self):
+        from app import digest_key
+        self.payload['calendar'] = None
+        identity = ('manual', self.claims['email'], self.payload['id'])
+        recording_key = digest_key(self.claims['email'], self.payload['id'])
+        key = 'occurrence/' + digest_key(*identity)
+        initial_args = (self.payload, self.claims['email'], self.store, self.providers,
+                        lambda owner: Service([self.event]), lambda: self.now)
+        deliver(*initial_args)
+        state, generation = self.store.load(key)
+        del state['receipt']
+        self.store.cas(key, state, generation)
+        slack = Mock()
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        result = deliver(*args, slack=slack, retry_slack=True, defer_slack=True)
+        self.assertNotIn('slack_retry_pending', result)
+        slack.resolve_dm.assert_not_called()
+
+    def test_preexisting_ambiguous_email_is_not_enrolled_for_slack(self):
+        from app import digest_key
+        self.payload['calendar'] = None
+        identity = ('manual', self.claims['email'], self.payload['id'])
+        key = 'occurrence/' + digest_key(*identity)
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        deliver(*args)
+        state, generation = self.store.load(key)
+        del state['receipt']
+        state['email'] = {'state':'draft', 'provider_draft_id':'draft'}
+        self.store.cas(key, state, generation)
+        slack = Mock()
+        result = deliver(*args, slack=slack, retry_slack=True, defer_slack=True)
+        self.assertNotIn('slack_retry_pending', result)
+        slack.resolve_dm.assert_not_called()
+        self.assertEqual(self.providers.sends, 1)

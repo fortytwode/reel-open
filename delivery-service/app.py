@@ -473,6 +473,11 @@ def verify_firebase(token):
     return id_token.verify_firebase_token(token, Request(), audience=project)
 
 
+def configured_slack_recaps():
+    token = os.getenv('REEL_SLACK_BOT_TOKEN', '').strip()
+    return SlackRecaps(token) if token else None
+
+
 def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service, *, store=None, calendar_store=None,
                providers=None, clock=None, slack=None):
     from flask import Flask, jsonify, request, g
@@ -480,9 +485,8 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
     clock = clock or time.time
     dependencies = {}
-    slack_token = os.getenv('REEL_SLACK_BOT_TOKEN', '').strip()
-    if slack is None and slack_token:
-        slack = SlackRecaps(slack_token)
+    if slack is None:
+        slack = configured_slack_recaps()
 
     @app.after_request
     def cors(response):
@@ -906,7 +910,7 @@ class ProviderRejected(ProviderPending):
 
 
 def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None, *, slack=None,
-            followup_items=None, calendar_selection=None):
+            followup_items=None, calendar_selection=None, retry_slack=False, defer_slack=False):
     """File and share verified notes, then deliver the recap."""
     recording_id, content_hash = validate_payload(payload)
     deadline = deadline or clock() + 570  # Gunicorn kills the synchronous worker at 600s.
@@ -956,7 +960,11 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
             _validate_note(note, meeting_id)
             if owner in note['recipients']:
                 update_note_index(store, meeting_id, owner, recording_id, duplicate_fence)
-        return {**receipt, 'suppressed_duplicate':state['recording_key'] != recording_key}
+        duplicate = state['recording_key'] != recording_key
+        if (retry_slack and slack is not None and not duplicate and receipt.get('slack_retry_pending') is True
+                and receipt.get('notes_url')):
+            receipt = retry_saved_slack(store, key, recording_key, receipt, note, slack, clock, deadline)
+        return {**receipt, 'suppressed_duplicate':duplicate}
 
     def fence():
         state, _ = store.load(key)
@@ -974,6 +982,10 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
     try:
         with providers.context(fence):
             state = fence()
+            email_ledger = ('email_started_at', 'email', 'email_create_uncertain', 'email_retry_after')
+            if (retry_slack and slack is not None and 'slack_retry_eligible' not in state
+                    and not any(field in state for field in email_ledger)):
+                state = save(slack_retry_eligible=True)
             # Recipient/title/route inputs belong to the first authoritative
             # snapshot, not a later invite edit during provider recovery.
             if 'recipients' not in state:
@@ -1146,12 +1158,17 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 elif accepted is not None:
                     raise ProviderPending('Follow-up handoff is unconfirmed; retry to reconcile')
             receipt = {'verified':True, 'page_id':page['page_id'], 'url':page['url'], 'recipients':recipients, 'email_status':'confirmed', 'route':route['kind'], 'suppressed_duplicate':False, 'notes_url':notes_url}
+            if state.get('slack_retry_eligible') and slack is not None and notes_url:
+                receipt['slack_retry_pending'] = True
             save(receipt=receipt)
-            if slack is not None and notes_url:
+            if slack is not None and notes_url and not defer_slack and (not retry_slack or state.get('slack_retry_eligible')):
                 try:
-                    outcome = send_slack_recaps(slack, note, state, save, fence, clock, deadline)
-                    receipt = {**receipt, 'slack': outcome}
-                    save(receipt=receipt)
+                    outcome = send_slack_recaps(slack, note, state, save, fence, clock, deadline, retryable=retry_slack)
+                    updated = {**receipt, 'slack': outcome}
+                    if retry_slack:
+                        updated['slack_retry_pending'] = slack_incomplete(outcome)
+                    save(receipt=updated)
+                    receipt = updated
                 except Exception:
                     logger.warning('Reel Slack recap interrupted (%s)', meeting_id)
             return receipt
@@ -1169,7 +1186,53 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
             store.cas(key, state, generation)
 
 
-def send_slack_recaps(slack, note, state, save, fence, clock, deadline):
+def slack_incomplete(outcome):
+    return any(outcome.get(key, 0) for key in ('retryable', 'not_attempted', 'unconfirmed'))
+
+
+def retry_saved_slack(store, key, recording_key, receipt, note, slack, clock, deadline):
+    """Claim only the original new delivery; old receipts never acquire a retry."""
+    import uuid
+    state, generation = store.load(key)
+    if (not state or state.get('recording_key') != recording_key
+            or state.get('receipt', {}).get('slack_retry_pending') is not True
+            or state.get('lease_until', 0) > clock()):
+        return receipt
+    token = uuid.uuid4().hex
+    state.update(lease_token=token, lease_until=clock() + 660)
+    try:
+        store.cas(key, state, generation)
+    except Exception as exc:
+        from google.api_core.exceptions import PreconditionFailed
+        if isinstance(exc, PreconditionFailed):
+            return receipt
+        raise
+    def fence():
+        current, _ = store.load(key)
+        if clock() + 30 >= deadline or not current or current.get('lease_token') != token or current.get('lease_until', 0) <= clock() + 30:
+            raise Conflict('Delivery claim expired; retry this recording')
+        return current
+    def save(**updates):
+        fence()
+        result = checkpoint(store, key, token, clock(), updates)
+        fence()
+        return result
+    try:
+        outcome = send_slack_recaps(slack, note, fence(), save, fence, clock, deadline, retryable=True)
+        updated = {**receipt, 'slack': outcome, 'slack_retry_pending': slack_incomplete(outcome)}
+        save(receipt=updated)
+        receipt = updated
+    except Exception:
+        logger.warning('Reel Slack recap retry interrupted (%s)', note['id'])
+    finally:
+        current, generation = store.load(key)
+        if current and current.get('lease_token') == token and current.get('lease_until', 0) > clock():
+            current['lease_until'] = clock()
+            store.cas(key, current, generation)
+    return receipt
+
+
+def send_slack_recaps(slack, note, state, save, fence, clock, deadline, *, retryable=False):
     """Use the note's existing access list and checkpoint each optional DM."""
     def request(operation, *args):
         fence()
@@ -1196,6 +1259,8 @@ def send_slack_recaps(slack, note, state, save, fence, clock, deadline):
         fence()
         previous = results.get(email, {})
         status = previous.get('status')
+        if retryable and status == 'retryable':
+            status = None
         if status and status != 'posting':
             counts[status] += 1
             continue
@@ -1215,7 +1280,7 @@ def send_slack_recaps(slack, note, state, save, fence, clock, deadline):
         except SlackError as exc:
             logger.warning('Reel Slack recap request failed (%s)', exc.code)
             if status != 'posting' or not exc.uncertain:
-                status = 'failed'
+                status = ('retryable' if retryable and exc.code in {'transport_failure', 'unexpected_http_status', 'ratelimited', 'rate_limited'} else 'failed')
         if status == 'posting' and not timestamp:
             fence()
             try:
@@ -1226,7 +1291,8 @@ def send_slack_recaps(slack, note, state, save, fence, clock, deadline):
             status = 'sent'
         elif status == 'posting':
             status = 'unconfirmed'
-        results[email] = {'status': status, **({'ts': timestamp} if timestamp else {})}
+        results[email] = (previous if retryable and status == 'unconfirmed' else
+                          {'status': status, **({'ts': timestamp} if timestamp else {})})
         save(slack_dms=results)
         counts[status] += 1
     if any(counts[name] for name in ('failed', 'not_attempted', 'unconfirmed')):
