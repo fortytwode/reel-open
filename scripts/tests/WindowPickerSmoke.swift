@@ -11,7 +11,7 @@ import ScreenCaptureKit
 //   Sources/Reel/UI/WindowPicker.swift scripts/tests/WindowPickerSmoke.swift -o /tmp/reel-window-picker-smoke
 // /tmp/reel-window-picker-smoke
 // Add --desktop-hit-test-only to run without the other-Space fixture.
-// Add --exercise-select-button to check stale hover state; briefly repositions the pointer.
+// Add --exercise-select-button to check stale hover state with an additional small fixture window.
 // Add --show-picker to inspect the production picker with a generated, non-private fixture.
 // Add --window-activation-only to test exact activation during capture of a generated window.
 @main @MainActor
@@ -303,7 +303,7 @@ struct WindowPickerSmoke {
             throw Failure(message: "Desktop picker did not follow the toolbar after it moved.")
         }
         if CommandLine.arguments.contains("--exercise-select-button") {
-            try checkStaleSelectButton(in: overlayPanel, at: covered, primaryHeight: screen.frame.height)
+            try await checkStaleSelectButton(in: overlayPanel, item: item, formerPoint: covered)
         }
         guard WindowPicker.browseWindows(), toolbar.level == .floating,
               NSApp.windows.contains(where: { $0.isVisible && $0.title == "Choose a window to record" }),
@@ -315,32 +315,38 @@ struct WindowPickerSmoke {
         print("Desktop picker preserved toolbar focus and hit testing, followed its live frame, and switched to Browse.")
     }
 
-    static func checkStaleSelectButton(in overlay: NSWindow, at point: NSPoint, primaryHeight: CGFloat) throws {
-        let previous = NSEvent.mouseLocation
-        let toQuartz = { (point: NSPoint) in CGPoint(x: point.x, y: primaryHeight - point.y) }
-        guard CGWarpMouseCursorPosition(toQuartz(point)) == .success else {
-            throw Failure(message: "Could not position the pointer over the select-button fixture.")
+    static func checkStaleSelectButton(in overlay: NSWindow, item: WindowPicker.Item, formerPoint: NSPoint) async throws {
+        let items = [item.id: item]
+        let pointer = NSEvent.mouseLocation
+        let pointerHitsFixture = WindowPicker.desktopItem(at: pointer, below: overlay.windowNumber, items: items) != nil
+        let coveredPoint = pointerHitsFixture ? pointer : formerPoint
+        let blocker = floatingFixture(frame: NSRect(x: coveredPoint.x - 24, y: coveredPoint.y - 24, width: 48, height: 48),
+                                      ignoresMouseEvents: false)
+        blocker.level = NSWindow.Level(rawValue: overlay.level.rawValue - 1)
+        blocker.orderFrontRegardless()
+        defer { blocker.orderOut(nil) }
+        let deadline = ContinuousClock.now + .milliseconds(250)
+        while NSWindow.windowNumber(at: coveredPoint, belowWindowWithWindowNumber: overlay.windowNumber) != blocker.windowNumber {
+            guard ContinuousClock.now < deadline else {
+                throw Failure(message: "Small blocker did not cover the previously selectable point.")
+            }
+            try await Task.sleep(for: .milliseconds(10))
         }
-        defer { _ = CGWarpMouseCursorPosition(toQuartz(previous)) }
+        let candidates = [formerPoint, NSPoint(x: formerPoint.x, y: formerPoint.y + 54)]
         guard let view = overlay.contentView,
-              let hover = NSEvent.mouseEvent(with: .mouseMoved, location: overlay.convertPoint(fromScreen: point),
+              let hoverPoint = candidates.first(where: { WindowPicker.desktopItem(at: $0, below: overlay.windowNumber, items: items) != nil }),
+              let hover = NSEvent.mouseEvent(with: .mouseMoved, location: overlay.convertPoint(fromScreen: hoverPoint),
                   modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime + 1, windowNumber: overlay.windowNumber,
                   context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else {
-            throw Failure(message: "Could not update the fixture's desktop hover.")
+            throw Failure(message: "Could not establish a stale hover with a blocked pointer.")
         }
         view.mouseMoved(with: hover)
         guard let button = view.subviews.compactMap({ $0 as? NSButton }).first, !button.isHidden else {
             throw Failure(message: "Desktop hover did not expose the select button.")
         }
-        let blocker = floatingFixture(frame: NSRect(x: point.x - 15, y: point.y - 15, width: 30, height: 30),
-                                      ignoresMouseEvents: false)
-        defer { blocker.orderOut(nil) }
-        guard NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: overlay.windowNumber) == blocker.windowNumber else {
-            throw Failure(message: "Small blocker did not cover the previously selectable point.")
-        }
         button.performClick(nil)
         guard button.isHidden else { throw Failure(message: "The select button used its stale target after the point was covered.") }
-        print("The select button rejected its former hover target after a small window covered the pointer.")
+        print("The select button rejected stale hover state with a small window covering the fixture.")
     }
 
     static func checkFrameTimeout() async throws {

@@ -357,9 +357,9 @@ private final class DesktopPickerView: NSView {
         refreshTarget()
     }
     override func mouseMoved(with event: NSEvent) {
-        guard event.timestamp - lastHoverCheck >= 1 / 60 else { return }
+        guard let window, event.timestamp - lastHoverCheck >= 1 / 60 else { return }
         lastHoverCheck = event.timestamp
-        refreshTarget()
+        refreshTarget(at: window.convertPoint(toScreen: event.locationInWindow))
     }
     override func mouseExited(with event: NSEvent) { showTarget(nil) }
     override func mouseDown(with event: NSEvent) {
