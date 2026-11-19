@@ -2,7 +2,7 @@
 
 `POST /delivery/complete` verifies the caller's Firebase token, binds a recording to its content hash and resolves any supplied calendar occurrence using delegated read-only Google Calendar access. Recaps go to the authoritative internal invitees and organizer. A manual recording goes only to its owner. The standalone provider files transcripts in a private Notion data source and emails the authenticated Reel notes link.
 
-`GET /delivery/calendar` lists exact primary-calendar references from the previous 24 hours through the next seven days. `GET /delivery/meetings` and `GET /delivery/meetings/<id>` read the caller's private note index and check membership against the original verified recipient list.
+`GET /delivery/calendar` lists eligible invitations from the signed-in member’s saved Google calendars, from the previous 24 hours through the next seven days. `GET /delivery/meetings` and `GET /delivery/meetings/<id>` read the caller's private note index and check membership against the original verified recipient list.
 
 ## Build and configure
 
