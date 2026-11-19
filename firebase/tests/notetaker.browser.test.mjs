@@ -35,7 +35,14 @@ test('Notetaker launches separately without capture and legacy meeting links rem
     assert.equal(await page.evaluate(() => window.captureRequests), 0);
     const manifest = await (await page.request.get(`${origin}/notetaker.webmanifest`)).json();
     assert.equal(manifest.id, '/notetaker'); assert.equal(manifest.start_url, '/notetaker');
-    for (const icon of manifest.icons) assert.ok((await page.request.get(origin + icon.src)).ok());
+    for (const icon of manifest.icons) {
+      const response = await page.request.get(origin + icon.src);
+      assert.ok(response.ok(), icon.src);
+      const png = await response.body();
+      assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', icon.src);
+      assert.equal(png.toString('ascii', 12, 16), 'IHDR', icon.src);
+      assert.equal(`${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`, icon.sizes, icon.src);
+    }
     await page.goto(`${origin}/record`);
     await page.locator('#recording-kind-label').waitFor({ state: 'hidden' });
     assert.equal(await page.locator('#meeting-calendar-panel .mc-card').count(), 0);
