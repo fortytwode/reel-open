@@ -1,5 +1,7 @@
+import hashlib
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app import internal_recipients, canonical_occurrence, DeliveryError
 
@@ -31,34 +33,59 @@ class Events:
     def list(self, **kwargs): return Request({'items': self.events})
     def get(self, **kwargs): return Request(self.events[0])
 
-class CalendarList:
-    def list(self, **kwargs): return Request({'items': []})
-
 class Service:
     def __init__(self, events): self.event_api = Events(events)
     def events(self): return self.event_api
-    def calendarList(self): return CalendarList()
+    def calendarList(self): raise AssertionError('Event reads must use stored calendar IDs')
+
+
+class CalendarSelections:
+    def __init__(self):
+        self.states = {}
+
+    def select(self, email, uid='uid', ids=('primary',), enabled=True):
+        key = 'calendar/' + hashlib.sha256(email.encode()).hexdigest()
+        self.states[key] = {'config': {'enabled': enabled, 'calendar_ids': list(ids), 'owner_uid': uid}}
+
+    def load(self, key):
+        return self.states.get(key), 1
 
 @patch.dict('os.environ', ROCKETSHIP_CONFIG)
 class ResolutionTests(unittest.TestCase):
     def test_exact_resolution_and_forged_client_list_has_no_role(self):
         from app import resolve_occurrence
         event = {'iCalUID':'uid', 'start': {'dateTime':'2026-11-10T10:00:00Z'}, 'attendees':[{'email':'invited@rocketshiphq.com', 'responseStatus':'needsAction'}], 'organizer': {'email':'owner@rocketshiphq.com'}}
-        found = resolve_occurrence(Service([event]), {'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'})
+        found = resolve_occurrence(Service([event]), {'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'}, ('primary',))
         self.assertEqual(internal_recipients(found), ['invited@rocketshiphq.com', 'owner@rocketshiphq.com'])
 
     def test_unknown_identity_fails(self):
         from app import resolve_occurrence
         event = {'iCalUID':'different', 'start': {'dateTime':'2026-11-10T10:00:00Z'}}
         with self.assertRaises(DeliveryError):
-            resolve_occurrence(Service([event]), {'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'})
+            resolve_occurrence(Service([event]), {'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'}, ('primary',))
 
     def test_ambiguous_copies_fail_closed(self):
         from app import resolve_occurrence
         base = {'iCalUID':'uid', 'start': {'dateTime':'2026-11-10T10:00:00Z'}}
         events = [{**base, 'attendees':[{'email':'a@rocketshiphq.com'}]}, {**base, 'attendees':[{'email':'b@rocketshiphq.com'}]}]
         with self.assertRaises(DeliveryError):
-            resolve_occurrence(Service(events), {'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'})
+            resolve_occurrence(Service(events), {'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'}, ('primary',))
+
+    def test_series_lookup_recovers_same_instance_after_direct_miss(self):
+        from app import resolve_occurrence
+        instant = '2026-11-10T10:00:00Z'
+        event = {'id':'instance', 'iCalUID':'uid', 'originalStartTime':{'dateTime':instant}}
+        missing = RuntimeError('not found')
+        missing.resp = SimpleNamespace(status=404)
+        service = Service([])
+        service.event_api.get = Mock(side_effect=missing)
+        service.event_api.list = Mock(return_value=Request({'items':[{'id':'series', 'recurrence':['RRULE:FREQ=WEEKLY']}]}))
+        service.event_api.instances = Mock(return_value=Request({'items':[event]}))
+        reference = {'calendar_id':'shared', 'event_id':'instance', 'ical_uid':'uid', 'occurrence_start':instant}
+        self.assertEqual(resolve_occurrence(service, reference, ('primary', 'shared')), event)
+        service.event_api.instances.assert_called_once_with(calendarId='shared', eventId='series', originalStart=instant)
+        with self.assertRaises(DeliveryError):
+            resolve_occurrence(service, {**reference, 'event_id':'stale'}, ('primary', 'shared'))
 
 class ReadbackTests(unittest.TestCase):
     def test_exact_transcript_readback(self):
@@ -117,7 +144,9 @@ class CalendarEndpointTests(unittest.TestCase):
         event = {'id':'instance', 'iCalUID':'uid', 'summary':'Review', 'start':{'dateTime':'2026-11-10T11:00:00Z'}, 'originalStartTime':{'dateTime':'2026-11-10T10:00:00Z'}, 'hangoutLink':'https://meet.google.com/abc-defg-hij?pwd=secret', 'attendees':[{'email':'person@rocketshiphq.com'}]}
         hidden = {**event, 'id':'hidden', 'summary':'[PRIVATE] hidden'}
         claims = {'iss':'https://securetoken.google.com/advisr-485ac', 'aud':'advisr-485ac', 'sub':'user', 'email_verified':True, 'email':'owner@rocketshiphq.com'}
-        app = create_app(lambda token:claims, lambda email:Service([event, hidden]))
+        selections = CalendarSelections()
+        selections.select(claims['email'], claims['sub'])
+        app = create_app(lambda token:claims, lambda email:Service([event, hidden]), calendar_store=selections)
         response = app.test_client().get('/delivery/calendar', headers={'Authorization':'Bearer token'})
         self.assertEqual(response.status_code, 200)
         events = response.get_json()['events']
@@ -136,6 +165,38 @@ class CalendarEndpointTests(unittest.TestCase):
             response = create_app(lambda token:claims).test_client().get('/delivery/calendar', headers={'Authorization':'Bearer token'})
             self.assertEqual(response.status_code, 401)
 
+    def test_unselected_disabled_and_wrong_uid_do_not_read_google_events(self):
+        from app import create_app
+        claims = {'iss':'https://securetoken.google.com/advisr-485ac', 'aud':'advisr-485ac',
+                  'sub':'user', 'email_verified':True, 'email':'owner@rocketshiphq.com'}
+        selections, factory = CalendarSelections(), Mock()
+        client = create_app(lambda _: claims, factory, calendar_store=selections).test_client()
+        for update in (None, {'enabled':False, 'uid':'user'}, {'enabled':True, 'uid':'different-user'}):
+            if update:
+                selections.select(claims['email'], **update)
+            response = client.get('/delivery/calendar', headers={'Authorization':'Bearer token'})
+            self.assertEqual(response.json, {'events': []})
+            self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        factory.assert_not_called()
+
+    def test_discovery_uses_only_saved_calendars_and_ignores_revoked_access(self):
+        from app import create_app
+        claims = {'iss':'https://securetoken.google.com/advisr-485ac', 'aud':'advisr-485ac',
+                  'sub':'user', 'email_verified':True, 'email':'owner@rocketshiphq.com'}
+        selections = CalendarSelections()
+        selections.select(claims['email'], uid='user', ids=('shared', 'revoked'))
+        event = {'id':'event', 'iCalUID':'uid', 'summary':'Shared review', 'start':{'dateTime':'2026-11-10T11:00:00Z'},
+                 'hangoutLink':'https://meet.google.com/abc-defg-hij'}
+        service = Service([])
+        revoked = RuntimeError('revoked')
+        revoked.resp = SimpleNamespace(status=403)
+        service.event_api.list = Mock(side_effect=[Request({'items':[event]}), revoked])
+        client = create_app(lambda _: claims, lambda _: service, calendar_store=selections).test_client()
+        response = client.get('/delivery/calendar?calendar_id=primary', headers={'Authorization':'Bearer token'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row['calendar']['calendar_id'] for row in response.json['events']], ['shared'])
+        self.assertEqual([call.kwargs['calendarId'] for call in service.event_api.list.call_args_list], ['shared', 'revoked'])
+
 class PayloadTests(unittest.TestCase):
     def test_changed_content_changes_recording_binding(self):
         from app import validate_payload
@@ -151,12 +212,12 @@ class AdditionalCalendarTests(unittest.TestCase):
         from app import resolve_occurrence
         event = {'id':'other', 'iCalUID':'uid', 'start':{'dateTime':'2026-11-10T10:00:00Z'}}
         with self.assertRaises(DeliveryError):
-            resolve_occurrence(Service([event]), {'event_id':'expected', 'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'})
+            resolve_occurrence(Service([event]), {'event_id':'expected', 'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'}, ('primary',))
 
     def test_moved_instance_matches_original_start(self):
         from app import resolve_occurrence
         event = {'id':'instance', 'iCalUID':'uid', 'start':{'dateTime':'2026-11-11T10:00:00Z'}, 'originalStartTime':{'dateTime':'2026-11-10T10:00:00Z'}}
-        self.assertEqual(resolve_occurrence(Service([event]), {'event_id':'instance', 'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'}), event)
+        self.assertEqual(resolve_occurrence(Service([event]), {'event_id':'instance', 'ical_uid':'uid', 'occurrence_start':'2026-11-10T10:00:00Z'}, ('primary',)), event)
 
 class BindingTests(unittest.TestCase):
     def test_recording_content_and_identity_are_immutable(self):
@@ -209,7 +270,7 @@ class LegacyCalendarReferenceTests(unittest.TestCase):
     def test_historical_hash_uses_supplied_date_and_authoritative_original_occurrence(self):
         from app import resolve_occurrence, canonical_occurrence
         service,calls=self.service([self.event])
-        found=resolve_occurrence(service,self.reference,owner_email=self.owner)
+        found=resolve_occurrence(service,self.reference,('primary',),owner_email=self.owner)
         self.assertEqual(canonical_occurrence(found),('calendar-uid','2026-09-30T10:00:00Z'))
         self.assertEqual(calls[0]['timeMin'],'2026-09-30T10:00:00Z')
         self.assertEqual(calls[0]['timeMax'],'2026-10-02T10:00:00Z')
@@ -218,18 +279,25 @@ class LegacyCalendarReferenceTests(unittest.TestCase):
         from app import resolve_occurrence
         reference={**self.reference,'legacy_occurrence_id':hashlib.sha256(('primary\0instance\0'+'2026-10-01T10:00:00Z').encode()).hexdigest()}
         service,_=self.service([self.event])
-        self.assertEqual(resolve_occurrence(service,reference,owner_email=self.owner),self.event)
+        self.assertEqual(resolve_occurrence(service,reference,('primary',),owner_email=self.owner),self.event)
+
+    def test_legacy_primary_hash_never_reads_primary_when_only_shared_is_selected(self):
+        from app import resolve_occurrence
+        service, calls = self.service([self.event])
+        with self.assertRaises(DeliveryError):
+            resolve_occurrence(service, self.reference, ('shared',), owner_email=self.owner)
+        self.assertEqual([call['calendarId'] for call in calls], ['shared'])
     def test_unknown_hash_and_wrong_supplied_start_fail_without_fuzzy_matching(self):
         from app import resolve_occurrence
         for reference in [{**self.reference,'legacy_occurrence_id':'0'*64},{**self.reference,'occurrence_start':'2026-10-01T11:00:00Z'},{**self.reference,'occurrence_start':'2026-11-10T10:00:00Z'}]:
             service,_=self.service([self.event])
-            with self.assertRaises(DeliveryError): resolve_occurrence(service,reference,owner_email=self.owner)
+            with self.assertRaises(DeliveryError): resolve_occurrence(service,reference,('primary',),owner_email=self.owner)
     def test_conflicting_authoritative_copies_are_ambiguous(self):
         from app import resolve_occurrence
         service,_=self.service([self.event,{**self.event,'iCalUID':'different-calendar-identity'}])
-        with self.assertRaises(DeliveryError): resolve_occurrence(service,self.reference,owner_email=self.owner)
+        with self.assertRaises(DeliveryError): resolve_occurrence(service,self.reference,('primary',),owner_email=self.owner)
     def test_legacy_reference_rejects_malformed_or_mixed_identity(self):
         from app import resolve_occurrence
         for reference in [{**self.reference,'legacy_occurrence_id':'invalid'},{**self.reference,'event_id':'instance'}]:
             service,_=self.service([self.event])
-            with self.assertRaises(DeliveryError): resolve_occurrence(service,reference,owner_email=self.owner)
+            with self.assertRaises(DeliveryError): resolve_occurrence(service,reference,('primary',),owner_email=self.owner)

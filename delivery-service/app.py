@@ -1,7 +1,8 @@
 """Calendar identity and recipient rules for Reel delivery."""
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import partial
+import hashlib
 from html import escape
 import logging
 import os
@@ -86,50 +87,79 @@ def validate_calendar_reference(reference):
     timestamp(reference.get('occurrence_start'))
 
 
-def resolve_occurrence(service, reference, owner_email=None):
+def selected_calendar_ids(store, owner_email, owner_uid):
+    key = 'calendar/' + hashlib.sha256(owner_email.encode()).hexdigest()
+    state, _ = store.load(key)
+    state = state or {}
+    identity, config = state.get('identity') or {}, state.get('config') or {}
+    bindings = {uid for uid in (identity.get('owner_uid'), config.get('owner_uid')) if uid}
+    if not owner_uid or bindings != {owner_uid} or identity.get('owner_email', owner_email) != owner_email:
+        return ()
+    ids = config.get('calendar_ids')
+    if config.get('enabled') is not True or not isinstance(ids, list) or not 1 <= len(ids) <= 25:
+        return ()
+    if any(not isinstance(value, str) or not value or len(value) > 320 for value in ids):
+        return ()
+    return tuple(dict.fromkeys(ids))
+
+
+def _calendar_unavailable(exc):
+    status = getattr(getattr(exc, 'resp', None), 'status', None)
+    if status != 403:
+        return status in (404, 410)
+    transient = {'quotaExceeded', 'rateLimitExceeded', 'userRateLimitExceeded', 'dailyLimitExceeded'}
+    return not any(isinstance(detail, dict) and detail.get('reason') in transient
+                   for detail in (getattr(exc, 'error_details', None) or []))
+
+
+def _calendar_candidates(service, calendar_id, event_id, uid, legacy, wanted):
+    events = service.events()
+    if legacy:
+        anchor = datetime.fromisoformat(wanted.replace('Z', '+00:00'))
+        return _all_pages(events.list, calendarId=calendar_id, singleEvents=True,
+                          timeMin=timestamp((anchor - timedelta(hours=24)).isoformat()),
+                          timeMax=timestamp((anchor + timedelta(hours=24)).isoformat()))
+    candidates = []
+    if event_id:
+        try:
+            candidates.append(events.get(calendarId=calendar_id, eventId=event_id).execute())
+        except Exception as exc:
+            if getattr(getattr(exc, 'resp', None), 'status', None) not in (404, 410):
+                raise
+    if uid:
+        for event in _all_pages(events.list, calendarId=calendar_id, iCalUID=uid, singleEvents=False):
+            if event.get('recurrence'):
+                candidates.extend(_all_pages(events.instances, calendarId=calendar_id,
+                                             eventId=event['id'], originalStart=wanted))
+            else:
+                candidates.append(event)
+    return candidates
+
+
+def resolve_occurrence(service, reference, calendar_ids, owner_email=None):
     """Resolve only an exact accessible event, never a title/time search."""
     validate_calendar_reference(reference)
     event_id, uid = reference.get('event_id'), reference.get('ical_uid')
     legacy = reference.get(LEGACY_OCCURRENCE_FIELD)
     if legacy and not owner_email:
         raise DeliveryError('Legacy calendar resolution requires the verified caller')
-    occurrence = reference.get('occurrence_start')
-    wanted = timestamp(occurrence)
-    preferred = reference.get('calendar_id') or 'primary'
-    calendars = [preferred]
-    if preferred != 'primary':
-        calendars.insert(0, 'primary')
-    for calendar in _all_pages(service.calendarList().list):
-        calendar_id = calendar.get('id')
-        if calendar_id and calendar_id not in calendars:
-            calendars.append(calendar_id)
+    wanted = timestamp(reference.get('occurrence_start'))
+    primary_aliases = {'primary', owner_email}
+    preferred = reference.get('calendar_id')
+    calendars = [calendar_id for calendar_id in calendar_ids if not preferred or preferred == calendar_id
+                 or {preferred, calendar_id} == primary_aliases]
+    if not calendars:
+        raise CalendarSelectionRequired('Select the meeting calendar before delivering notes')
     matches = {}
+    readable = False
     for calendar_id in calendars:
-        candidates = []
-        if legacy:
-            from datetime import timedelta
-            anchor = datetime.fromisoformat(wanted.replace('Z', '+00:00'))
-            try:
-                candidates = _all_pages(service.events().list, calendarId=calendar_id, singleEvents=True,
-                    timeMin=timestamp((anchor - timedelta(hours=24)).isoformat()),
-                    timeMax=timestamp((anchor + timedelta(hours=24)).isoformat()))
-            except Exception as exc:
-                if getattr(getattr(exc, 'resp', None), 'status', None) not in (403, 404, 410):
-                    raise
-        if event_id:
-            try:
-                candidates.append(service.events().get(calendarId=calendar_id, eventId=event_id).execute())
-            except Exception as exc:
-                # An inaccessible or absent event can occur on other calendars. Other
-                # provider errors must not be mistaken for an authoritative absence.
-                if getattr(getattr(exc, 'resp', None), 'status', None) not in (403, 404, 410):
-                    raise
-        if uid:
-            for candidate in _all_pages(service.events().list, calendarId=calendar_id, iCalUID=uid, singleEvents=False):
-                if candidate.get('recurrence'):
-                    candidates.extend(_all_pages(service.events().instances, calendarId=calendar_id, eventId=candidate['id'], originalStart=wanted))
-                else:
-                    candidates.append(candidate)
+        try:
+            candidates = _calendar_candidates(service, calendar_id, event_id, uid, legacy, wanted)
+        except Exception as exc:
+            if _calendar_unavailable(exc):
+                continue
+            raise
+        readable = True
         for event in candidates:
             if event.get('status') == 'cancelled' or event.get('attendeesOmitted'):
                 continue
@@ -140,27 +170,25 @@ def resolve_occurrence(service, reference, owner_email=None):
             except DeliveryError:
                 continue
             if legacy:
-                import hashlib
                 try:
                     actual_start = timestamp((event.get('start') or {}).get('dateTime'))
                 except DeliveryError:
                     continue
                 if actual_start != wanted or not event.get('id'):
                     continue
-                aliases = {calendar_id}
-                if calendar_id in {'primary', owner_email}:
-                    aliases.update({'primary', owner_email})
+                aliases = primary_aliases if calendar_id in primary_aliases else {calendar_id}
                 hashes = {hashlib.sha256(f'{alias}\0{event["id"]}\0{actual_start}'.encode()).hexdigest() for alias in aliases}
                 if legacy not in hashes:
                     continue
             elif identity[1] != wanted or (uid and identity[0] != uid):
                 continue
-            # Multiple copies of the same event can be visible in different
-            # calendars; prefer primary, but reject inconsistent attendee lists.
+            # Different selected calendars can hold copies of the invitation.
             previous = matches.get(identity)
             if previous and participant_emails(previous) != participant_emails(event):
                 raise DeliveryError('Calendar copies disagree on invitees')
             matches.setdefault(identity, event)
+    if not readable:
+        raise CalendarSelectionRequired('Restore access to the meeting calendar before delivering notes')
     if len(matches) != 1:
         raise DeliveryError('Calendar occurrence is unknown or ambiguous')
     return next(iter(matches.values()))
@@ -391,15 +419,27 @@ def _supported_link(value):
         return False
 
 
-def list_calendar_events(service, owner_email, now=None):
-    from datetime import timedelta
-    import hashlib
-    import html
+def list_calendar_events(service, owner_email, calendar_ids, now=None):
     now = now or datetime.now(timezone.utc)
     time_min = (now - timedelta(hours=24)).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
     time_max = (now + timedelta(days=7)).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
-    events = _all_pages(service.events().list, calendarId='primary', timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime')
     result = []
+    for calendar_id in calendar_ids:
+        try:
+            events = _all_pages(service.events().list, calendarId=calendar_id, timeMin=time_min, timeMax=time_max,
+                                singleEvents=True, orderBy='startTime')
+        except Exception as exc:
+            if _calendar_unavailable(exc):
+                continue
+            raise
+        # Preserve the public primary-calendar identifier used by existing recordings.
+        source_id = owner_email if calendar_id == 'primary' else calendar_id
+        result.extend(_project_calendar_events(events, source_id))
+    return sorted(result, key=lambda item: timestamp(item['start']))
+
+
+def _project_calendar_events(events, calendar_id):
+    import html
     for event in events:
         title = str(event.get('summary') or '').strip()
         start = (event.get('start') or {}).get('dateTime')
@@ -419,9 +459,9 @@ def list_calendar_events(service, owner_email, now=None):
         event_id = event.get('id')
         if not event_id:
             continue
-        identifier = hashlib.sha256(f'{owner_email}\0{event_id}\0{start}'.encode()).hexdigest()
-        result.append({'id':identifier, 'title':title, 'start':start, 'attendees':sorted(participant_emails(event)), 'calendar':{'calendar_id':owner_email, 'event_id':event_id, 'ical_uid':uid, 'occurrence_start':occurrence}})
-    return result
+        identifier = hashlib.sha256(f'{calendar_id}\0{event_id}\0{start}'.encode()).hexdigest()
+        yield {'id': identifier, 'title': title, 'start': start, 'attendees': sorted(participant_emails(event)),
+               'calendar': {'calendar_id': calendar_id, 'event_id': event_id, 'ical_uid': uid, 'occurrence_start': occurrence}}
 
 
 def verify_firebase(token):
@@ -433,7 +473,8 @@ def verify_firebase(token):
     return id_token.verify_firebase_token(token, Request(), audience=project)
 
 
-def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service, *, store=None, providers=None, clock=None, slack=None):
+def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service, *, store=None, calendar_store=None,
+               providers=None, clock=None, slack=None):
     from flask import Flask, jsonify, request, g
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
@@ -451,7 +492,7 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
             response.headers['Vary'] = 'Origin'
             response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        if request.path.startswith('/delivery/meetings'):
+        if request.path.startswith(('/delivery/meetings', '/delivery/calendar')):
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -465,8 +506,19 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
         if (claims.get('iss') != f'https://securetoken.google.com/{project}' or claims.get('aud') != project
                 or not claims.get('sub') or claims.get('email_verified') is not True or not is_internal_email(email)):
             raise DeliveryError('Authentication required')
+        g.delivery_owner_uid = claims['sub']
         g.delivery_deadline = min(clock() + 570, float(claims.get('exp', clock() + 570)))
         return email
+
+    def calendar_selection(email):
+        if 'calendar_store' not in dependencies:
+            if calendar_store is not None:
+                dependencies['calendar_store'] = calendar_store
+            elif bucket := os.getenv('CALENDAR_SELECTION_BUCKET'):
+                dependencies['calendar_store'] = GCSStateStore(bucket, os.getenv('CALENDAR_SELECTION_PREFIX', ''), read_only=True)
+            else:
+                return ()
+        return selected_calendar_ids(dependencies['calendar_store'], email, g.delivery_owner_uid)
 
     @app.get('/delivery/calendar')
     def calendar():
@@ -475,7 +527,11 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
         except Exception:
             return jsonify(error='Authentication required'), 401
         try:
-            return jsonify(events=list_calendar_events(calendar_factory(email), email))
+            ids = calendar_selection(email)
+            events = list_calendar_events(calendar_factory(email), email, ids) if ids else []
+            if ids and calendar_selection(email) != ids:
+                return jsonify(error='Calendar selection changed; refresh invitations'), 409
+            return jsonify(events=events)
         except Exception:
             return jsonify(error='Calendar unavailable; try again'), 503
 
@@ -534,10 +590,14 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
                 dependencies['providers'] = providers if providers is not None else configured_providers(store=note_store())
             note_store()
             receipt = deliver(payload, email, dependencies['store'], dependencies['providers'], calendar_factory, clock,
-                              deadline=g.delivery_deadline, slack=slack)
+                              deadline=g.delivery_deadline, slack=slack,
+                              calendar_selection=partial(calendar_selection, email))
             return jsonify(receipt)
         except DeliveryError as exc:
-            return jsonify(error=str(exc), retryable=exc.status in (409, 503)), exc.status
+            data = {'error': str(exc), 'retryable': exc.status in (409, 503)}
+            if isinstance(exc, CalendarSelectionRequired):
+                data['code'] = 'calendar_selection_required'
+            return jsonify(data), exc.status
         except Exception:
             app.logger.error('Meeting delivery failed; provider result remains retryable')
             return jsonify(error='Delivery could not be verified; retry this recording', retryable=True), 503
@@ -603,16 +663,17 @@ def format_transcript(segments):
 
 class GCSStateStore:
     """GCS JSON API receipts, guarded by object generation preconditions."""
-    def __init__(self, bucket, prefix='delivery'):
+    def __init__(self, bucket, prefix='delivery', *, read_only=False):
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
-        credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/devstorage.read_write'])
+        scope = 'https://www.googleapis.com/auth/devstorage.read_only' if read_only else 'https://www.googleapis.com/auth/devstorage.read_write'
+        credentials, _ = google.auth.default(scopes=[scope])
         self.session = AuthorizedSession(credentials)
         self.bucket = bucket
         self.prefix = prefix.strip('/')
 
     def _name(self, key):
-        return f'{self.prefix}/{key}.json'
+        return f'{self.prefix}/{key}.json' if self.prefix else f'{key}.json'
 
     def load(self, key):
         from urllib.parse import quote
@@ -828,6 +889,10 @@ class Forbidden(DeliveryError):
     status = 403
 
 
+class CalendarSelectionRequired(Forbidden):
+    pass
+
+
 class ProviderPending(DeliveryError):
     status = 503
 
@@ -840,7 +905,8 @@ class ProviderRejected(ProviderPending):
         self.retry_after = retry_after
 
 
-def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None, *, slack=None, followup_items=None):
+def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None, *, slack=None,
+            followup_items=None, calendar_selection=None):
     """File and share verified notes, then deliver the recap."""
     recording_id, content_hash = validate_payload(payload)
     deadline = deadline or clock() + 570  # Gunicorn kills the synchronous worker at 600s.
@@ -850,7 +916,12 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
         attendees, recipients = [owner], [owner]
         title = payload['title']
     else:
-        event = resolve_occurrence(calendar_factory(owner), payload['calendar'], owner_email=owner)
+        ids = calendar_selection() if calendar_selection else ()
+        if not ids:
+            raise CalendarSelectionRequired('Select the meeting calendar before delivering notes')
+        event = resolve_occurrence(calendar_factory(owner), payload['calendar'], ids, owner_email=owner)
+        if calendar_selection() != ids:
+            raise Conflict('Calendar selection changed before notes could be verified')
         attendees = sorted(participant_emails(event))
         if owner not in attendees:
             raise Forbidden('Only an invited participant or organizer can deliver this meeting')

@@ -104,7 +104,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
     """Run one bounded stage. All identities and paths come from saved state."""
     from google.cloud import storage
     from speech import attendee_keywords, transcribe_audio, summarize_text
-    from canonical_delivery.app import GCSStateStore, calendar_service, deliver
+    from canonical_delivery.app import CalendarSelectionRequired, GCSStateStore, calendar_service, deliver, selected_calendar_ids
     from canonical_delivery.providers import configured_providers
 
     started = clock()
@@ -130,7 +130,8 @@ def process_step(store, execution, scheduler, *, clock=time.time):
     if (identity.get('owner_uid') != owner_id or identity.get('owner_email') != owner or not event
             or event.get('execution_id') != execution or occurrence != record.get('started_at')):
         raise ValueError('Execution owner or occurrence changed')
-    if record.get('processing_status') in ('delivered', 'no_speech', 'transcript_too_long', 'review_required'):
+    from calendar_runtime import PROCESSING_TERMINAL_STATES
+    if record.get('processing_status') in PROCESSING_TERMINAL_STATES:
         return record['processing_status']
     if record.get('processing_lease_until', 0) > clock():
         raise RuntimeError('Processing is already in progress')
@@ -216,20 +217,29 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                         summary.get('has_meeting_content') if isinstance(summary.get('has_meeting_content'), bool) else None)
                     state_name = 'review_required'
                 else:
+                    calendar = None if manual else {'legacy_occurrence_id': event_id, 'occurrence_start': record['started_at']}
+                    if calendar is not None and event.get('calendar_id'):
+                        calendar['calendar_id'] = event['calendar_id']
                     payload = {'id': record['meeting_id'], 'title': record['title'], 'started_at': record['started_at'],
                                'attendees': record['attendees'], 'summary': summary['summary'], 'segments': transcript['segments'],
-                               'calendar': None if manual else {'legacy_occurrence_id': event_id, 'occurrence_start': record['started_at']}}
+                               'calendar': calendar}
                     delivery_store = GCSStateStore(os.environ['DELIVERY_RECEIPTS_BUCKET'])
-                    receipt = deliver(payload, owner, delivery_store,
-                                      configured_providers(store=delivery_store), calendar_service, time.time,
-                                      deadline=started + 570, followup_items=summary.get('action_items'))
-                    record['notion_url'] = receipt['url']
-                    record['notion_status'] = 'delivered'
-                    state_name = 'delivered'
+                    try:
+                        receipt = deliver(payload, owner, delivery_store,
+                                          configured_providers(store=delivery_store), calendar_service, time.time,
+                                          deadline=started + 570, followup_items=summary.get('action_items'),
+                                          calendar_selection=lambda: selected_calendar_ids(store, owner, owner_id))
+                    except CalendarSelectionRequired:
+                        state_name = 'calendar_selection_required'
+                    else:
+                        record['notion_url'] = receipt['url']
+                        record['notion_status'] = 'delivered'
+                        state_name = 'delivered'
         current, gen = store.load(key)
         if current.get('processing_lease_until') != record['processing_lease_until']:
             raise RuntimeError('Processing claim expired')
-        current.update(processing_status=state_name, processing_step=index + 1, processing_lease_until=0, processing_enqueue_needed=(state_name == 'processing'))
+        next_step = index if state_name == 'calendar_selection_required' else index + 1
+        current.update(processing_status=state_name, processing_step=next_step, processing_lease_until=0, processing_enqueue_needed=(state_name == 'processing'))
         if 'has_meeting_content' in record:
             current['has_meeting_content'] = record['has_meeting_content']
         if record.get('transcript_available'):
@@ -238,7 +248,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
             current.setdefault('artifacts', {})['summary.json'] = True
         if state_name == 'delivered':
             current.update(notion_url=record['notion_url'], notion_status='delivered')
-        elif state_name in ('no_speech', 'transcript_too_long', 'review_required'):
+        elif state_name in PROCESSING_TERMINAL_STATES:
             current['notion_status'] = state_name
         store.cas(key, current, gen)
         if state_name == 'processing':

@@ -10,7 +10,11 @@ async function request({serviceURL, authorize, fetchImpl = fetch}, path, payload
   });
   if (!await authorize()) throw new Error('The meeting owner changed; delivery was not confirmed.');
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'Delivery could not be confirmed. Retry to reconcile the existing page and recap.');
+  if (!response.ok) {
+    const error = new Error(data.error || 'Delivery could not be confirmed. Retry to reconcile the existing page and recap.');
+    if (response.status === 403 && data.code === 'calendar_selection_required') error.code = data.code;
+    throw error;
+  }
   return data;
 }
 

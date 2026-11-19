@@ -32,6 +32,9 @@ def organization_service(monkeypatch, tmp_path):
     monkeypatch.setattr(id_token, "verify_firebase_token", lambda *args, **kwargs: dict(claims))
 
     class Calendar:
+        def list_calendars(self):
+            return [{"id": claims["email"], "primary": True}]
+
         def list_events(self, *args):
             return []
 
@@ -60,7 +63,7 @@ def test_new_domain_member_can_connect_both_providers_without_a_pilot_entry(orga
     assert connected.json["config"]["consent_mode"] == "ask"
     assert client.post("/calendar/settings", json={"consent_mode": "approved"}, headers=AUTH).status_code == 400
     assert client.post("/calendar/settings", json={"consent_mode": "approved",
-        "participant_consent_attested": True}, headers=AUTH).status_code == 200
+        "participant_consent_attested": True, "scope_revision": connected.json["config"]["scope_revision"]}, headers=AUTH).status_code == 200
 
 
 @pytest.mark.parametrize("change, status", [

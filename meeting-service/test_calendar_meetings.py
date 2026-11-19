@@ -43,8 +43,8 @@ class FakeScheduler:
     def __init__(self):
         self.tasks = []
 
-    def schedule(self, owner_hash, event_id, occurrence_start):
-        task = {"owner": owner_hash, "event": event_id, "start": occurrence_start}
+    def schedule(self, owner_hash, event_id, occurrence_start, task_generation=None):
+        task = {"owner": owner_hash, "event": event_id, "start": occurrence_start, "generation": task_generation}
         self.tasks.append(task)
         return f"task-{event_id[:8]}"
 
@@ -200,7 +200,7 @@ def test_approved_mode_requires_attestation_and_dispatches_at_due_time(setup):
     connect(service)
     with pytest.raises(CalendarMeetingError):
         service.set_consent_mode(CLAIMS, "approved")
-    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True)
+    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True, scope_revision=service.settings(CLAIMS)["scope_revision"])
     service.sync(CLAIMS)
     task = scheduler.tasks[0]
     assert service.dispatch_callback(CLAIMS, task["event"], task["start"]) == "scheduled"
@@ -219,7 +219,7 @@ def test_unanswered_or_tentative_invitation_schedules_and_joins_without_rsvp(set
     calendar.items["primary"] = [event(organizer={"email": "organizer@example.com"},
         attendees=[invitee, {"email": "guest@example.com", "responseStatus": "accepted"}])]
     connect(service)
-    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True)
+    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True, scope_revision=service.settings(CLAIMS)["scope_revision"])
 
     assert service.sync(CLAIMS) == 1
     assert len(scheduler.tasks) == 1
@@ -235,7 +235,7 @@ def test_declining_unanswered_invitation_after_scheduling_prevents_join(setup):
         attendees=[{"email": OWNER, "responseStatus": "needsAction"}])
     calendar.items["primary"] = [raw]
     connect(service)
-    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True)
+    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True, scope_revision=service.settings(CLAIMS)["scope_revision"])
     assert service.sync(CLAIMS) == 1
     task = scheduler.tasks[0]
 
@@ -250,7 +250,7 @@ def test_desktop_provider_keeps_approved_occurrence_for_desktop_capture(setup, m
 
     service, store, _, scheduler, joined, clock = setup
     connect(service)
-    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True)
+    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True, scope_revision=service.settings(CLAIMS)["scope_revision"])
     service.sync(CLAIMS)
     task = scheduler.tasks[0]
     clock["now"] += timedelta(minutes=10)
@@ -434,6 +434,61 @@ def test_disconnect_cancels_pending_events_and_status_confirmation_is_required(s
         service.update_provider_status(CLAIMS, task["event"], "joined")
 
 
+def test_removing_calendar_cancels_pending_work_without_removing_completed_capture(setup):
+    service, store, calendar, scheduler, joined, clock = setup
+    connect(service)
+    service.sync(CLAIMS)
+    task = scheduler.tasks[0]
+    key = service._key(OWNER)
+    state, generation = store.load(key)
+    state["events"]["existing-recording"] = {**state["events"][task["event"]], "status": "completed",
+                                               "execution_id": "previous-execution"}
+    store.cas(key, state, generation)
+    service.connect(CLAIMS, ["shared"])
+    reads_before = list(calendar.reads)
+    clock["now"] += timedelta(minutes=10)
+    assert service.dispatch_callback(CLAIMS, task["event"], task["start"]) == "cancelled"
+    assert calendar.reads == reads_before and joined == []
+    assert store.load(key)[0]["events"]["existing-recording"]["execution_id"] == "previous-execution"
+
+
+def test_reselect_rearms_schedule_and_stale_callbacks_cannot_use_new_selection(setup):
+    service, _, calendar, scheduler, joined, clock = setup
+    connect(service)
+    service.sync(CLAIMS)
+    original = scheduler.tasks[0]
+    service.disconnect(CLAIMS)
+    assert service.dispatch_callback(CLAIMS, original["event"], original["start"]) == "cancelled"
+    connect(service)
+    service.sync(CLAIMS)
+    service.sync(CLAIMS)
+    assert len(scheduler.tasks) == 2
+    rearmed = scheduler.tasks[-1]
+    assert original["event"] == rearmed["event"] and rearmed["generation"]
+    clock["now"] += timedelta(minutes=10)
+    reads_before = list(calendar.reads)
+    assert service.dispatch_callback(CLAIMS, original["event"], original["start"]) is None
+    assert calendar.reads == reads_before and joined == []
+    assert service.dispatch_callback(CLAIMS, rearmed["event"], rearmed["start"], rearmed["generation"]) == "awaiting_consent"
+
+
+def test_provider_revocation_clears_pending_schedule_and_prevents_entry(setup):
+    from calendar_meetings import CalendarUnavailable
+    service, _, calendar, scheduler, joined, _ = setup
+    connect(service)
+    service.sync(CLAIMS)
+    task = scheduler.tasks[0]
+
+    def deny(calendar_id, *_):
+        assert calendar_id == "primary"
+        raise CalendarUnavailable("access revoked")
+
+    calendar.list_events = deny
+    assert service.sync(CLAIMS) == 0
+    assert service.dispatch_callback(CLAIMS, task["event"], task["start"]) == "cancelled"
+    assert joined == []
+
+
 @pytest.mark.parametrize("action", ["callback", "approval"])
 def test_disconnect_during_freshness_read_wins_before_dispatch(setup, action):
     service, _, calendar, scheduler, joined, clock = setup
@@ -464,7 +519,7 @@ def test_hybrid_cloud_dispatches_once_and_other_providers_stay_unattempted(setup
     calendar.items["primary"] = [event(id="teams", hangoutLink=cloud_url), event(id="meet", hangoutLink="https://teams.live.com/meet/999" if pilot == "google_meet" else "https://meet.google.com/abc-defg-hij"),
                                   event(id="zoom", hangoutLink="https://acme.zoom.us/j/123456789")]
     connect(service)
-    service.set_consent_mode(CLAIMS, mode, participant_consent_attested=True)
+    service.set_consent_mode(CLAIMS, mode, participant_consent_attested=True, scope_revision=service.settings(CLAIMS)["scope_revision"])
     service.sync(CLAIMS)
     clock["now"] += timedelta(minutes=10)
     for task in scheduler.tasks:
@@ -522,7 +577,7 @@ def test_hybrid_freshness_and_revoked_consent_win_before_dispatch(setup, monkeyp
     elif change == "disconnect":
         calendar.on_list = lambda: service.disconnect(CLAIMS)
     else:
-        calendar.on_list = lambda: service.set_consent_mode(CLAIMS, "approved", True)
+        calendar.on_list = lambda: service.set_consent_mode(CLAIMS, "approved", True, service.settings(CLAIMS)["scope_revision"])
     with pytest.raises(CalendarMeetingError):
         service.approve(CLAIMS, task["event"])
     assert joined == []
@@ -555,7 +610,7 @@ def test_selected_calendar_copies_share_one_cas_dispatch_attempt(setup, monkeypa
     }
     service.calendar_factory = lambda *_: calendar
     service.connect(CLAIMS, ["primary", "shared"])
-    service.set_consent_mode(CLAIMS, mode, True)
+    service.set_consent_mode(CLAIMS, mode, True, service.settings(CLAIMS)["scope_revision"])
     service.sync(CLAIMS)
     first, second = scheduler.tasks
     clock["now"] += timedelta(minutes=10)
@@ -628,7 +683,7 @@ def test_distinct_complete_invitations_keep_separate_owner_attempts(setup, chang
     calendar.items = {"primary": [first], "shared": [second]}
     service.calendar_factory = lambda *_: calendar
     service.connect(CLAIMS, ["primary", "shared"])
-    service.set_consent_mode(CLAIMS, "approved", True)
+    service.set_consent_mode(CLAIMS, "approved", True, service.settings(CLAIMS)["scope_revision"])
     service.sync(CLAIMS)
     clock["now"] += timedelta(minutes=10)
     for task in scheduler.tasks:
@@ -642,7 +697,7 @@ def test_existing_legacy_attempt_still_suppresses_new_complete_copy(setup):
                       "shared": [event(id="complete", iCalUID="invitation@example.com")]}
     service.calendar_factory = lambda *_: calendar
     service.connect(CLAIMS, ["primary", "shared"])
-    service.set_consent_mode(CLAIMS, "approved", True)
+    service.set_consent_mode(CLAIMS, "approved", True, service.settings(CLAIMS)["scope_revision"])
     service.sync(CLAIMS)
     clock["now"] += timedelta(minutes=10)
     for task in scheduler.tasks:
@@ -655,7 +710,7 @@ def test_reservation_rejects_roster_replaced_after_freshness_check(setup, mode):
     service, store, calendar, scheduler, joined, clock = setup
     calendar.items["primary"] = [event(iCalUID="invitation@example.com")]
     connect(service)
-    service.set_consent_mode(CLAIMS, mode, True)
+    service.set_consent_mode(CLAIMS, mode, True, service.settings(CLAIMS)["scope_revision"])
     service.sync(CLAIMS)
     clock["now"] += timedelta(minutes=10)
     task = scheduler.tasks[0]

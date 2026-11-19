@@ -47,7 +47,8 @@ def test_default_cloud_mode_joins_the_connected_occurrence_after_consent(organiz
              "organizer": {"email": claims["email"]}, "location": meeting_url,
              "start": {"dateTime": (now - timedelta(seconds=1)).isoformat()},
              "end": {"dateTime": (now + timedelta(minutes=30)).isoformat()}}
-    monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: lambda *a: SimpleNamespace(list_events=lambda *a: [event]))
+    monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: lambda *a: SimpleNamespace(
+        list_calendars=lambda: [{"id": claims["email"], "primary": True}], list_events=lambda *a: [event]))
     monkeypatch.setattr(runtime, "CloudTasks", lambda: SimpleNamespace(schedule=lambda *a: "task"))
     dispatched = []
     monkeypatch.setattr(runtime, "BotDispatcher", lambda store: lambda owner, occurrence:

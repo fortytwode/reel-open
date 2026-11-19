@@ -5,13 +5,26 @@ import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
-from urllib.parse import parse_qs, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
+from uuid import uuid4
 
 from reel_organization import meeting_domain_enabled, meeting_owner_allowed
 
 
 class CalendarMeetingError(Exception):
+    status = 400
+
+
+class CalendarUnavailable(CalendarMeetingError):
     pass
+
+
+class CalendarProviderError(CalendarMeetingError):
+    status = 503
+
+
+class CalendarSelectionChanged(CalendarMeetingError):
+    status = 409
 
 
 def owner_identity(claims):
@@ -211,29 +224,49 @@ class GoogleCalendarFactory:
         credentials = service_account.Credentials.from_service_account_file(
             credentials_path, scopes=["https://www.googleapis.com/auth/calendar.readonly"])
         delegated = credentials.with_subject(owner_email)
-        return _GoogleCalendar(AuthorizedSession(delegated))
+        return _GoogleCalendar(AuthorizedSession(delegated), calendar_ids)
 
 
 class _GoogleCalendar:
-    def __init__(self, session):
+    def __init__(self, session, calendar_ids):
         self.session = session
+        self.calendar_ids = frozenset(calendar_ids)
 
     def list_events(self, calendar_id, time_min, time_max):
-        page = None
+        if calendar_id not in self.calendar_ids:
+            raise CalendarMeetingError("Select this calendar before reading events")
+        path = "calendars/" + quote(calendar_id, safe="") + "/events"
+        yield from self._items(path, {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
+                                      "orderBy": "startTime", "maxResults": 2500})
+
+    def list_calendars(self):
+        return self._items("users/me/calendarList", {"minAccessRole": "reader", "showHidden": "true",
+            "fields": "nextPageToken,items(id,summary,summaryOverride,primary)"})
+
+    def _items(self, path, params):
+        seen = set()
         while True:
-            params = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
-                      "orderBy": "startTime", "maxResults": 2500}
-            if page:
-                params["pageToken"] = page
-            from urllib.parse import quote
-            response = self.session.get("https://www.googleapis.com/calendar/v3/calendars/" +
-                quote(calendar_id, safe="") + "/events", params=params, timeout=20)
-            response.raise_for_status()
-            result = response.json()
+            try:
+                response = self.session.get("https://www.googleapis.com/calendar/v3/" + path, params=params, timeout=20)
+                if response.status_code in (401, 403, 404, 410):
+                    transient = {"quotaExceeded", "rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded"}
+                    errors = response.json().get("error", {}).get("errors", []) if response.status_code == 403 else []
+                    if not any(error.get("reason") in transient for error in errors):
+                        raise CalendarUnavailable("Google Calendar access is unavailable")
+                response.raise_for_status()
+                result = response.json()
+            except CalendarUnavailable:
+                raise
+            except Exception:
+                raise CalendarProviderError("Could not read Google Calendar; try again") from None
             yield from result.get("items", [])
             page = result.get("nextPageToken")
             if not page:
                 break
+            if page in seen:
+                raise CalendarMeetingError("Invalid Google Calendar pagination")
+            seen.add(page)
+            params = {**params, "pageToken": page}
 
 
 class CalendarMeetings:
@@ -275,32 +308,72 @@ class CalendarMeetings:
         if any(not isinstance(x, str) or not x.strip() or len(x) > 320 for x in calendar_ids):
             raise CalendarMeetingError("Invalid calendar selection")
         ids = list(dict.fromkeys(x.strip() for x in calendar_ids))
-        # Settings are explicitly connected before any Calendar read.
         def save(state):
             old = state.get("config") or {}
+            self._verify_binding(state, claims)
+            same_scope = old.get("enabled") is True and set(old.get("calendar_ids", [])) == set(ids)
             state["config"] = {"enabled": True, "calendar_ids": ids, "owner_uid": claims["sub"],
-                "consent_mode": old.get("consent_mode", "ask") if old.get("calendar_ids") == ids else "ask"}
+                "consent_mode": old.get("consent_mode", "ask") if same_scope else "ask",
+                "scope_revision": old.get("scope_revision", "legacy") if same_scope else uuid4().hex}
+            state["identity"] = {"owner_email": owner, "owner_uid": claims["sub"]}
+            self._cancel_excluded(state, ids)
             return True, {k: v for k, v in state["config"].items() if k != "owner_uid"}
         return self._mutate(owner, save)
 
-    def set_consent_mode(self, claims, mode, participant_consent_attested=False):
+    @staticmethod
+    def _verify_binding(state, claims):
+        for key in ("identity", "config"):
+            bound = (state.get(key) or {}).get("owner_uid")
+            if bound and bound != claims["sub"]:
+                raise CalendarMeetingError("Calendar connection belongs to a different account identity")
+
+    def sources(self, claims):
+        owner = owner_identity(claims)
+        state, _ = self._load(owner)
+        self._verify_binding(state, claims)
+        existing = (state.get("config") or {}).get("calendar_ids", [])
+        client = self.calendar_factory(owner, [])
+        sources = {}
+        for raw in client.list_calendars():
+            identifier = raw.get("id")
+            if not isinstance(identifier, str) or not identifier or len(identifier) > 320:
+                continue
+            primary = raw.get("primary") is True
+            if primary and ("primary" in existing or identifier not in existing):
+                identifier = "primary"
+            title = raw.get("summaryOverride") or raw.get("summary") or ("Work calendar" if primary else "Calendar")
+            if not isinstance(title, str):
+                continue
+            sources[identifier] = {"id": identifier, "title": title, "primary": primary}
+        return sorted(sources.values(), key=lambda item: (not item["primary"], item["title"].casefold()))
+
+    @staticmethod
+    def _cancel_excluded(state, calendar_ids):
+        for event in state.get("events", {}).values():
+            if event.get("calendar_id") not in calendar_ids and event.get("status") in {"scheduled", "awaiting_consent"}:
+                event.update(status="cancelled", join_url="", passcode="", calendar_excluded=True)
+
+    def set_consent_mode(self, claims, mode, participant_consent_attested=False, scope_revision=None):
         owner = owner_identity(claims)
         if mode not in {"ask", "approved"}:
             raise CalendarMeetingError("Consent mode must be ask or approved")
         if mode == "approved" and participant_consent_attested is not True:
             raise CalendarMeetingError("Standing consent requires explicit participant-consent attestation")
         def save(state):
+            self._verify_binding(state, claims)
             config = state.get("config")
-            if not config:
+            if not config or config.get("enabled") is not True:
                 raise CalendarMeetingError("Connect calendars before changing consent settings")
+            if mode == "approved" and scope_revision != config.get("scope_revision", "legacy"):
+                raise CalendarSelectionChanged("Refresh calendar settings and confirm consent for the current selection")
             config["consent_mode"] = mode
-            return True, dict(config)
+            return True, None
         return self._mutate(owner, save)
 
     def settings(self, claims):
         state, _ = self._load(owner_identity(claims))
         config = state.get("config")
-        return {k: v for k, v in config.items() if k != "owner_uid"} if config else None
+        return {"scope_revision": "legacy", **{k: v for k, v in config.items() if k != "owner_uid"}} if config else None
 
     def disconnect(self, claims):
         owner = owner_identity(claims)
@@ -309,9 +382,7 @@ class CalendarMeetings:
             if not config:
                 return False, {"enabled": False}
             config["enabled"] = False
-            for event in state.get("events", {}).values():
-                if event.get("status") in {"scheduled", "awaiting_consent"}:
-                    event.update(status="cancelled", join_url="", passcode="")
+            self._cancel_excluded(state, ())
             return True, {"enabled": False}
         return self._mutate(owner, stop)
 
@@ -324,15 +395,25 @@ class CalendarMeetings:
         client = self.calendar_factory(owner, list(config["calendar_ids"]))
         now = _now(self.clock())
         horizon = now + timedelta(hours=48)
-        fetched = {}
+        fetched, inaccessible = {}, set()
         for calendar_id in config["calendar_ids"]:
-            events = client.list_events(calendar_id, now.isoformat(), horizon.isoformat())
+            try:
+                events = list(client.list_events(calendar_id, now.isoformat(), horizon.isoformat()))
+            except CalendarUnavailable:
+                inaccessible.add(calendar_id)
+                continue
             for raw in events:
                 event = normalize_event(calendar_id, raw, owner, now)
                 if event and _parse_time({"dateTime": event["start"]}) <= horizon:
                     fetched[event["id"]] = event
-        scheduled = []
         def update(current):
+            latest_config = current.get("config") or {}
+            if (latest_config.get("enabled") is not True or latest_config.get("scope_revision") != config.get("scope_revision")
+                    or latest_config.get("calendar_ids") != config["calendar_ids"]
+                    or latest_config.get("owner_uid") != config.get("owner_uid")):
+                raise CalendarSelectionChanged("Calendar selection changed during sync")
+            self._cancel_excluded(current, set(config["calendar_ids"]) - inaccessible)
+            scheduled = []
             current.setdefault("events", {})
             existing = current["events"]
             prune_before = now - timedelta(days=30)
@@ -346,14 +427,19 @@ class CalendarMeetings:
                         old.update(status="cancelled", join_url="", passcode="")
             for identity, new in fetched.items():
                 old = existing.get(identity)
-                if old and old.get("status") == "cancelled":
+                if old and old.get("status") == "cancelled" and not old.get("calendar_excluded"):
                     continue
                 if old and old.get("status") in {"dispatching", "requesting_entry", "awaiting_admission", "joined", "recording", "completed", "failed"}:
                     continue
-                changed = not old or any(old.get(key) != new.get(key) for key in
+                changed = not old or old.get("calendar_excluded") or any(old.get(key) != new.get(key) for key in
                     ("start", "end", "join_url", "attendees", "ical_uid", "organizer_email", "participant_roster"))
                 if changed:
                     new["status"] = "scheduled"
+                    if old and old.get("calendar_excluded"):
+                        # An ACKed task can retain its old name during the de-duplication window.
+                        new["task_generation"] = uuid4().hex
+                    elif old and old.get("task_generation"):
+                        new["task_generation"] = old["task_generation"]
                     existing[identity] = new
                 elif "attendee_names" in new:
                     old["attendee_names"] = new["attendee_names"]
@@ -361,25 +447,25 @@ class CalendarMeetings:
                     old.pop("attendee_names", None)
                 current_event = existing.get(identity)
                 if current_event and current_event.get("status") == "scheduled" and not current_event.get("task_name"):
-                    scheduled.append((identity, current_event["start"]))
-            return True, len(fetched)
-        count = self._mutate(owner, update)
+                    scheduled.append((identity, current_event["start"], current_event.get("task_generation")))
+            return True, scheduled
+        scheduled = self._mutate(owner, update)
         owner_hash = hashlib.sha256(owner.lower().encode()).hexdigest()
-        for identity, start in scheduled:
+        for identity, start, task_generation in scheduled:
             try:
-                result = self.task_scheduler.schedule(owner_hash, identity, start)
+                result = self.task_scheduler.schedule(owner_hash, identity, start, task_generation)
                 task_name = result if isinstance(result, str) else getattr(result, "name", "")
             except Exception:
                 # A later sync retries only events whose idempotent task is still missing.
                 continue
             if task_name:
-                self._mutate(owner, lambda current: self._set_task(current, identity, task_name))
-        return count
+                self._mutate(owner, lambda current: self._set_task(current, identity, task_name, task_generation))
+        return len(fetched)
 
     @staticmethod
-    def _set_task(state, identity, name):
+    def _set_task(state, identity, name, task_generation):
         event = state.get("events", {}).get(identity)
-        if not event or event.get("status") != "scheduled":
+        if not event or event.get("status") != "scheduled" or event.get("task_generation") != task_generation:
             return False, None
         event["task_name"] = name
         return True, None
@@ -429,9 +515,12 @@ class CalendarMeetings:
         target = current_state.get("events", {}).get(event_id)
         if target and not cloud_capture_enabled(owner, target.get("join_url")):
             raise CalendarMeetingError("Open Reel on your computer for desktop capture")
-        if target and not self._event_current(owner, config, target, now):
-            self._mutate(owner, lambda current: self._cancel_event(current, event_id, target["occurrence_start"]))
-            raise CalendarMeetingError("This calendar meeting changed or was cancelled")
+        if target:
+            current = self._event_current(owner, config, target, now)
+            if not current:
+                self._mutate(owner, lambda state: self._cancel_event(state, event_id, target["occurrence_start"],
+                             target.get("task_generation"), calendar_excluded=current is None))
+                raise CalendarMeetingError("This calendar meeting changed or was cancelled")
         def reserve(current):
             latest_config = current.get("config") or {}
             event = current.get("events", {}).get(event_id)
@@ -443,7 +532,7 @@ class CalendarMeetings:
             if not cloud_capture_enabled(owner, event.get("join_url")):
                 raise CalendarMeetingError("Open Reel on your computer for desktop capture")
             if not target or any(event.get(key) != target.get(key) for key in
-                    ("join_url", "ical_uid", "organizer_email", "participant_roster")):
+                    ("join_url", "ical_uid", "organizer_email", "participant_roster", "task_generation")):
                 raise CalendarMeetingError("Calendar invitation changed; refresh and try again")
             if event.get("attempted"):
                 raise CalendarMeetingError("This meeting has already been dispatched")
@@ -465,7 +554,7 @@ class CalendarMeetings:
             return True, {"id": event_id, "status": "cancelled"}
         return self._mutate(owner, decline_one)
 
-    def dispatch_callback(self, claims, event_id, occurrence_start):
+    def dispatch_callback(self, claims, event_id, occurrence_start, task_generation=None):
         owner = owner_identity(claims)
         config, _, _ = self._get_config_state(owner)
         now = _now(self.clock())
@@ -473,17 +562,17 @@ class CalendarMeetings:
         # meeting that was cancelled or moved since the last sync.
         state, _ = self._load(owner)
         target = state.get("events", {}).get(event_id)
-        if not target or target.get("occurrence_start") != occurrence_start:
+        if not target or target.get("occurrence_start") != occurrence_start or target.get("task_generation") != task_generation:
             return None
-        current = bool(target and target.get("occurrence_start") == occurrence_start
-                       and self._event_current(owner, config, target, now))
+        current = self._event_current(owner, config, target, now)
         if not current:
-            self._mutate(owner, lambda current_state: self._cancel_event(current_state, event_id, occurrence_start))
+            self._mutate(owner, lambda current_state: self._cancel_event(current_state, event_id, occurrence_start,
+                         task_generation, calendar_excluded=current is None))
             return self._current_status(owner, event_id)
         def reserve(state):
             latest_config = state.get("config") or {}
             event = state.get("events", {}).get(event_id)
-            if not event or event.get("occurrence_start") != occurrence_start:
+            if not event or event.get("occurrence_start") != occurrence_start or event.get("task_generation") != task_generation:
                 return False, None
             if (event.get("status") != "scheduled" or event.get("attempted")
                     or not latest_config.get("enabled")
@@ -547,28 +636,31 @@ class CalendarMeetings:
         return state["config"], state, generation
 
     def _event_current(self, owner, config, target, now):
-        if not config.get("enabled"):
+        calendar_id = target.get("calendar_id")
+        if not config.get("enabled") or calendar_id not in config.get("calendar_ids", []):
             return False
         client = self.calendar_factory(owner, list(config["calendar_ids"]))
         horizon = now + timedelta(hours=48)
         time_min = now - timedelta(minutes=10)
-        for calendar_id in config["calendar_ids"]:
-            if calendar_id != target.get("calendar_id"):
-                continue
+        try:
             for raw in client.list_events(calendar_id, time_min.isoformat(), horizon.isoformat()):
                 normalized = normalize_event(calendar_id, raw, owner, now)
                 if (normalized and normalized["id"] == target.get("id")
                         and all(normalized.get(key) == target.get(key) for key in
                             ("join_url", "ical_uid", "organizer_email", "participant_roster"))):
                     return True
+        except CalendarUnavailable:
+            return None
         return False
 
     @staticmethod
-    def _cancel_event(state, event_id, occurrence_start):
+    def _cancel_event(state, event_id, occurrence_start, task_generation, *, calendar_excluded=False):
         event = state.get("events", {}).get(event_id)
-        if (event and event.get("occurrence_start") == occurrence_start
+        if (event and event.get("occurrence_start") == occurrence_start and event.get("task_generation") == task_generation
                 and event.get("status") in {"scheduled", "awaiting_consent"}):
             event.update(status="cancelled", join_url="", passcode="")
+            if calendar_excluded:
+                event["calendar_excluded"] = True
             return True, None
         return False, None
 
@@ -587,7 +679,7 @@ class CalendarMeetings:
                 or not cloud_capture_enabled(owner, current.get("join_url"))):
             if current and current.get("status") == "dispatching" and (not config.get("enabled") or
                     current.get("calendar_id") not in config.get("calendar_ids", [])):
-                self._mutate(owner, lambda latest: self._cancel_event(latest, event["id"], event["occurrence_start"]))
+                self._mutate(owner, lambda latest: self._cancel_event(latest, event["id"], event["occurrence_start"], event.get("task_generation")))
             return
         try:
             result = self.bot_dispatcher(owner, {k: event[k] for k in ("id", "title", "start", "end", "attendees", "join_url", "passcode")})

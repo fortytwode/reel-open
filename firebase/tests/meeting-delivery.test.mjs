@@ -38,6 +38,14 @@ test('partial or external-recipient receipts do not claim success', async () => 
   }
 });
 
+test('calendar selection block survives local decoding and remains actionable', async () => {
+  const error = 'Select the meeting calendar before delivering notes';
+  await assert.rejects(deliverMeeting({allowedEmailDomain:'northwind.example',serviceURL:'https://service.test',payload,
+    authorize:async()=>'owner',fetchImpl:async()=>Response.json({error,code:'calendar_selection_required'}, {status:403})}),
+    {message:error, code:'calendar_selection_required'});
+  assert.equal(decodeMeeting({deliveryStatus:'calendarSelectionRequired'}).deliveryStatus, 'calendarSelectionRequired');
+});
+
 test('calendar identity and delivery checkpoints survive local recording decoding', () => {
   const decoded = decodeMeeting({attendees:['invitee@northwind.example'],ownerUID:'owner',calendar:payload.calendar,
     deliveryStatus:'failed',deliveryRetryAt:'2026-11-10T10:05:00Z',deliveryError:'Retry',deliveryReceipt:receipt});
