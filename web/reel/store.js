@@ -3,7 +3,7 @@
 // per file (init.mp4, segNNNNN.m4s, video.mp4, thumb.jpg, trimmed.mp4). Every segment is stored
 // the moment the encoder closes it, so a crashed or closed tab can be recovered on the next visit
 // (the Mac app's recording.json + segments/ folder + Recovery).
-import * as C from "./core.js?v=20261110-delivery1";
+import * as C from "./core.js?v=20261119-owner2";
 import { organizationStorageKey } from "../organization.js?v=20261118-orgstate1";
 
 const DB = organizationStorageKey("reel-recorder"), VERSION = 1;
@@ -34,8 +34,38 @@ export async function saveRecording(r, extra = {}) {
   const tx = db.transaction("recordings", "readwrite");
   const store = tx.objectStore("recordings");
   const prev = (await req(store.get(r.id))) || {};
-  store.put({ ...prev, ...extra, id: r.id, json: C.recordingToJSON(r) });
+  const json = C.preserveRecordingBinding(C.recordingToJSON(r), prev.json);
+  store.put({ ...prev, ...extra, id: r.id, json });
   await done(tx);
+  return json;
+}
+/** Persist the first authenticated publisher without letting another tab replace it. */
+export async function bindRecording(id, recordingNonce, uid, meetingShareUID = null, assertCurrent = null) {
+  const shareID = recordingNonce ? await C.ownerShareID(uid, recordingNonce) : null;
+  const db = await open();
+  const tx = db.transaction("recordings", "readwrite");
+  const rows = tx.objectStore("recordings");
+  const previous = await req(rows.get(id));
+  const json = previous?.json;
+  if (!json || (json.recordingNonce ?? null) !== (recordingNonce ?? null)) {
+    await done(tx);
+    throw new Error("This recording is no longer available.");
+  }
+  if (C.isMeeting(json) && (meetingShareUID !== uid || (json.meeting?.ownerUID && json.meeting.ownerUID !== uid))) {
+    await done(tx);
+    throw new Error("Confirm sharing while signed in as the meeting owner.");
+  }
+  if (json.recordingOwnerUID && (json.recordingOwnerUID !== uid || json.shareID !== shareID)) {
+    await done(tx);
+    throw new Error("Sign in with this recording's original account to share it.");
+  }
+  assertCurrent?.();
+  if (shareID && !json.recordingOwnerUID) {
+    Object.assign(json, { recordingOwnerUID: uid, shareID });
+    rows.put(previous);
+  }
+  await done(tx);
+  return json;
 }
 export async function getRow(id) { const db = await open(); return req(db.transaction("recordings").objectStore("recordings").get(id)); }
 export async function updateRow(id, extra) {
@@ -51,9 +81,10 @@ export async function updateExistingRecording(recording, extra = {}) {
   const db = await open();
   const tx = db.transaction("recordings", "readwrite"), rows = tx.objectStore("recordings");
   const previous = await req(rows.get(recording.id));
-  if (previous) rows.put({ ...previous, ...extra, json: C.recordingToJSON(recording) });
+  const json = previous && C.preserveRecordingBinding(C.recordingToJSON(recording), previous.json);
+  if (json) rows.put({ ...previous, ...extra, json });
   await done(tx);
-  return !!previous;
+  return json;
 }
 /** Newest first. */
 export async function loadRecordings() {

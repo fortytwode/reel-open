@@ -6,13 +6,13 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261118-orgstate1";
 import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
-import * as C from "./reel/core.js?v=20261110-delivery1";
-import * as store from "./reel/store.js?v=20261118-orgstate1";
+import * as C from "./reel/core.js?v=20261119-owner2";
+import * as store from "./reel/store.js?v=20261119-owner2";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261110-delivery1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
-import { Library, Publisher, APP } from "./reel/publisher.js?v=20261118-orgstate1";
+import { Library, Publisher, APP } from "./reel/publisher.js?v=20261119-owner2";
 import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261025-audio1";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
@@ -63,7 +63,8 @@ const authReadyPromise = new Promise((r) => { authReady = r; });
 const session = {
   async session() {
     await authReadyPromise;
-    return sessionSnapshot(user);
+    const snapshot = sessionSnapshot(user), generation = authGeneration;
+    return snapshot && { ...snapshot, isCurrent: () => user?.uid === snapshot.uid && authGeneration === generation };
   },
 };
 async function initAuth() {
@@ -164,7 +165,7 @@ async function start({ reuse = false } = {}) {
   if (R.phase !== "idle") return;
   const meetingMode = $("recording-kind").value === "meeting";
   let meetingDetails = null;
-  const meetingOwnerUID = user?.uid;
+  const captureOwnerUID = user?.uid;
   if (meetingMode) {
     try { meetingDetails = C.parseMeetingDetails($("meeting-attendees").value); }
     catch (e) { toast(e.message, true); return; }
@@ -219,11 +220,20 @@ async function start({ reuse = false } = {}) {
   const composite = !!camTrack && (surface !== "monitor" || !R.bubble);
 
   const now = new Date();
-  const shareID = C.newShareID();
-  const r = C.newRecording({ shareID, createdAt: now, mode: s.mode === "camera" ? "camera" : modeForSurface(surface), upload: s.autoUpload ? "pending" : "localOnly" });
+  let r;
+  try {
+    const recordingNonce = C.newRecordingNonce();
+    const shareID = captureOwnerUID ? await C.ownerShareID(captureOwnerUID, recordingNonce) : C.newShareID();
+    r = C.newRecording({ shareID, createdAt: now, mode: s.mode === "camera" ? "camera" : modeForSurface(surface),
+      upload: s.autoUpload && captureOwnerUID ? "pending" : "localOnly" });
+    r.recordingNonce = recordingNonce;
+    if (captureOwnerUID) r.recordingOwnerUID = captureOwnerUID;
+  } catch (e) {
+    return bail(e.message);
+  }
   if (meetingDetails) {
     r.meeting = meetingDetails;
-    if (meetingOwnerUID) r.meeting.ownerUID = meetingOwnerUID;
+    if (captureOwnerUID) r.meeting.ownerUID = captureOwnerUID;
     r.meeting.calendar = deliveryCalendarEvents.get($("meeting-calendar-invite").value)?.calendar ?? null;
     r.meeting.deliveryStatus = "pending";
     r.title = meetingTitle || "Meeting " + now.toLocaleString();
@@ -541,9 +551,13 @@ async function renderItem(r) {
   if (!busy) btn("Download", () => download(r));
   if (!busy && r.upload !== "uploaded" && !publisher.uploads.has(r.id)) {
     btn(C.isMeeting(r) ? "Share video…" : r.upload === "localOnly" ? "Upload" : "Retry upload", () => {
-      if (!user) { toast("Sign in with Google to upload.", true); return; }
-      if (C.isMeeting(r) && !window.confirm("Upload this meeting video and transcript to Reel sharing? This creates a share link. Sending notes to Notion is separate.")) return;
-      publisher.publish(r, { copyLink: true, allowMeetingShare: C.isMeeting(r) });
+      const expectedOwnerUID = user?.uid, generation = authGeneration, meeting = C.isMeeting(r);
+      if (!expectedOwnerUID) { toast("Sign in with Google to upload.", true); return; }
+      const consentIsCurrent = () => user?.uid === expectedOwnerUID && authGeneration === generation;
+      if (meeting && !window.confirm("Upload this meeting video and transcript to Reel sharing? This creates a share link. Sending notes to Notion is separate.")) return;
+      if (meeting && !consentIsCurrent()) { toast("The account changed. Confirm sharing again.", true); return; }
+      publisher.publish(r, { copyLink: true, allowMeetingShare: meeting,
+        expectedOwnerUID: meeting ? expectedOwnerUID : null, consentIsCurrent: meeting ? consentIsCurrent : null });
     });
   }
   if (!busy && r.upload === "uploaded") btn("Sharing…", () => openShare(r));
@@ -595,7 +609,8 @@ function syncMeetingMetadata(recording) {
       const response = await fetch(MEETING_SERVICE + "/meetings", { method: "POST", headers: {
         "Authorization": "Bearer " + token, "Content-Type": "application/json" },
         body: JSON.stringify({ id: r.id, title: r.title, started_at: r.createdAt.toISOString(), duration_seconds: r.durationSeconds,
-          transcript_status: r.transcriptStatus, share_id: r.shareID, recording_source: "browser" }), signal: AbortSignal.timeout(20000) });
+          transcript_status: r.transcriptStatus, recording_source: "browser",
+          ...(!r.recordingNonce || r.recordingOwnerUID ? { share_id: r.shareID } : {}) }), signal: AbortSignal.timeout(20000) });
       if (!response.ok) throw new Error("Portal sync failed");
       await store.updateRow(id, { portalSynced: true });
     } catch { await store.updateRow(id, { portalSynced: false }); }
@@ -891,8 +906,9 @@ $("meeting-retranscribe").onclick = async () => {
       const latest = library.get(r.id);
       if (!latest || !C.isMeeting(latest) || latest.meeting.ownerUID || current.uid !== user?.uid) throw new Error("The meeting owner changed. Open the meeting again.");
       latest.meeting.ownerUID = current.uid;
-      await library.update(latest);
-      r = latest;
+      if (!await library.updateExisting(latest)) throw new Error("The meeting is no longer available.");
+      r = library.get(latest.id);
+      if (!current.isCurrent() || r?.meeting?.ownerUID !== current.uid) throw new Error("The meeting owner changed. Open the meeting again.");
     }
     processRecording(r);
     refreshMeetingNotes();
@@ -924,7 +940,9 @@ function openShare(r) {
     const choice = $("share-expiry").value;
     const expiresAt = choice === "keep" ? r.access.expiresAt : C.expiryDate(choice);
     toast("Updating sharing…");
-    try { await publisher.updateAccess(r, password, expiresAt); toast("Sharing updated"); }
+    const expectedOwnerUID = user?.uid, generation = authGeneration;
+    const consentIsCurrent = () => user?.uid === expectedOwnerUID && authGeneration === generation;
+    try { await publisher.updateAccess(r, password, expiresAt, { expectedOwnerUID, consentIsCurrent }); toast("Sharing updated"); }
     catch (e) { toast(e.message, true); }
   };
   d.showModal();

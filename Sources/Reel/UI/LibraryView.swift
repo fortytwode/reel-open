@@ -128,6 +128,7 @@ private struct LibraryRow: View {
     let trim: () -> Void
     let notes: () -> Void
     @State private var confirmMeetingShare = false
+    @State private var meetingShareConsent: Publisher.MeetingShareConsent?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -146,8 +147,14 @@ private struct LibraryRow: View {
                     Button { NSWorkspace.shared.open(recording.shareURL()) } label: { Image(systemName: "safari") }.help("Open share page")
                 } else if model.uploadProgress[recording.id] == nil {
                     Button(recording.isMeeting ? "Share video…" : "Upload") {
-                        if recording.isMeeting { confirmMeetingShare = true }
-                        else { Publisher.shared.publish(recording, copyLink: true) }
+                        if recording.isMeeting {
+                            guard let consent = Publisher.shared.meetingShareConsent() else {
+                                Toast.show("Sign in to Reel before sharing a meeting.", isError: true)
+                                return
+                            }
+                            meetingShareConsent = consent
+                            confirmMeetingShare = true
+                        } else { Publisher.shared.publish(recording, copyLink: true) }
                     }
                         .help(model.account == nil ? "Sign in with Google in Settings first" : "Upload and copy link")
                 }
@@ -189,7 +196,9 @@ private struct LibraryRow: View {
         }
         .confirmationDialog("Share this meeting video?", isPresented: $confirmMeetingShare) {
             Button("Upload meeting video and create a share link") {
-                Publisher.shared.publish(recording, copyLink: true, allowMeetingShare: true)
+                guard let consent = meetingShareConsent else { return }
+                meetingShareConsent = nil
+                Publisher.shared.publish(recording, copyLink: true, meetingConsent: consent)
             }
         } message: {
             Text("This uploads the meeting video and transcript to Reel sharing. Anyone allowed by its share settings may access them. Notion notes are delivered separately.")

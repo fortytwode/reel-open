@@ -40,6 +40,51 @@ final class RecordingTests: XCTestCase {
         }
     }
 
+    func testNewRecordingBindsOnceAndKeepsItsLocalFolder() throws {
+        let nonce = "00112233445566778899aabbccddeeff"
+        let provisionalID = "0123456789abcdefghij"
+        var recording = Recording(shareID: provisionalID, title: "T", createdAt: date, durationSeconds: 1,
+                                  width: 640, height: 480, mode: .screen, folderName: "original-folder",
+                                  upload: .localOnly, recordingNonce: nonce)
+        recording = try ReelJSON.decoder.decode(Recording.self, from: ReelJSON.encoder.encode(recording))
+        XCTAssertFalse(recording.hasPublishableShareID)
+        XCTAssertFalse(recording.matchesPublisher("firebase-member"))
+        XCTAssertEqual(recording.shareID, provisionalID)
+
+        XCTAssertTrue(recording.bindToPublisher("firebase-member"))
+        XCTAssertTrue(recording.hasPublishableShareID)
+        XCTAssertEqual(recording.shareID, "r2955d6431ee1195cf9fc2be40389c2208d75961")
+        XCTAssertEqual(recording.folderName, "original-folder")
+        XCTAssertEqual(recording.recordingNonce, nonce)
+
+        recording = try ReelJSON.decoder.decode(Recording.self, from: ReelJSON.encoder.encode(recording))
+        XCTAssertTrue(recording.bindToPublisher("firebase-member"))
+        XCTAssertFalse(recording.bindToPublisher("other-member"))
+        XCTAssertTrue(recording.matchesPublisher("firebase-member"))
+        XCTAssertFalse(recording.matchesPublisher("other-member"))
+        XCTAssertEqual(recording.shareID, "r2955d6431ee1195cf9fc2be40389c2208d75961")
+        XCTAssertEqual(recording.folderName, "original-folder")
+    }
+
+    func testLegacyRecordingDecodesWithoutNonceAndRetainsURL() throws {
+        var legacy = sample(upload: .uploaded)
+        let data = try ReelJSON.encoder.encode(legacy)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertNil(object["recordingNonce"])
+        legacy = try ReelJSON.decoder.decode(Recording.self, from: data)
+        let link = legacy.shareURL(config: testOrganization)
+        XCTAssertTrue(legacy.bindToPublisher("current-account"))
+        XCTAssertEqual(legacy.shareURL(config: testOrganization), link)
+    }
+
+    func testRecordingNonceRequiresCanonicalHex() throws {
+        let nonce = ShareLinks.newRecordingNonce()
+        XCTAssertEqual(nonce.utf8.count, 32)
+        XCTAssertNotNil(ShareLinks.ownerBoundShareID(ownerUID: "uid", recordingNonce: nonce))
+        XCTAssertNil(ShareLinks.ownerBoundShareID(ownerUID: "uid", recordingNonce: "00112233445566778899aabbccddeeff".uppercased()))
+        XCTAssertNil(ShareLinks.ownerBoundShareID(ownerUID: "uid", recordingNonce: "bad"))
+    }
+
     func testUploadStateLabels() {
         XCTAssertEqual(UploadState.failed("boom").label, "Upload failed: boom")
         XCTAssertEqual(UploadState.uploaded.label, "Uploaded")

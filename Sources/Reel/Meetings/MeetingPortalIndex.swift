@@ -21,7 +21,6 @@ enum MeetingPortalIndex {
                   let latest = AppModel.shared.recording(id: id), latest.isMeeting,
                   latest.meeting?.ownerUserID != nil,
                   UUID(uuidString: latest.id) != nil,
-                  ShareLinks.isValidShareID(latest.shareID),
                   await CloudAuth.shared.current != nil else { return false }
             return await sendPublish(latest)
         }
@@ -54,16 +53,19 @@ enum MeetingPortalIndex {
             let session = try await CloudAuth.shared.validSession()
             guard !removedIDs.contains(latest.id),
                   let current = AppModel.shared.recording(id: latest.id), current.isMeeting,
-                  current.meeting?.ownerUserID == session.userID else { return false }
-            let payload: [String: Any] = [
+                  current.meeting?.ownerUserID == session.userID,
+                  !current.hasPublishableShareID || current.matchesPublisher(session.userID) else { return false }
+            var payload: [String: Any] = [
                 "id": current.id,
                 "title": current.title,
                 "started_at": ISO8601DateFormatter().string(from: current.createdAt),
                 "duration_seconds": current.durationSeconds,
                 "transcript_status": current.transcriptStatus.rawValue,
-                "share_id": current.shareID.lowercased(),
                 "recording_source": "mac",
             ]
+            if current.hasPublishableShareID, ShareLinks.isValidShareID(current.shareID) {
+                payload["share_id"] = current.shareID.lowercased()
+            }
             return await send(payload: payload, method: "POST", id: latest.id, token: session.idToken,
                               successMessage: "Meeting portal metadata synced")
         } catch {

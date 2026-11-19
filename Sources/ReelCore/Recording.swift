@@ -136,7 +136,9 @@ public enum ExpiryOption: String, CaseIterable, Sendable {
 /// One library entry, persisted in `<folder>/recording.json` next to `video.mp4`.
 public struct Recording: Codable, Equatable, Identifiable, Sendable {
     public var id: String               // local UUID
-    public var shareID: String          // remote ID, allocated when the recording starts
+    public private(set) var shareID: String
+    /// Absent for legacy recordings. New captures keep this nonce through capture and publishing.
+    public private(set) var recordingNonce: String?
     public var title: String
     public var createdAt: Date
     public var durationSeconds: Double
@@ -178,9 +180,10 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
 
     public enum TranscriptStatus: String, Codable, Sendable { case pending, ready, none, failed }
 
-    public init(id: String = UUID().uuidString, shareID: String = ShareLinks.newShareID(), title: String, createdAt: Date, durationSeconds: Double, width: Int, height: Int, mode: CaptureMode, folderName: String, upload: UploadState = .pending, transcriptStatus: TranscriptStatus = .pending, hasThumbnail: Bool = false, meeting: MeetingDetails? = nil) {
+    public init(id: String = UUID().uuidString, shareID: String = ShareLinks.newShareID(), title: String, createdAt: Date, durationSeconds: Double, width: Int, height: Int, mode: CaptureMode, folderName: String, upload: UploadState = .pending, transcriptStatus: TranscriptStatus = .pending, hasThumbnail: Bool = false, meeting: MeetingDetails? = nil, recordingNonce: String? = nil) {
         self.id = id
         self.shareID = shareID
+        self.recordingNonce = recordingNonce
         self.title = title
         self.createdAt = createdAt
         self.durationSeconds = durationSeconds
@@ -195,7 +198,7 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, shareID, title, createdAt, durationSeconds, width, height, mode, folderName, upload, transcriptStatus, hasThumbnail
+        case id, shareID, recordingNonce, title, createdAt, durationSeconds, width, height, mode, folderName, upload, transcriptStatus, hasThumbnail
         case titleIsCustom, captureState, playback, access, trim, trimmedUploaded, summary, chapters, summaryEngine, viewCount, meeting
     }
 
@@ -203,6 +206,7 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         shareID = try c.decode(String.self, forKey: .shareID)
+        recordingNonce = try c.decodeIfPresent(String.self, forKey: .recordingNonce)
         title = try c.decode(String.self, forKey: .title)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         durationSeconds = (try? c.decode(Double.self, forKey: .durationSeconds)) ?? 0
@@ -225,6 +229,52 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
         viewCount = try? c.decode(Int.self, forKey: .viewCount)
         // Malformed meeting context must not silently turn a private meeting into a normal recording.
         meeting = try c.decodeIfPresent(MeetingDetails.self, forKey: .meeting)
+    }
+
+    public var hasPublishableShareID: Bool {
+        recordingNonce == nil || ShareLinks.isOwnerBoundShareID(shareID)
+    }
+
+    public func matchesPublisher(_ ownerUID: String) -> Bool {
+        guard let recordingNonce else { return true }
+        return ShareLinks.ownerBoundShareID(ownerUID: ownerUID, recordingNonce: recordingNonce) == shareID
+    }
+
+    /// Signed-out captures have a provisional local ID. Once bound, the share ID is immutable.
+    @discardableResult
+    public mutating func bindToPublisher(_ ownerUID: String) -> Bool {
+        guard let recordingNonce else { return true }
+        guard let boundID = ShareLinks.ownerBoundShareID(ownerUID: ownerUID, recordingNonce: recordingNonce) else { return false }
+        if hasPublishableShareID { return shareID == boundID }
+        shareID = boundID
+        return true
+    }
+
+    /// Merge only immutable identity fields into a stale local snapshot before writing it.
+    mutating func preserveIdentity(from stored: Recording) throws {
+        guard id == stored.id, recordingNonce == stored.recordingNonce, isMeeting == stored.isMeeting else {
+            throw LibraryStore.IdentityError.recordingConflict
+        }
+        if shareID != stored.shareID {
+            guard !hasPublishableShareID, stored.hasPublishableShareID else {
+                throw LibraryStore.IdentityError.recordingConflict
+            }
+            shareID = stored.shareID
+            upload = stored.upload
+            playback = stored.playback
+        }
+        if let storedOwner = stored.meeting?.ownerUserID {
+            guard meeting?.ownerUserID == nil || meeting?.ownerUserID == storedOwner else {
+                throw LibraryStore.IdentityError.publisherConflict
+            }
+            meeting?.ownerUserID = storedOwner
+        }
+    }
+
+    func validateMeetingPublisher() throws {
+        if let ownerUID = meeting?.ownerUserID, hasPublishableShareID, !matchesPublisher(ownerUID) {
+            throw LibraryStore.IdentityError.publisherConflict
+        }
     }
 
     public func shareURL(config: CloudConfig = .default) -> URL { ShareLinks.viewerURL(shareID: shareID, config: config) }
