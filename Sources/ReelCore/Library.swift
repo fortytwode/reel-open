@@ -110,6 +110,33 @@ public final class LibraryStore: @unchecked Sendable {
             var result = proposed
             try result.preserveIdentity(from: stored)
             try result.validateMeetingPublisher()
+            result.discardRequested = stored.discardRequested
+            return result
+        }
+    }
+
+    /// Finalization and publishing may finish in either order. Change only local media fields.
+    @discardableResult
+    public func updateCapture(_ recording: Recording, state: CaptureState, duration: Double,
+                              hasThumbnail: Bool? = nil) throws -> Recording {
+        try updateManifest(for: recording) { stored in
+            var proposal = recording
+            try proposal.preserveIdentity(from: stored)
+            guard stored.discardRequested != true else { throw IdentityError.recordingMissing }
+            var result = stored
+            result.captureState = state
+            result.durationSeconds = duration
+            if let hasThumbnail { result.hasThumbnail = hasThumbnail }
+            return result
+        }
+    }
+
+    public func requestDiscard(_ recording: Recording) throws -> Recording {
+        try updateManifest(for: recording) { stored in
+            var proposal = recording
+            try proposal.preserveIdentity(from: stored)
+            var result = stored
+            result.discardRequested = true
             return result
         }
     }
@@ -117,6 +144,7 @@ public final class LibraryStore: @unchecked Sendable {
     /// First binding uses the latest manifest under the same lock as ordinary writes and deletion.
     public func bindForPublication(_ recording: Recording, ownerUID: String, meetingConsentUID: String? = nil) throws -> Recording {
         try updateManifest(for: recording) { stored in
+            guard stored.discardRequested != true else { throw IdentityError.recordingMissing }
             var proposal = recording
             try proposal.preserveIdentity(from: stored)
             var result = stored

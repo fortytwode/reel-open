@@ -10,6 +10,7 @@ import ScreenCaptureKit
 ///   Reel --record-test <seconds> [--meeting] [--mode screen|window|area|camera] [--area x,y,w,h] [--window-app <name>]
 ///        [--audio micOnly|systemOnly|micAndSystem|none] [--no-camera] [--no-upload] [--no-live]
 ///        [--pause-at <s> --pause-for <s>] [--draw] [--clicks] [--background none|blur|image]
+///        [--takes <count> --no-upload]              (starts each take as soon as the recorder is ready)
 ///        [--crash-after <s>]                          (SIGKILLs itself mid-recording, for recovery tests)
 ///   Reel --recover                                     (runs launch-time crash recovery, prints JSON)
 ///   Reel --upload <folder> | --delete <folder> | --rename <folder> <title> | --info <folder>
@@ -24,6 +25,7 @@ import ScreenCaptureKit
 enum CLI {
     struct RecordTest {
         var seconds: Double
+        var takes = 1
         var mode: CaptureMode = .screen
         var audio: AudioSource = .micOnly
         var camera = true
@@ -302,6 +304,10 @@ enum CLI {
         if let a = value("--audio").flatMap(AudioSource.init(rawValue:)) { t.audio = a }
         t.camera = !args.contains("--no-camera")
         t.upload = !args.contains("--no-upload")
+        if let count = value("--takes") {
+            guard let takes = Int(count), (1...40).contains(takes), takes == 1 || !t.upload else { return nil }
+            t.takes = takes
+        }
         t.live = !args.contains("--no-live")
         t.mp4 = !args.contains("--no-mp4")
         t.displayID = value("--display").flatMap { UInt32($0) }
@@ -363,6 +369,7 @@ enum CLI {
         rc.presetArea = test.area
         let started = Date()
         var checks: [String: Any] = [:]
+        var reports: [[String: Any]] = []
         rc.onRecordingStarted = { session in
             checks["captureRect"] = NSStringFromRect(session.captureRect)
             checks["outputSize"] = "\(session.outputSize.width)x\(session.outputSize.height)"
@@ -393,13 +400,19 @@ enum CLI {
                 out.merge(describe(r)) { a, _ in a }
                 if let t = Publisher.shared.stopToPlayable[r.id] { out["stopToPlayableSeconds"] = t }
                 if let t = rc.stopToSaved[r.id] { out["stopToSavedSeconds"] = t }
-                if let s = rc.lastStopAt { out["stoppedAtEpoch"] = s.timeIntervalSince1970 }
+                if let t = rc.stopToReady[r.id] { out["stopToReadySeconds"] = t }
+                if test.takes == 1, let s = rc.lastStopAt { out["stoppedAtEpoch"] = s.timeIntervalSince1970 }
                 if test.background != .none { out["cameraEffectFrames"] = rc.camera.effects.processed }
             } else {
                 out["error"] = model.lastError ?? "recording did not complete"
             }
             out["checks"] = checks
             out["wallSeconds"] = Date().timeIntervalSince(started)
+            if test.takes > 1, r != nil {
+                reports.append(out)
+                if reports.count < test.takes { return }
+                out = ["ok": true, "takes": reports]
+            }
             printJSON(out)
             exit(r == nil ? 1 : 0)
         }
@@ -411,22 +424,31 @@ enum CLI {
                 window = content.map(WindowPicker.candidates)?.first { $0.app.localizedCaseInsensitiveContains(name) }?.window
                 if window == nil { print("no window for app \(name)"); exit(1) }
             }
-            rc.start(window: window)
-            // Wait for recording to actually begin.
-            for _ in 0..<300 where model.phase != .recording {
-                if model.phase == .idle { return }   // failed; onFinished reports
-                try? await Task.sleep(for: .milliseconds(50))
+            for take in 1...test.takes {
+                guard rc.start(window: window, focusWindowOnStart: test.takes == 1) else { exit(1) }
+                // Wait for the actual recording. onFinished reports startup failures.
+                for _ in 0..<300 where model.phase != .recording {
+                    if model.phase == .idle { return }
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                guard model.phase == .recording else { exit(1) }
+                if let at = test.pauseAt {
+                    try? await Task.sleep(for: .seconds(at))
+                    rc.pauseResume()
+                    try? await Task.sleep(for: .seconds(test.pauseFor))
+                    rc.pauseResume()
+                    try? await Task.sleep(for: .seconds(max(0, test.seconds - at)))
+                } else {
+                    try? await Task.sleep(for: .seconds(test.seconds))
+                }
+                rc.stop()
+                if take < test.takes {
+                    for _ in 0..<1200 where model.phase != .idle {
+                        try? await Task.sleep(for: .milliseconds(25))
+                    }
+                    guard model.phase == .idle else { exit(1) }
+                }
             }
-            if let at = test.pauseAt {
-                try? await Task.sleep(for: .seconds(at))
-                rc.pauseResume()
-                try? await Task.sleep(for: .seconds(test.pauseFor))
-                rc.pauseResume()
-                try? await Task.sleep(for: .seconds(max(0, test.seconds - at)))
-            } else {
-                try? await Task.sleep(for: .seconds(test.seconds))
-            }
-            rc.stop()
         }
     }
 

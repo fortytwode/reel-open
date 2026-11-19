@@ -15,11 +15,12 @@ actor SegmentUploader {
     private var progress: SegmentLog          // only the upload fields are used/persisted here
     private var segments: [Int: SegmentEntry] = [:]
     private var hasInit = false
-    private var pumping = false
+    private var pumpTask: Task<Void, Never>?
     private var playlistDirty = false
     private(set) var lastError: String?
     private var failures = 0
     private var finishing = false
+    private var cancelled = false
     /// Uploaded bytes, for progress UI.
     private(set) var bytesSent = 0
 
@@ -66,6 +67,7 @@ actor SegmentUploader {
 
     /// Writer callback: a segment (or the init segment, entry == nil) is on disk.
     func segmentWritten(_ entry: SegmentEntry?, log: SegmentLog) {
+        guard !finishing, !cancelled else { return }
         hasInit = hasInit || log.hasInit
         for s in log.segments { segments[s.index] = s }
         if let entry { segments[entry.index] = entry }
@@ -74,15 +76,14 @@ actor SegmentUploader {
     }
 
     private func startPump() {
-        guard !pumping else { return }
-        pumping = true
-        Task { await self.pump() }
+        guard pumpTask == nil else { return }
+        pumpTask = Task { await self.pump() }
     }
 
     /// Uploads everything pending, in order (init first), then refreshes the live playlist.
     private func pump() async {
-        defer { pumping = false }
-        while true {
+        defer { pumpTask = nil }
+        while !cancelled && !Task.isCancelled {
             do {
                 if hasInit && !progress.uploadedInit {
                     try await uploadFile(.initSegment)
@@ -108,10 +109,18 @@ actor SegmentUploader {
                 lastError = error.localizedDescription
                 failures += 1
                 Log.cloud.error("Live upload: \(error.localizedDescription, privacy: .public)")
-                if finishing || (error as? CloudError)?.isPermanent == true || failures > 20 { return }
+                if cancelled || finishing || (error as? CloudError)?.isPermanent == true || failures > 20 { return }
                 try? await Task.sleep(for: .seconds(min(10, Double(failures))))
             }
         }
+    }
+
+    /// Stop live writes before the caller deletes this recording's remote objects.
+    func cancel() async {
+        cancelled = true
+        let active = pumpTask
+        active?.cancel()
+        await active?.value
     }
 
     private static func publisherSession(ownerUID: String) async throws -> CloudSession {
@@ -145,10 +154,12 @@ actor SegmentUploader {
     /// After capture: uploads whatever is left from `log` and the final VOD playlist. Throws if
     /// anything can't be uploaded (the caller marks the recording for retry).
     func finish(log: SegmentLog) async throws {
+        guard !cancelled else { throw CancellationError() }
         finishing = true
         hasInit = log.hasInit
         for s in log.segments { segments[s.index] = s }
-        while pumping { try await Task.sleep(for: .milliseconds(50)) }
+        await pumpTask?.value
+        try Task.checkCancellation()
         if !progress.uploadedInit {
             try await uploadFile(.initSegment)
             progress.uploadedInit = true

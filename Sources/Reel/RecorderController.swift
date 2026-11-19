@@ -18,8 +18,9 @@ final class RecorderController {
     private var drawingOverlay: DrawingOverlay?
     private let clickMonitor = ClickMonitor()
     private var session: RecordingSession?
-    private var uploader: SegmentUploader?
+    private var liveUpload: Task<SegmentUploader?, Never>?
     private var pending: Recording?
+    private var localSaveTail: Task<Void, Never>?
     var currentRecordingID: String? { pending?.id }
     private(set) var overlays = OverlayStore()
     /// Set by the CLI verification path to observe completion.
@@ -33,6 +34,7 @@ final class RecorderController {
     var presetArea: CGRect?
     /// Seconds from pressing stop to the local MP4 being saved, per recording id.
     private(set) var stopToSaved: [String: Double] = [:]
+    private(set) var stopToReady: [String: Double] = [:]
     private(set) var lastStopAt: Date?
 
     // MARK: Bubble preview
@@ -148,22 +150,26 @@ final class RecorderController {
     private var startFlowActive = false
 
     @discardableResult
-    func start(window preselected: SCWindow? = nil, focusWindowOnStart: Bool = true, authorization: (() -> Bool)? = nil) -> Bool {
+    func start(window preselected: SCWindow? = nil, area preselectedArea: CGRect? = nil,
+               focusWindowOnStart: Bool = true, authorization: (() -> Bool)? = nil) -> Bool {
         guard model.phase == .idle, !startFlowActive else {
             model.meetingCalendarOccurrenceID = nil
             model.meetingCalendarReference = nil
             return false
         }
         startFlowActive = true
+        let requestedArea = preselectedArea ?? presetArea
         model.phase = .preparing
         Task {
             defer { self.startFlowActive = false }
-            await self.startFlow(preselected: preselected, focusWindowOnStart: focusWindowOnStart, authorization: authorization)
+            await self.startFlow(preselected: preselected, requestedArea: requestedArea,
+                                 focusWindowOnStart: focusWindowOnStart, authorization: authorization)
         }
         return true
     }
 
-    private func startFlow(preselected: SCWindow?, focusWindowOnStart: Bool, authorization: (() -> Bool)?) async {
+    private func startFlow(preselected: SCWindow?, requestedArea: CGRect?,
+                           focusWindowOnStart: Bool, authorization: (() -> Bool)?) async {
         let s = model.effectiveSettings()
         let captureOwnerUserID = await CloudAuth.shared.current?.userID
         func bail(_ message: String?) {
@@ -208,10 +214,13 @@ final class RecorderController {
             alertPermission("Camera", pane: "Privacy_Camera")
             return bail(nil)
         }
-        let mic: AVCaptureDevice? = s.audio.usesMic ? CaptureDevices.defaultMicrophone(savedID: s.microphoneID) : nil
         if s.audio.usesMic, !(await Permissions.request(.audio)) {
             alertPermission("Microphone", pane: "Privacy_Microphone")
             return bail(nil)
+        }
+        let mic = s.audio.usesMic ? CaptureDevices.defaultMicrophone(savedID: s.microphoneID) : nil
+        if s.audio.usesMic && mic == nil {
+            return bail("No microphone is available. Connect a microphone or turn it off before recording.")
         }
 
         // What to capture.
@@ -226,9 +235,12 @@ final class RecorderController {
                 window = await WindowPicker.pick(from: content)
                 guard window != nil else { return bail(nil) }
             case .area:
-                if let preset = presetArea, let sc = NSScreen.screens.first(where: { $0.frame.intersects(preset) }) {
-                    screen = sc
-                    area = preset
+                if let requestedArea {
+                    guard let sourceScreen = NSScreen.screens.first(where: { $0.frame.intersects(requestedArea) }) else {
+                        return bail("The selected area is no longer available. Choose an area again.")
+                    }
+                    screen = sourceScreen
+                    area = requestedArea
                 } else {
                     bubble?.orderOut(nil)
                     guard let pick = await AreaSelector.select(previous: s.lastArea?.cg) else {
@@ -296,10 +308,12 @@ final class RecorderController {
                                        camera: wantsCamera ? camera : nil, microphone: mic, audio: s.audio,
                                        quality: s.quality, fps: s.fps, showsCursor: s.showCursor, showClicks: s.highlightClicks)
         let session = RecordingSession(request: request, segmentsDirectory: folder.appendingPathComponent(SegmentLog.directoryName, isDirectory: true), overlays: overlays)
-        session.onFatalError = { [weak self] error in
+        session.onFatalError = { [weak self, weak session] error in
             Task { @MainActor in
+                guard let self, let session, self.session === session,
+                      self.model.phase == .recording || self.model.phase == .paused else { return }
                 Toast.show("Recording stopped: \(error.localizedDescription)", isError: true)
-                self?.stop()
+                self.stop()
             }
         }
         self.session = session
@@ -309,10 +323,9 @@ final class RecorderController {
         // ScreenCaptureKit lists the app and excludes all of them.
         controlBar = ControlBarWindow()
         if s.mode != .camera { drawingOverlay = DrawingOverlay(screen: screen, store: overlays) }
-        // Countdown while capture warms up and the live upload is set up.
+        // Countdown while the local capture devices warm up.
         let seconds = skipCountdown ? 0 : s.countdownSeconds
         let prepare = Task { try await session.prepare() }
-        let live = Task { await Publisher.shared.beginLive(recording) }
         if seconds > 0 {
             let cd = CountdownWindow()
             countdown = cd
@@ -326,44 +339,39 @@ final class RecorderController {
             cd.close()
             countdown = nil
         }
-        let liveUploader = await live.value
-        let cleanup = { [self] in
-            await session.cancel()
-            self.session = nil
-            self.drawingOverlay?.close()
-            self.drawingOverlay = nil
-            if liveUploader != nil, let r = self.model.recording(id: recording.id) { await Publisher.shared.delete(r) }
-            else {
-                do { try self.model.library.delete(recording, recoverable: false) }
-                catch { self.model.lastError = error.localizedDescription }
-                self.model.reloadLibrary()
-            }
-        }
-        do { try await prepare.value } catch {
-            await cleanup()
+        do {
+            try await prepare.value
+            if let window { _ = try await ScreenCapture.refreshedWindow(window) }
+        } catch {
+            await abandonPreparation(session, recording: recording)
             return bail("Couldn't start recording: \(error.localizedDescription)")
         }
         guard model.phase != .idle, authorization?() != false else {   // cancelled
-            await cleanup()
+            await abandonPreparation(session, recording: recording)
             return bail(authorization?() == false ? "Meeting setup cancelled because authorization changed." : nil)
         }
-        if let liveUploader {
-            session.onSegment = { entry, log in Task { await liveUploader.segmentWritten(entry, log: log) } }
-        }
-        uploader = liveUploader
         recording = model.recording(id: recording.id) ?? recording
         recording.width = session.outputSize.width
         recording.height = session.outputSize.height
         recording.captureState = .recording
         model.update(recording)
         pending = recording
+        if recording.allowsAutomaticCloudDelivery && s.autoUpload && s.liveUpload {
+            let upload = Publisher.shared.beginLive(recording)
+            liveUpload = upload
+            session.onSegment = { entry, log in
+                Task {
+                    if let uploader = await upload.value { await uploader.segmentWritten(entry, log: log) }
+                }
+            }
+        }
         session.begin()
         model.phase = .recording
         Sound.play(.start)
         HotKeys.shared.registerRecordingKeys(s)
         if s.highlightClicks && s.mode != .camera { clickMonitor.start(store: overlays) }
         controlBar?.present(on: screen)
-        Log.app.info("Recording started: \(s.mode.rawValue, privacy: .public) \(recording.width)x\(recording.height) live=\(liveUploader != nil)")
+        Log.app.info("Recording started: \(s.mode.rawValue, privacy: .public) \(recording.width)x\(recording.height)")
         onRecordingStarted?(session)
         if focusWindowOnStart, s.mode == .window, let window {
             let recordingID = recording.id
@@ -382,6 +390,14 @@ final class RecorderController {
         }
     }
 
+    private func abandonPreparation(_ session: RecordingSession, recording: Recording) async {
+        teardownUI()
+        await session.cancel()
+        await camera.stopAndWait()
+        self.session = nil
+        removeUnpublished(recording)
+    }
+
     func pauseResume() {
         guard let session else { return }
         if model.phase == .recording { session.pause(); model.phase = .paused; Sound.play(.pause) }
@@ -391,65 +407,101 @@ final class RecorderController {
     var elapsed: Double { session?.elapsed ?? 0 }
 
     func stop() {
-        guard let session, var recording = pending, model.phase == .recording || model.phase == .paused else { return }
+        guard let session, let recording = pending, model.phase == .recording || model.phase == .paused else { return }
         let stoppedAt = Date()
         lastStopAt = stoppedAt
-        model.phase = .finishing
-        teardownUI()
+        let slowStop = beginStoppingUI()
         Sound.play(.stop)
-        let uploader = self.uploader
-        self.uploader = nil
+        let upload = liveUpload
+        liveUpload = nil
+        let finished = onFinished
+        let copyLink = model.settings.copyLinkOnStop
+        let autoUpload = model.settings.autoUpload
         Task {
+            let result: RecordingResult
             do {
-                let result = try await session.stop()
-                self.session = nil
-                self.pending = nil
-                recording = self.model.recording(id: recording.id) ?? recording
-                recording.captureState = .finalizing
-                recording.durationSeconds = result.log.totalDuration
-                self.model.update(recording)
-                // Loom copies the link the moment recording stops; the remaining seconds of video
-                // upload while the viewer shows "Finishing upload…".
-                if let uploader, recording.allowsAutomaticCloudDelivery {
-                    if self.model.settings.copyLinkOnStop { Publisher.shared.copyLinkToClipboard(recording, uploading: true, openPage: true) }
-                    Publisher.shared.finishLive(recording, uploader: uploader, log: result.log, stoppedAt: stoppedAt)
-                }
-                try await self.finalizeLocal(recording, log: result.log, segments: result.segmentsDirectory)
-                self.stopToSaved[recording.id] = Date().timeIntervalSince(stoppedAt)
-                self.model.phase = .idle
-                guard let saved = self.model.recording(id: recording.id) else { return }
-                if saved.isMeeting {
-                    Task { _ = await MeetingPortalIndex.publish(saved) }
-                }
-                let transcription = Publisher.shared.transcribe(saved)
-                if saved.allowsAutomaticCloudDelivery && self.model.settings.autoUpload {
-                    await Publisher.shared.publish(saved, copyLink: uploader == nil && self.model.settings.copyLinkOnStop).value
-                } else {
-                    Notifier.post(title: "Recording saved", body: saved.title, url: nil)
-                }
-                await transcription.value
-                self.onFinished?(self.model.recording(id: recording.id))
+                result = try await session.stop()
+                try model.updateCapture(recording, state: .finalizing, duration: result.log.totalDuration)
             } catch {
-                self.session = nil
-                self.pending = nil
-                self.model.phase = .idle
-                Toast.show("Couldn't save recording: \(error.localizedDescription)", isError: true)
-                self.model.lastError = error.localizedDescription
-                self.onFinished?(nil)
+                await releaseCapture(slowStop)
+                upload?.cancel()
+                Task { await Publisher.shared.cancelLiveStart(for: recording.id) }
+                noteSaveFailure(recording, error: error)
+                finished?(nil)
+                return
             }
+            await releaseCapture(slowStop)
+            stopToReady[recording.id] = Date().timeIntervalSince(stoppedAt)
+            Log.app.info("Recorder ready \(self.stopToReady[recording.id] ?? 0, format: .fixed(precision: 3)) s after stop")
+            await finishRecording(recording, result: result, upload: upload, stoppedAt: stoppedAt,
+                                  autoUpload: autoUpload, copyLink: copyLink, finished: finished)
         }
+    }
+
+    private func finishRecording(_ recording: Recording, result: RecordingResult, upload: Task<SegmentUploader?, Never>?,
+                                 stoppedAt: Date, autoUpload: Bool, copyLink: Bool, finished: ((Recording?) -> Void)?) async {
+        let finishShare = Task { () -> Bool in
+            guard let uploader = await upload?.value, let latest = model.recording(id: recording.id) else {
+                Publisher.shared.clearFinishedLiveStart(for: recording.id)
+                return false
+            }
+            if copyLink { copyAutomaticLink(latest, uploading: true, openPage: true) }
+            Publisher.shared.finishLive(latest, uploader: uploader, log: result.log, stoppedAt: stoppedAt)
+            return true
+        }
+        let saved: Recording
+        do {
+            try await finalizeLocal(recording, log: result.log, segments: result.segmentsDirectory)
+            stopToSaved[recording.id] = Date().timeIntervalSince(stoppedAt)
+            guard let current = model.recording(id: recording.id) else { finished?(nil); return }
+            saved = current
+        } catch {
+            noteSaveFailure(recording, error: error)
+            finished?(nil)
+            return
+        }
+        if saved.isMeeting { Task { _ = await MeetingPortalIndex.publish(saved) } }
+        let transcription = Publisher.shared.transcribe(saved)
+        if saved.allowsAutomaticCloudDelivery && autoUpload {
+            let startedLive = await finishShare.value
+            await Publisher.shared.publish(saved, copyLink: false).value
+            if !startedLive && copyLink, let latest = model.recording(id: saved.id), latest.upload == .uploaded {
+                copyAutomaticLink(latest, uploading: false, openPage: false)
+            }
+        } else {
+            Notifier.post(title: "Recording saved", body: saved.title, url: nil)
+        }
+        await transcription.value
+        finished?(model.recording(id: recording.id))
+    }
+
+    private func copyAutomaticLink(_ recording: Recording, uploading: Bool, openPage: Bool) {
+        // A slow older take should not interrupt the next recording or replace its link.
+        guard model.phase == .idle, !model.recordings.contains(where: {
+            !$0.isMeeting && $0.discardRequested != true && $0.createdAt > recording.createdAt
+        }) else { return }
+        Publisher.shared.copyLinkToClipboard(recording, uploading: uploading, openPage: openPage)
     }
 
     /// Segments → video.mp4, duration, thumbnail; marks the capture complete.
     func finalizeLocal(_ recording: Recording, log: SegmentLog, segments: URL, recovered: Bool = false) async throws {
-        var r = recording
-        let video = model.library.videoURL(for: r)
-        try await PostProcessor.assemble(segments: segments, log: log, output: video)
-        r.durationSeconds = await PostProcessor.duration(of: video)
-        r.hasThumbnail = await PostProcessor.makeThumbnail(video: video, to: model.library.thumbnailURL(for: r))
-        r.captureState = recovered ? .recovered : .complete
-        model.update(r)
-        Log.app.info("Saved \(video.path, privacy: .public) (\(r.durationSeconds)s)")
+        let previous = localSaveTail
+        let video = model.library.videoURL(for: recording)
+        let thumbnail = model.library.thumbnailURL(for: recording)
+        let save = Task.detached(priority: .utility) {
+            await previous?.value
+            try await PostProcessor.assemble(segments: segments, log: log, output: video)
+            let duration = await PostProcessor.duration(of: video)
+            guard duration.isFinite, duration > 0 else { throw CocoaError(.fileReadCorruptFile) }
+            let hasThumbnail = await PostProcessor.makeThumbnail(video: video, to: thumbnail)
+            return (duration, hasThumbnail)
+        }
+        localSaveTail = Task { _ = try? await save.value }
+        let (duration, hasThumbnail) = try await save.value
+        try model.updateCapture(recording, state: recovered ? .recovered : .complete,
+                                duration: duration, hasThumbnail: hasThumbnail)
+        model.captureSaveErrors.removeValue(forKey: recording.id)
+        Log.app.info("Saved clip (\(duration)s)")
     }
 
     func cancel(confirm: Bool = true) {
@@ -459,7 +511,7 @@ final class RecorderController {
             hideBubbleIfIdle()
             return
         }
-        guard let session, let recording = pending else { return }
+        guard let session, let recording = pending, model.phase == .recording || model.phase == .paused else { return }
         if confirm && elapsed > 3 && !headless {
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
@@ -470,46 +522,72 @@ final class RecorderController {
             alert.alertStyle = .warning
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
-        model.phase = .finishing
-        teardownUI()
-        uploader = nil
-        Task {
-            await session.cancel()
-            self.session = nil
-            self.pending = nil
-            await self.discard(recording)
-            self.model.phase = .idle
-            Toast.show("Recording discarded")
-            self.onFinished?(nil)
-        }
+        stopDiscarding(session, recording: recording, restart: false)
     }
 
-    /// Removes a cancelled recording locally and (if live upload had started) remotely.
-    private func discard(_ recording: Recording) async {
-        let r = model.recording(id: recording.id) ?? recording
-        if r.upload.mayHaveRemote { await Publisher.shared.delete(r) }
-        else {
-            do { try model.library.delete(r, recoverable: false) }
-            catch { model.lastError = error.localizedDescription }
-            model.reloadLibrary()
-        }
+    private func removeUnpublished(_ recording: Recording) {
+        do { try model.library.delete(recording, recoverable: false) }
+        catch { model.lastError = error.localizedDescription }
+        model.reloadLibrary()
     }
 
     func restart() {
-        guard let session, let recording = pending else { return }
-        model.phase = .finishing
-        teardownUI(keepBubble: true)
-        uploader = nil
+        guard let session, let recording = pending, model.phase == .recording || model.phase == .paused else { return }
+        stopDiscarding(session, recording: recording, restart: true)
+    }
+
+    private func stopDiscarding(_ session: RecordingSession, recording: Recording, restart: Bool) {
+        do { try model.requestDiscard(recording) }
+        catch {
+            if !headless { Toast.show("Couldn't discard this take: \(error.localizedDescription)", isError: true) }
+            model.lastError = error.localizedDescription
+            return
+        }
+        let slowStop = beginStoppingUI(keepBubble: restart)
+        let upload = liveUpload
+        upload?.cancel()
+        liveUpload = nil
+        let finished = onFinished
         Task {
             await session.cancel()
-            self.session = nil
-            self.pending = nil
-            await self.discard(recording)
-            self.model.phase = .idle
-            if recording.mode == .area { self.presetArea = self.model.settings.lastArea?.cg }
-            self.start(window: recording.mode == .window ? session.request.window : nil)
-            self.presetArea = nil
+            await releaseCapture(slowStop)
+            if restart {
+                start(window: session.request.window, area: session.request.area)
+            } else {
+                Toast.show("Recording discarded")
+            }
+            await Publisher.shared.cancelLiveStart(for: recording.id)
+            let latest = model.recording(id: recording.id) ?? recording
+            if latest.upload.mayHaveRemote { await Publisher.shared.delete(latest) }
+            else { removeUnpublished(latest) }
+            if !restart { finished?(nil) }
         }
+    }
+
+    private func beginStoppingUI(keepBubble: Bool = false) -> Task<Void, Never> {
+        model.phase = .finishing
+        teardownUI(keepBubble: keepBubble)
+        return Task {
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            model.captureStopSlow = true
+            if !headless { Toast.show("Still stopping capture. If it stays stuck, reopen Reel to recover the clip.") }
+        }
+    }
+
+    private func releaseCapture(_ slowStop: Task<Void, Never>) async {
+        await camera.stopAndWait()
+        slowStop.cancel()
+        model.captureStopSlow = false
+        session = nil
+        pending = nil
+        model.phase = .idle
+    }
+
+    private func noteSaveFailure(_ recording: Recording, error: Error) {
+        guard model.recording(id: recording.id) != nil else { return }
+        model.captureSaveErrors[recording.id] = error.localizedDescription
+        if model.phase == .idle { model.lastError = error.localizedDescription }
+        if !headless { Toast.show("Couldn't save this clip: \(error.localizedDescription)", isError: true) }
     }
 
     private func teardownUI(keepBubble: Bool = false) {

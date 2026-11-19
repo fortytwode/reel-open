@@ -278,8 +278,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         case .countdown:
             menu.addItem(item("Cancel Countdown", #selector(cancelRecording)))
             return
-        case .preparing, .finishing:
-            menu.addItem(NSMenuItem(title: "Finishing…", action: nil, keyEquivalent: ""))
+        case .preparing:
+            menu.addItem(NSMenuItem(title: "Preparing recorder…", action: nil, keyEquivalent: ""))
+            return
+        case .finishing:
+            let message = model.captureStopSlow ? "Still stopping capture…" : "Stopping capture…"
+            menu.addItem(NSMenuItem(title: message, action: nil, keyEquivalent: ""))
+            if model.captureStopSlow { menu.addItem(item("Quit Reel", #selector(quit))) }
             return
         case .idle:
             break

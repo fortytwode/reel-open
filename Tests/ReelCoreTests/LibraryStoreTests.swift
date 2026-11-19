@@ -171,6 +171,9 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertThrowsError(try otherProcess.save(bound)) {
             guard case LibraryStore.IdentityError.recordingMissing = $0 else { return XCTFail("\($0)") }
         }
+        XCTAssertThrowsError(try otherProcess.updateCapture(bound, state: .complete, duration: 12)) {
+            guard case LibraryStore.IdentityError.recordingMissing = $0 else { return XCTFail("\($0)") }
+        }
         XCTAssertThrowsError(try otherProcess.bindForPublication(draft, ownerUID: "account-a")) {
             guard case LibraryStore.IdentityError.recordingMissing = $0 else { return XCTFail("\($0)") }
         }
@@ -182,6 +185,42 @@ final class LibraryStoreTests: XCTestCase {
         XCTAssertThrowsError(try otherProcess.bindForPublication(draft, ownerUID: "account-a"))
         try otherProcess.delete(bound)
         XCTAssertEqual(store.load(), [replacement])
+    }
+
+    func testFinalizingAnOldSnapshotPreservesLatestShareAndPublisher() throws {
+        var draft = Recording(title: "Finishing", createdAt: Date(timeIntervalSince1970: 1000),
+                              durationSeconds: 0, width: 2, height: 2, mode: .screen,
+                              folderName: "finishing", recordingNonce: ShareLinks.newRecordingNonce())
+        draft.captureState = .finalizing
+        try store.insert(draft)
+        let publisher = LibraryStore(root: root)
+        var sent = try publisher.bindForPublication(draft, ownerUID: "account-a")
+        sent.title = "New title"
+        sent.upload = .uploaded
+        sent.playback.hls = true
+        try publisher.save(sent)
+
+        let completed = try store.updateCapture(draft, state: .complete, duration: 42, hasThumbnail: true)
+        XCTAssertEqual(completed.captureState, .complete)
+        XCTAssertEqual(completed.durationSeconds, 42)
+        XCTAssertTrue(completed.hasThumbnail)
+        XCTAssertTrue(completed.matchesPublisher("account-a"))
+        XCTAssertEqual(completed.title, sent.title)
+        XCTAssertEqual(completed.upload, sent.upload)
+        XCTAssertTrue(completed.playback.hls)
+        XCTAssertEqual(store.load(), [completed])
+    }
+
+    func testDiscardIntentSurvivesAStaleSaveAndBlocksFinalization() throws {
+        var recording = rec("discard", 1000)
+        recording.captureState = .recording
+        try store.insert(recording)
+        _ = try store.requestDiscard(recording)
+        let staleSave = try store.save(recording)
+        XCTAssertEqual(staleSave.discardRequested, true)
+        XCTAssertFalse(staleSave.permitsPublishing(allowMeetingShare: true))
+        XCTAssertThrowsError(try store.updateCapture(recording, state: .complete, duration: 12))
+        XCTAssertEqual(LibraryStore(root: root).load().first?.discardRequested, true)
     }
 
     func testSaveRequiresAReadableManifestEvenWhenTheFolderRemains() throws {

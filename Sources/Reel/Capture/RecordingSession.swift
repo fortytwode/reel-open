@@ -132,6 +132,7 @@ final class RecordingSession: @unchecked Sendable {
         let wantsMic = request.audio.usesMic && request.microphone != nil
         writer = try SegmentedWriter(directory: segmentsDirectory, size: outputSize, fps: request.fps, audio: wantsMic || wantsSystem)
         writer.onSegment = { [weak self] entry, log in self?.onSegment?(entry, log) }
+        writer.onStorageError = { [weak self] error in self?.onFatalError?(error) }
         try writer.start()
 
         if let target {
@@ -177,9 +178,11 @@ final class RecordingSession: @unchecked Sendable {
             return clock.elapsed(now: Self.now())
         }
         await teardownCapture()
+        Log.capture.info("Screen and microphone detached")
         let tail: (start: Int64, samples: [Float])? = lock.withLock { mixer.drain(upToSeconds: end) }
         if let tail { writer.appendAudio(samples: tail.samples, startFrame: tail.start) }
         let log = try await writer.finish(endTime: end)
+        Log.writer.info("Final segment log saved")
         return RecordingResult(segmentsDirectory: segmentsDirectory, log: log, duration: end, size: outputSize)
     }
 

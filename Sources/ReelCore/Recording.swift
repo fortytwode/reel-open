@@ -152,6 +152,8 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
     // Added with live upload / sharing features; all decoded tolerantly.
     public var titleIsCustom: Bool = false
     public var captureState: CaptureState = .complete
+    /// Stops crash recovery and upload from reviving an explicitly discarded take.
+    public internal(set) var discardRequested: Bool?
     public var playback = PlaybackState()
     public var access = ShareAccess()
     public var trim: TrimRange?
@@ -165,8 +167,10 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
     public var meeting: MeetingDetails?
 
     public var isMeeting: Bool { meeting != nil }
-    public var allowsAutomaticCloudDelivery: Bool { !isMeeting }
-    public func permitsPublishing(allowMeetingShare: Bool = false) -> Bool { !isMeeting || allowMeetingShare }
+    public var allowsAutomaticCloudDelivery: Bool { permitsPublishing() }
+    public func permitsPublishing(allowMeetingShare: Bool = false) -> Bool {
+        discardRequested != true && (!isMeeting || allowMeetingShare)
+    }
 
     public var awaitsUploadOnSignIn: Bool {
         allowsAutomaticCloudDelivery && (upload == .localOnly || upload == .pending)
@@ -199,7 +203,7 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, shareID, recordingNonce, title, createdAt, durationSeconds, width, height, mode, folderName, upload, transcriptStatus, hasThumbnail
-        case titleIsCustom, captureState, playback, access, trim, trimmedUploaded, summary, chapters, summaryEngine, viewCount, meeting
+        case titleIsCustom, captureState, discardRequested, playback, access, trim, trimmedUploaded, summary, chapters, summaryEngine, viewCount, meeting
     }
 
     public init(from decoder: Decoder) throws {
@@ -219,6 +223,7 @@ public struct Recording: Codable, Equatable, Identifiable, Sendable {
         hasThumbnail = (try? c.decode(Bool.self, forKey: .hasThumbnail)) ?? false
         titleIsCustom = (try? c.decode(Bool.self, forKey: .titleIsCustom)) ?? false
         captureState = (try? c.decode(CaptureState.self, forKey: .captureState)) ?? .complete
+        discardRequested = try c.decodeIfPresent(Bool.self, forKey: .discardRequested)
         playback = (try? c.decode(PlaybackState.self, forKey: .playback)) ?? PlaybackState()
         access = (try? c.decode(ShareAccess.self, forKey: .access)) ?? ShareAccess()
         trim = try? c.decode(TrimRange.self, forKey: .trim)

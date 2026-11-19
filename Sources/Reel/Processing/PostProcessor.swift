@@ -9,16 +9,20 @@ enum PostProcessor {
     /// it into a plain faststart MP4 in a couple of seconds even for long recordings (no re-encode).
     static func assemble(segments dir: URL, log: SegmentLog, output: URL) async throws {
         let fm = FileManager.default
-        try? fm.removeItem(at: output)
-        let fragmented = dir.appendingPathComponent("assembled-fragmented.mp4")
-        try? fm.removeItem(at: fragmented)
+        let name = UUID().uuidString
+        let fragmented = dir.appendingPathComponent(".assembled-\(name).mp4")
+        let staged = output.deletingLastPathComponent().appendingPathComponent(".export-\(name).mp4")
         guard fm.createFile(atPath: fragmented.path, contents: nil) else { throw err("Could not create \(fragmented.path)") }
+        defer {
+            try? fm.removeItem(at: fragmented)
+            try? fm.removeItem(at: staged)
+            removeWriterLeftovers(next: staged)
+        }
         let handle = try FileHandle(forWritingTo: fragmented)
         do {
             try handle.write(contentsOf: Data(contentsOf: dir.appendingPathComponent(RemoteFile.initSegment.rawValue)))
             for s in log.segments.sorted(by: { $0.index < $1.index }) {
                 let url = dir.appendingPathComponent(s.file.rawValue)
-                guard fm.fileExists(atPath: url.path) else { continue }
                 try handle.write(contentsOf: Data(contentsOf: url, options: .mappedIfSafe))
             }
             try handle.close()
@@ -26,8 +30,12 @@ enum PostProcessor {
             try? handle.close()
             throw error
         }
-        defer { try? fm.removeItem(at: fragmented) }
-        try await export(AVURLAsset(url: fragmented), to: output, preset: AVAssetExportPresetPassthrough, range: nil)
+        try await export(AVURLAsset(url: fragmented), to: staged, preset: AVAssetExportPresetPassthrough, range: nil)
+        if fm.fileExists(atPath: output.path) {
+            _ = try fm.replaceItemAt(output, withItemAt: staged)
+        } else {
+            try fm.moveItem(at: staged, to: output)
+        }
     }
 
     /// Re-exports [trim.start, trim.end] exactly (re-encoded, so cuts aren't limited to keyframes).
