@@ -338,6 +338,8 @@ public struct RemoteMeta: Codable, Equatable, Sendable {
     public var expiresAt: Date?
     public var locked: Bool
     public var room: String
+    /// Omitted for older metadata and recordings whose details must stay out of link previews.
+    public var linkPreviewAllowed: Bool?
 
     public init(recording: Recording, status: String, ownerName: String?, app: String) {
         self.id = recording.shareID
@@ -359,6 +361,9 @@ public struct RemoteMeta: Codable, Equatable, Sendable {
         self.expiresAt = recording.access.expiresAt
         self.locked = recording.access.isProtected
         self.room = recording.room
+        if !recording.isMeeting, !locked, expiresAt == nil, status == "ready", playback.hls || playback.mp4 {
+            self.linkPreviewAllowed = true
+        }
     }
 
     // Encode optionals as explicit nulls so the viewer sees every key.
@@ -384,6 +389,7 @@ public struct RemoteMeta: Codable, Equatable, Sendable {
         try c.encode(expiresAt, forKey: .expiresAt)
         try c.encode(locked, forKey: .locked)
         try c.encode(room, forKey: .room)
+        try c.encodeIfPresent(linkPreviewAllowed, forKey: .linkPreviewAllowed)
     }
 }
 
