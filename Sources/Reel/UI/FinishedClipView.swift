@@ -43,7 +43,7 @@ struct FinishedClipView: View {
                         Button("Rename…") { title = clip.title; action = .rename }
                         Button("Trim…") { action = .trim }.disabled(!isPlayable(clip))
                         Button("Sharing settings…") { action = .sharing }
-                            .disabled(!isPlayable(clip) || model.uploadProgress[id] != nil)
+                            .disabled(!isPlayable(clip) || clip.upload == .uploading || model.uploadProgress[id] != nil)
                         if clip.awaitsUploadOnSignIn, isPlayable(clip), model.uploadProgress[id] == nil {
                             Button("Upload video") { Publisher.shared.publish(clip, copyLink: false) }
                                 .disabled(model.account == nil)
