@@ -11,6 +11,7 @@ import ScreenCaptureKit
 //   Sources/Reel/UI/WindowPicker.swift scripts/tests/WindowPickerSmoke.swift -o /tmp/reel-window-picker-smoke
 // /tmp/reel-window-picker-smoke
 // Add --desktop-hit-test-only to run without the other-Space fixture.
+// Add --exercise-select-button to check stale hover state; briefly repositions the pointer.
 // Add --show-picker to inspect the production picker with a generated, non-private fixture.
 // Add --window-activation-only to test exact activation during capture of a generated window.
 @main @MainActor
@@ -211,6 +212,7 @@ struct WindowPickerSmoke {
                     throw Failure(message: "Visible accessory-app window was excluded from the picker.")
                 }
                 try checkDesktopHitTesting(item, fixturePID: fixture.processIdentifier)
+                try await checkPersistentToolbar(item)
                 return
             }
             try await Task.sleep(for: .milliseconds(100))
@@ -258,6 +260,87 @@ struct WindowPickerSmoke {
             throw Failure(message: "Desktop pointer selected a fixture window behind an interactive cover.")
         }
         print("Desktop hit testing selected fixture \(item.id) through pass-through window \(coverID) and rejected the blocked point.")
+    }
+
+    static func checkPersistentToolbar(_ item: WindowPicker.Item) async throws {
+        guard let screen = NSScreen.screens.first else { throw Failure(message: "No fixture screen.") }
+        let frame = item.window.frame
+        let covered = NSPoint(x: frame.midX + frame.width / 4, y: screen.frame.height - frame.midY)
+        let exposed = NSPoint(x: covered.x, y: covered.y - 75)
+        let toolbar = NSPanel(contentRect: NSRect(x: covered.x - 60, y: covered.y - 24, width: 120, height: 48),
+                              styleMask: [.titled, .utilityWindow], backing: .buffered, defer: false)
+        toolbar.title = "Reel toolbar fixture"
+        toolbar.level = .floating
+        NSApp.activate(ignoringOtherApps: true)
+        toolbar.makeKeyAndOrderFront(nil)
+        defer { WindowPicker.cancelSelection(); toolbar.orderOut(nil) }
+
+        let selection = Task { await WindowPicker.pickOnDesktop(items: [item], keepingAbove: toolbar) }
+        let deadline = ContinuousClock.now + .seconds(2)
+        var foundOverlay: NSWindow?
+        while ContinuousClock.now < deadline {
+            let topWindow = NSWindow.windowNumber(at: exposed, belowWindowWithWindowNumber: 0)
+            foundOverlay = NSApp.windows.first { $0.windowNumber == topWindow && $0.frame == screen.frame }
+            if foundOverlay != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard let overlayPanel = foundOverlay, toolbar.isKeyWindow,
+              NSWindow.windowNumber(at: covered, belowWindowWithWindowNumber: 0) == toolbar.windowNumber,
+              NSWindow.windowNumber(at: covered, belowWindowWithWindowNumber: toolbar.windowNumber) == overlayPanel.windowNumber else {
+            throw Failure(message: "Desktop picker blocked the toolbar or took its keyboard focus.")
+        }
+        let overlay = overlayPanel.windowNumber
+        let items = [item.id: item]
+        let underlying = WindowPicker.desktopItem(at: covered, below: overlay, items: items)?.item.id
+        let throughToolbar = WindowPicker.desktopItem(at: covered, below: overlay, items: items, excluding: toolbar)?.item.id
+        let outsideToolbar = WindowPicker.desktopItem(at: exposed, below: overlay, items: items, excluding: toolbar)?.item.id
+        guard underlying == item.id, throughToolbar == nil, outsideToolbar == item.id else {
+            throw Failure(message: "Desktop picker did not protect the toolbar footprint while preserving exposed targets.")
+        }
+        toolbar.setFrameOrigin(NSPoint(x: toolbar.frame.minX, y: toolbar.frame.minY - 75))
+        guard WindowPicker.desktopItem(at: covered, below: overlay, items: items, excluding: toolbar)?.item.id == item.id,
+              WindowPicker.desktopItem(at: exposed, below: overlay, items: items, excluding: toolbar) == nil else {
+            throw Failure(message: "Desktop picker did not follow the toolbar after it moved.")
+        }
+        if CommandLine.arguments.contains("--exercise-select-button") {
+            try checkStaleSelectButton(in: overlayPanel, at: covered, primaryHeight: screen.frame.height)
+        }
+        guard WindowPicker.browseWindows(), toolbar.level == .floating,
+              NSApp.windows.contains(where: { $0.isVisible && $0.title == "Choose a window to record" }),
+              !WindowPicker.browseWindows() else {
+            throw Failure(message: "Toolbar Browse did not switch to the list and restore the toolbar level.")
+        }
+        WindowPicker.cancelSelection()
+        guard await selection.value == nil else { throw Failure(message: "Cancelling Browse selected a window.") }
+        print("Desktop picker preserved toolbar focus and hit testing, followed its live frame, and switched to Browse.")
+    }
+
+    static func checkStaleSelectButton(in overlay: NSWindow, at point: NSPoint, primaryHeight: CGFloat) throws {
+        let previous = NSEvent.mouseLocation
+        let toQuartz = { (point: NSPoint) in CGPoint(x: point.x, y: primaryHeight - point.y) }
+        guard CGWarpMouseCursorPosition(toQuartz(point)) == .success else {
+            throw Failure(message: "Could not position the pointer over the select-button fixture.")
+        }
+        defer { _ = CGWarpMouseCursorPosition(toQuartz(previous)) }
+        guard let view = overlay.contentView,
+              let hover = NSEvent.mouseEvent(with: .mouseMoved, location: overlay.convertPoint(fromScreen: point),
+                  modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime + 1, windowNumber: overlay.windowNumber,
+                  context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else {
+            throw Failure(message: "Could not update the fixture's desktop hover.")
+        }
+        view.mouseMoved(with: hover)
+        guard let button = view.subviews.compactMap({ $0 as? NSButton }).first, !button.isHidden else {
+            throw Failure(message: "Desktop hover did not expose the select button.")
+        }
+        let blocker = floatingFixture(frame: NSRect(x: point.x - 15, y: point.y - 15, width: 30, height: 30),
+                                      ignoresMouseEvents: false)
+        defer { blocker.orderOut(nil) }
+        guard NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: overlay.windowNumber) == blocker.windowNumber else {
+            throw Failure(message: "Small blocker did not cover the previously selectable point.")
+        }
+        button.performClick(nil)
+        guard button.isHidden else { throw Failure(message: "The select button used its stale target after the point was covered.") }
+        print("The select button rejected its former hover target after a small window covered the pointer.")
     }
 
     static func checkFrameTimeout() async throws {

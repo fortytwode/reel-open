@@ -246,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             desktopRecorder.makeKeyAndOrderFront(nil)
             return
         }
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 101),
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: RecorderPanel.desktopWidth, height: 101),
                             styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
         panel.title = "Reel Recorder"
         panel.titlebarAppearsTransparent = true
@@ -259,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         panel.delegate = self
         var hiddenWindows: [NSWindow] = []
+        var selectingOnDesktop = false
         panel.contentView = NSHostingView(rootView: RecorderPanel(model: model, desktop: true,
             start: { [weak panel] window, area in
                 panel?.close()
@@ -266,14 +267,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             },
             signIn: { [weak self, weak panel] in panel?.close(); self?.signIn() },
             copyLastLink: { [weak self] in self?.copyLastLink() },
-            setSelectingOnDesktop: { [weak self, weak panel] selecting in
-                if selecting {
+            recorderWindow: { [weak panel] in panel },
+            setDesktopSelection: { [weak self, weak panel] mode in
+                if let mode {
                     guard let self, let panel else { return }
+                    selectingOnDesktop = true
                     hiddenWindows = [self.workspaceWindow, self.libraryWindow, self.finishedClip].compactMap { $0 }.filter(\.isVisible)
                     hiddenWindows.forEach { $0.orderOut(nil) }
-                    panel.alphaValue = 0
-                    panel.ignoresMouseEvents = true
-                } else {
+                    panel.alphaValue = mode == .area ? 0 : 1
+                    panel.ignoresMouseEvents = mode == .area
+                } else if selectingOnDesktop {
+                    selectingOnDesktop = false
                     hiddenWindows.reversed().forEach { $0.orderFront(nil) }
                     hiddenWindows.removeAll()
                     guard let self, let panel else { return }
@@ -285,12 +289,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             setPanelHeight: { [weak panel] height in
                 guard let panel, height > 0, abs((panel.contentView?.bounds.height ?? 0) - height) > 0.5 else { return }
                 let origin = panel.frame.origin
-                panel.setContentSize(NSSize(width: 620, height: height))
+                panel.setContentSize(NSSize(width: RecorderPanel.desktopWidth, height: height))
                 panel.setFrameOrigin(origin)
             }))
         panel.contentView?.layoutSubtreeIfNeeded()
         if let size = panel.contentView?.fittingSize, size.height > 0 {
-            panel.setContentSize(NSSize(width: 620, height: size.height))
+            panel.setContentSize(NSSize(width: RecorderPanel.desktopWidth, height: size.height))
         }
         desktopRecorder = panel
         placeRecorderPanel(panel)

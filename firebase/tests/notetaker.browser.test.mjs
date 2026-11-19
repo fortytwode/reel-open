@@ -57,6 +57,85 @@ test('Notetaker launches separately without capture and legacy meeting links rem
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
 
+test('the tab handoff asks for a tab first and keeps the saved recording mode', async () => {
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage();
+    await page.route('https://**', route => route.abort());
+    await page.addInitScript(() => {
+      const key = 'reel-state:local:reel-settings';
+      if (!localStorage.getItem(key)) {
+        localStorage.setItem(key, JSON.stringify({ mode: 'camera', cameraEnabled: true, audio: 'micAndSystem', countdownSeconds: 0 }));
+      }
+      window.captureCalls = [];
+      window.chosenSurface = 'window';
+      Notification.requestPermission = async () => { window.captureCalls.push('notification'); return 'denied'; };
+      navigator.mediaDevices.getUserMedia = async () => { window.captureCalls.push('camera/mic'); throw new Error('unexpected device'); };
+      if (window.documentPictureInPicture) {
+        window.documentPictureInPicture.requestWindow = async () => { window.captureCalls.push('pip'); throw new Error('PiP unavailable'); };
+      }
+      navigator.mediaDevices.getDisplayMedia = async (options) => {
+        window.captureCalls.push({ options, activation: navigator.userActivation.isActive });
+        if (window.chosenSurface !== 'browser') {
+          const video = { getSettings: () => ({ displaySurface: window.chosenSurface }), stop: () => window.captureCalls.push('stop video') };
+          const audio = { stop: () => window.captureCalls.push('stop audio') };
+          return { getVideoTracks: () => [video], getTracks: () => [video, audio] };
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = 320; canvas.height = 180;
+        const stream = canvas.captureStream(30);
+        const track = stream.getVideoTracks()[0];
+        const getSettings = track.getSettings.bind(track);
+        track.getSettings = () => ({ ...getSettings(), displaySurface: 'browser' });
+        const ctx = canvas.getContext('2d');
+        let frame = 0;
+        setInterval(() => {
+          ctx.fillStyle = frame++ % 2 ? '#435da0' : '#396954';
+          ctx.fillRect(0, 0, 320, 180);
+        }, 33);
+        window.fixtureTabTrack = track;
+        return stream;
+      };
+    });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    await page.goto(`${origin}/record?source=tab`);
+    const chooseTab = page.getByRole('button', { name: 'Choose a tab' });
+    await chooseTab.waitFor();
+    assert.equal(await page.locator('#mode-setting').isVisible(), false);
+    assert.deepEqual(await page.evaluate(() => window.captureCalls), []);
+
+    await chooseTab.click();
+    await page.locator('#toast').filter({ hasText: 'Choose a browser tab' }).waitFor();
+    const [picker, ...closedTracks] = await page.evaluate(() => window.captureCalls);
+    assert.equal(picker.activation, true);
+    assert.equal(picker.options.video.displaySurface, 'browser');
+    assert.equal(picker.options.monitorTypeSurfaces, 'exclude');
+    assert.equal(picker.options.systemAudio, 'exclude');
+    assert.ok(picker.options.audio, 'tab audio remains available when requested');
+    assert.deepEqual(closedTracks, ['stop video', 'stop audio']);
+    assert.equal(await page.evaluate(() => window.__reel.state().recording), null);
+
+    await page.locator('#audio').selectOption('none');
+    await page.locator('#camera-on').uncheck();
+    await page.evaluate(() => { window.chosenSurface = 'browser'; window.captureCalls = []; });
+    await chooseTab.click();
+    await page.waitForFunction(() => window.__reel.state().phase === 'recording');
+    assert.equal(await page.evaluate(() => window.__reel.state().recording.mode), 'window');
+    assert.equal(await page.evaluate(() => window.captureCalls[0].options.audio), false);
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#cancel').click();
+    await chooseTab.waitFor();
+    assert.equal(await page.evaluate(() => window.fixtureTabTrack.readyState), 'ended');
+
+    await page.goto(`${origin}/record`);
+    await page.getByRole('button', { name: 'Start recording' }).waitFor();
+    assert.equal(await page.locator('#mode').inputValue(), 'camera');
+    await page.goto(`${origin}/record?source=tab&mode=meeting`);
+    await page.getByRole('button', { name: 'Start meeting recording' }).waitFor();
+  } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+});
+
 
 test('signed-in notes use the scoped token and clear on account change', async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
