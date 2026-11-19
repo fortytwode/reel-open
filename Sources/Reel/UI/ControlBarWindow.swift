@@ -5,15 +5,15 @@ import SwiftUI
 /// Floating recording controls (excluded from the recording with the rest of Reel's windows).
 /// With drawing on, a tool palette (pen, highlighter, arrow, colours, undo, clear) appears.
 final class ControlBarWindow: NSPanel {
-    static let compact = NSSize(width: 340, height: 48)
-    static let expanded = NSSize(width: 340, height: 100)
-
-    init() {
-        super.init(contentRect: NSRect(origin: .zero, size: Self.compact), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    init(showsWindow: Bool) {
+        let size = NSSize(width: showsWindow ? 588 : 340, height: 48)
+        super.init(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        title = "Reel Recording Controls"
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
         level = .floating
+        hidesOnDeactivate = false
         isMovableByWindowBackground = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         isReleasedWhenClosed = false
@@ -31,7 +31,7 @@ final class ControlBarWindow: NSPanel {
 
     /// Grows upwards to show the drawing palette, keeping the bar where it is.
     func setExpanded(_ on: Bool) {
-        let size = on ? Self.expanded : Self.compact
+        let size = NSSize(width: frame.width, height: on ? 100 : 48)
         guard frame.size != size else { return }
         setFrame(NSRect(origin: frame.origin, size: size), display: true, animate: false)
     }
@@ -58,6 +58,23 @@ private struct ControlBarView: View {
                         .foregroundStyle(.white)
                         .frame(minWidth: 44, alignment: .leading)
                 }
+            }
+            if let target = model.recordingWindowLabel {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(target)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .help(target)
+                    if let warning = model.recordingWindowFocus?.warning {
+                        Text(warning)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.orange)
+                            .lineLimit(1)
+                            .help(warning)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider().frame(height: 20).overlay(Color.white.opacity(0.2))
             button(model.phase == .paused ? "play.fill" : "pause.fill", help: "Pause / resume (\(model.settings.pauseShortcut.display))") { RecorderController.shared.pauseResume() }

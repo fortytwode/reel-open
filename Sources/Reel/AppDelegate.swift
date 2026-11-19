@@ -332,12 +332,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         popover = nil
     }
 
+    /// Only Reel's setup windows should yield to the target. The recording controls stay visible.
+    func dismissWindowRecordingSetup() {
+        popover?.performClose(nil)
+        desktopRecorder?.close()
+        finishedClip?.close()
+        workspaceWindow?.orderOut(nil)
+        libraryWindow?.orderOut(nil)
+        settingsWindow?.orderOut(nil)
+        meetingsWindow?.orderOut(nil)
+    }
+
     private func updateStatusButton() {
         guard let button = statusItem?.button else { return }
+        button.toolTip = model.recordingWindowLabel
         switch model.phase {
         case .recording, .paused:
             let t = Int(RecorderController.shared.elapsed)
-            button.image = NSImage(systemSymbolName: model.phase == .paused ? "pause.circle.fill" : "record.circle.fill", accessibilityDescription: "Recording")
+            let paused = model.phase == .paused
+            button.image = NSImage(systemSymbolName: paused ? "pause.circle.fill" : "record.circle.fill",
+                                   accessibilityDescription: model.recordingWindowLabel ?? (paused ? "Recording paused" : "Recording"))
             button.contentTintColor = model.phase == .paused ? .systemOrange : .systemRed
             button.title = String(format: " %d:%02d", t / 60, t % 60)
         case .countdown(let n):
@@ -364,6 +378,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         let s = model.settings
         switch model.phase {
         case .recording, .paused:
+            if let target = model.recordingWindowLabel {
+                menu.addItem(NSMenuItem(title: target, action: nil, keyEquivalent: ""))
+                if model.recordingWindowFocus == .accessibilityRequired {
+                    menu.addItem(item("Open Accessibility Settings…", #selector(openWindowFocusSettings)))
+                } else if let warning = model.recordingWindowFocus?.warning {
+                    menu.addItem(NSMenuItem(title: warning, action: nil, keyEquivalent: ""))
+                }
+                menu.addItem(.separator())
+            }
             menu.addItem(item("Meetings", #selector(showMeetingWorkspace)))
             menu.addItem(item("Stop and Share  (\(s.shortcut.display))", #selector(stopRecording)))
             menu.addItem(item(model.phase == .paused ? "Resume  (\(s.pauseShortcut.display))" : "Pause  (\(s.pauseShortcut.display))", #selector(pauseResume)))
@@ -477,6 +500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         quit.keyEquivalent = "q"
         menu.addItem(quit)
     }
+
+    @objc private func openWindowFocusSettings() { Permissions.openSettings("Privacy_Accessibility") }
 
     private func item(_ title: String, _ action: Selector) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: "")

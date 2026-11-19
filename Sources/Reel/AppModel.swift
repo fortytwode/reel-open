@@ -32,6 +32,8 @@ final class AppModel: ObservableObject {
     }
     private(set) var accountGeneration: UInt64 = 0
     @Published var phase: Phase = .idle
+    @Published var recordingWindowName: String?
+    @Published var recordingWindowFocus: WindowActivation.Result?
     @Published var uploadProgress: [String: Double] = [:]
     @Published var captureSaveErrors: [String: String] = [:]
     @Published var captureStopSlow = false
@@ -63,6 +65,15 @@ final class AppModel: ObservableObject {
     }
 
     var isBusy: Bool { phase != .idle }
+
+    var recordingWindowLabel: String? {
+        guard let recordingWindowName else { return nil }
+        switch phase {
+        case .recording: return "Recording \(recordingWindowName)"
+        case .paused: return "Paused \(recordingWindowName)"
+        default: return nil
+        }
+    }
 
     func effectiveSettings() -> ReelSettings {
         guard meetingMode else { return settings }

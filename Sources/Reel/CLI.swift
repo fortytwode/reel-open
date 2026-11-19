@@ -7,7 +7,8 @@ import ScreenCaptureKit
 ///   Reel --version | --permissions | --list-devices
 ///   Reel --transcribe <video.mp4> [--language <locale>] [--cloud-meeting]
 ///        (cloud mode sends audio to OpenAI and returns transcript plus AI notes; requires sign-in)
-///   Reel --record-test <seconds> [--meeting] [--mode screen|window|area|camera] [--area x,y,w,h] [--window-app <name>]
+///   Reel --record-test <seconds> [--meeting] [--mode screen|window|area|camera] [--area x,y,w,h]
+///        [--window-app <name> | --window-id <id>] [--countdown <seconds>]
 ///        [--audio micOnly|systemOnly|micAndSystem|none] [--no-camera] [--no-upload] [--no-live]
 ///        [--pause-at <s> --pause-for <s>] [--draw] [--clicks] [--background none|blur|image]
 ///        [--takes <count> --no-upload]              (starts each take as soon as the recorder is ready)
@@ -36,6 +37,8 @@ enum CLI {
         var pauseAt: Double?
         var pauseFor: Double = 1
         var windowApp: String?
+        var windowID: CGWindowID?
+        var countdown = 0
         var area: CGRect?
         var draw = false
         var clicks = false
@@ -314,6 +317,15 @@ enum CLI {
         t.pauseAt = value("--pause-at").flatMap(Double.init)
         if let p = value("--pause-for").flatMap(Double.init) { t.pauseFor = p }
         t.windowApp = value("--window-app")
+        if args.contains("--window-id") {
+            guard t.mode == .window, t.windowApp == nil,
+                  let id = value("--window-id").flatMap(CGWindowID.init), id != kCGNullWindowID else { return nil }
+            t.windowID = id
+        }
+        if args.contains("--countdown") {
+            guard let seconds = value("--countdown").flatMap(Int.init), (0...10).contains(seconds) else { return nil }
+            t.countdown = seconds
+        }
         if let a = value("--area")?.split(separator: ",").compactMap({ Double($0) }), a.count == 4 {
             t.area = CGRect(x: a[0], y: a[1], width: a[2], height: a[3])
         }
@@ -364,8 +376,9 @@ enum CLI {
         model.settings.copyLinkOnStop = test.upload
         model.settings.highlightClicks = test.clicks || model.settings.highlightClicks
         model.settings.cameraBackground = test.background
+        model.settings.countdownSeconds = test.countdown
         let rc = RecorderController.shared
-        rc.skipCountdown = true
+        rc.skipCountdown = test.countdown == 0
         rc.presetArea = test.area
         let started = Date()
         var checks: [String: Any] = [:]
@@ -419,7 +432,11 @@ enum CLI {
         Task { @MainActor in
             guard await signInFromEnvironment() else { exit(2) }
             var window: SCWindow?
-            if test.mode == .window, let name = test.windowApp {
+            if let id = test.windowID {
+                let content = try? await ScreenCapture.shareableContent()
+                window = content.map(WindowPicker.candidates)?.first { $0.id == id }?.window
+                if window == nil { print("no selectable window with ID \(id)"); exit(1) }
+            } else if test.mode == .window, let name = test.windowApp {
                 let content = try? await ScreenCapture.shareableContent()
                 window = content.map(WindowPicker.candidates)?.first { $0.app.localizedCaseInsensitiveContains(name) }?.window
                 if window == nil { print("no window for app \(name)"); exit(1) }
@@ -427,8 +444,10 @@ enum CLI {
             for take in 1...test.takes {
                 guard rc.start(window: window, focusWindowOnStart: test.takes == 1) else { exit(1) }
                 // Wait for the actual recording. onFinished reports startup failures.
+                var countdownObserved = false
                 for _ in 0..<300 where model.phase != .recording {
                     if model.phase == .idle { return }
+                    if case .countdown = model.phase { countdownObserved = true }
                     try? await Task.sleep(for: .milliseconds(50))
                 }
                 guard model.phase == .recording else { exit(1) }
@@ -440,6 +459,13 @@ enum CLI {
                     try? await Task.sleep(for: .seconds(max(0, test.seconds - at)))
                 } else {
                     try? await Task.sleep(for: .seconds(test.seconds))
+                }
+                if let window, let owner = window.owningApplication, test.windowID != nil {
+                    checks["countdownObserved"] = countdownObserved
+                    checks["selectedWindowOwnerFrontmost"] = NSWorkspace.shared.frontmostApplication?.processIdentifier == owner.processID
+                    checks["recordingWindowLabel"] = model.recordingWindowLabel as Any? ?? NSNull()
+                    checks["recordingControlsVisible"] = NSApp.windows.contains { $0 is ControlBarWindow && $0.isVisible }
+                    checks["windowFocusResult"] = model.recordingWindowFocus.map { String(describing: $0) } as Any? ?? NSNull()
                 }
                 rc.stop()
                 if take < test.takes {

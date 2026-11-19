@@ -6,19 +6,46 @@ import os
 /// Raises only a uniquely identified window; AX does not expose an SCWindow's window ID.
 @MainActor
 enum WindowActivation {
-    enum Result { case activated, accessibilityRequired, unavailable, cancelled }
+    enum Result: Equatable {
+        case activated, accessibilityRequired, unavailable, cancelled
+
+        var warning: String? {
+            switch self {
+            case .accessibilityRequired: "Allow Accessibility to focus the window"
+            case .unavailable: "Click the selected window to focus it"
+            case .activated, .cancelled: nil
+            }
+        }
+    }
     private static let log = Logger(subsystem: Log.subsystem, category: "window_activation")
+
+    private static func onScreenWindowIDs(ownerPID: pid_t) -> [CGWindowID] {
+        let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return infos.compactMap { info in
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ownerPID,
+                  (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { return nil }
+            return (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+        }
+    }
+
+    static func isFrontmost(windowID: CGWindowID, ownerPID: pid_t) -> Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == ownerPID &&
+            onScreenWindowIDs(ownerPID: ownerPID).first == windowID
+    }
 
     static func activate(_ selected: SCWindow, stillRecording: () -> Bool) async -> Result {
         guard stillRecording() else { return .cancelled }
+        guard let owner = selected.owningApplication,
+              let app = NSRunningApplication(processIdentifier: owner.processID) else {
+            return .unavailable
+        }
         guard AXIsProcessTrusted() else {
+            if isFrontmost(windowID: selected.windowID, ownerPID: owner.processID) { return .activated }
             log.info("Window activation: accessibility required")
             return .accessibilityRequired
         }
-        guard let owner = selected.owningApplication,
-              let app = NSRunningApplication(processIdentifier: owner.processID),
-              let infos = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            log.info("Window activation: owner or window list unavailable")
+        guard let infos = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            log.info("Window activation: window list unavailable")
             return .unavailable
         }
         let owned = infos.filter {
@@ -99,19 +126,30 @@ enum WindowActivation {
             log.info("Window activation: ambiguous match or deadline")
             return .unavailable
         }
+        let window = matches[0]
         guard stillRecording() else { return .cancelled }
-        let firstRaise = AXUIElementPerformAction(matches[0], kAXRaiseAction as CFString)
+        // Place the exact window first before letting the app take activation.
+        let firstRaise = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         guard firstRaise == .success else {
             log.info("Window activation: first raise failed code=\(firstRaise.rawValue)")
             return .unavailable
         }
         guard stillRecording() else { return .cancelled }
         if !app.isActive {
-            NSApp.yieldActivation(to: app)
-            _ = app.activate(options: [])
+            if NSApp.isActive {
+                NSApp.yieldActivation(to: app)
+                _ = app.activate(from: .current, options: [])
+            }
+            // A capture can start from a menu or shortcut when Reel isn't the active app.
+            // Accessibility can hand off to the owner of the already matched window.
+            if !app.isActive {
+                let result = AXUIElementSetAttributeValue(application, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+                log.info("Window activation: AX frontmost code=\(result.rawValue)")
+            }
         }
         // Activation state is updated on a later main run-loop turn.
-        for _ in 0..<20 {
+        let activationDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < activationDeadline {
             guard stillRecording() else { return .cancelled }
             if app.isActive { break }
             try? await Task.sleep(for: .milliseconds(50))
@@ -126,7 +164,7 @@ enum WindowActivation {
         var currentWindows: CFTypeRef?
         guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &currentWindows) == .success,
               let currentAX = currentWindows as? [AXUIElement],
-              currentAX.contains(where: { CFEqual($0, matches[0]) }),
+              currentAX.contains(where: { CFEqual($0, window) }),
               let currentCG = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
               currentCG.contains(where: {
                   ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == owner.processID &&
@@ -136,12 +174,40 @@ enum WindowActivation {
             return .unavailable
         }
         guard stillRecording() else { return .cancelled }
-        let finalRaise = AXUIElementPerformAction(matches[0], kAXRaiseAction as CFString)
+        // Some apps raise a window in their stacking order without giving it keyboard focus.
+        var canSetFocus: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(application, kAXFocusedWindowAttribute as CFString, &canSetFocus) == .success,
+           canSetFocus.boolValue {
+            _ = AXUIElementSetAttributeValue(application, kAXFocusedWindowAttribute as CFString, window)
+        }
+        let finalRaise = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         guard finalRaise == .success else {
             log.info("Window activation: final raise failed code=\(finalRaise.rawValue)")
             return .unavailable
         }
-        log.info("Window activation: activated")
-        return .activated
+        AXUIElementSetMessagingTimeout(application, 0.2)
+        let focusDeadline = ContinuousClock.now + .seconds(1)
+        while ContinuousClock.now < focusDeadline {
+            guard stillRecording() else { return .cancelled }
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == owner.processID {
+                let visible = onScreenWindowIDs(ownerPID: owner.processID)
+                if visible.contains(selected.windowID) {
+                    var focused: CFTypeRef?
+                    let focusStatus = AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &focused)
+                    // Screen sharing can put an auxiliary WindowServer surface above the
+                    // focused window, even though the selected window has keyboard focus.
+                    let confirmed = focusStatus == .success
+                        ? focused.map { CFEqual($0, window) } == true
+                        : visible.first == selected.windowID
+                    if confirmed {
+                        log.info("Window activation: selected window is focused")
+                        return .activated
+                    }
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        log.info("Window activation: selected window did not become frontmost")
+        return .unavailable
     }
 }
