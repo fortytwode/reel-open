@@ -77,7 +77,10 @@ final class HotKeys {
     }
 
     func registerMain(_ shortcut: Shortcut) {
-        register(.startStop, shortcut) { RecorderController.shared.toggle() }
+        register(.startStop, shortcut) {
+            if let app = NSApp.delegate as? AppDelegate { app.handleRecordShortcut() }
+            else { RecorderController.shared.toggle() }
+        }
     }
 
     func registerRecordingKeys(_ settings: ReelSettings) {

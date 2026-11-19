@@ -5,18 +5,25 @@ import AppKit
 /// selection in AppKit global coordinates and the screen it is on.
 @MainActor
 enum AreaSelector {
+    private static var cancelActiveSelection: (() -> Void)?
+
+    static func cancelSelection() { cancelActiveSelection?() }
+
     static func select(previous: CGRect?) async -> (screen: NSScreen, rect: CGRect)? {
-        await withCheckedContinuation { (c: CheckedContinuation<(screen: NSScreen, rect: CGRect)?, Never>) in
+        guard cancelActiveSelection == nil, !NSScreen.screens.isEmpty else { return nil }
+        return await withCheckedContinuation { (c: CheckedContinuation<(screen: NSScreen, rect: CGRect)?, Never>) in
             var windows: [AreaWindow] = []
             var finished = false
             let finish: ((NSScreen, CGRect)?) -> Void = { result in
                 guard !finished else { return }
                 finished = true
+                cancelActiveSelection = nil
                 windows.forEach { $0.orderOut(nil) }
                 windows.removeAll()
                 NSCursor.arrow.set()
                 c.resume(returning: result.map { (screen: $0.0, rect: $0.1) })
             }
+            cancelActiveSelection = { finish(nil) }
             for screen in NSScreen.screens {
                 let w = AreaWindow(screen: screen, previous: previous, finish: finish)
                 windows.append(w)

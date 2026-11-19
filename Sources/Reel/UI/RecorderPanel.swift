@@ -1,20 +1,24 @@
 import AVFoundation
 import ReelCore
+import ScreenCaptureKit
 import SwiftUI
 
-/// The idle menu bar popover, laid out like Loom's recorder: live camera preview, what to record,
-/// camera and mic (with a level meter), system audio, recording settings, and one big record button.
-/// While recording, the status item shows the plain control menu instead.
+/// Preflight controls shared between the desktop recorder and the meeting popover.
 struct RecorderPanel: View {
     @ObservedObject var model: AppModel
-    var start: () -> Void
+    var desktop = false
+    var start: (SCWindow?, CGRect?) -> Void
     var signIn: () -> Void
     var copyLastLink: () -> Void
 
     @State private var devices: (cameras: [DeviceInfo], microphones: [DeviceInfo], defaultMicID: String?)?
     @State private var previewSession: AVCaptureSession?
     @State private var processedFrame: CVPixelBuffer?
-    @State private var showSettings = false
+    @State private var selectedWindow: SCWindow?
+    @State private var selectedArea: CGRect?
+    @State private var selectionTask: Task<Void, Never>?
+    @State private var selectionError: String?
+    @State private var microphoneAccessDenied = false
     @StateObject private var micLevel = MicLevelMonitor()
 
     private var s: ReelSettings { model.effectiveSettings() }
@@ -28,47 +32,197 @@ struct RecorderPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            modePicker
-            if model.meetingMode {
-                meetingForm
-                meetingRecordButton
+        Group {
+            if desktop {
+                desktopControls
             } else {
-                cameraPreview
-                modeTiles
-                if NSScreen.screens.count > 1 && s.mode != .camera { displayRow }
-                cameraRow
-                micRow
-                systemAudioRow
-                recordButton
-                settingsSection
+                VStack(alignment: .leading, spacing: 12) {
+                    header
+                    meetingForm
+                    meetingRecordButton
+                    footer
+                }
+                .padding(16)
+                .frame(width: 360)
             }
-            footer
         }
-        .padding(16)
-        .frame(width: 360)
+        .onChange(of: s.mode) { _, _ in selectionError = nil }
         .task(id: model.meetingMode) { await loadRecordingDevices() }
         .task(id: PreviewKey(on: cameraOn && devices != nil, cameraID: s.cameraID)) { await restartPreview() }
-        .task(id: MicKey(on: s.audio.usesMic && !model.meetingMode && devices != nil, micID: s.microphoneID)) { restartMeter() }
+        .task(id: MicKey(on: s.audio.usesMic && !model.meetingMode && devices != nil, micID: s.microphoneID)) { await restartMeter() }
         .onDisappear {
+            selectionTask?.cancel()
             RecorderController.shared.stopPanelPreview()
             micLevel.stop()
         }
     }
 
-    // MARK: Sections
-
-    private var modePicker: some View {
-        Picker("Recording type", selection: $model.meetingMode) {
-            Text("Recording").tag(false)
-            Text("Meeting").tag(true)
+    private var desktopControls: some View {
+        HStack(alignment: .top, spacing: 16) {
+            if cameraOn {
+                cameraPreview.frame(width: 148)
+                    .accessibilityLabel("Camera preview")
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Capture mode", selection: $model.settings.mode) {
+                    Text("Display").tag(CaptureMode.screen)
+                    Text("Window").tag(CaptureMode.window)
+                    Text("Area").tag(CaptureMode.area)
+                    Text("Camera").tag(CaptureMode.camera)
+                }
+                .pickerStyle(.segmented)
+                sourceControls
+                if let selectionError {
+                    Text(selectionError).font(.caption).foregroundStyle(.secondary)
+                }
+                Divider()
+                HStack(alignment: .top, spacing: 12) {
+                    cameraRow.frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 3) {
+                        micRow
+                        if microphoneAccessDenied && s.audio.usesMic {
+                            Text("Microphone access is off")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if !s.audio.usesMic {
+                            Text(s.audio.usesSystem ? "Computer sound only" : "Audio off")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Menu {
+                        Toggle("Record computer sound", isOn: Binding(get: { s.audio.usesSystem }, set: setSystemAudio))
+                        Button("Settings…") { (NSApp.delegate as? AppDelegate)?.showSettings() }
+                        Button("Meetings and notes") { (NSApp.delegate as? AppDelegate)?.showMeetingWorkspace() }
+                        if model.account == nil { Button("Sign in", action: signIn) }
+                    } label: {
+                        Label("More options", systemImage: "ellipsis.circle").labelStyle(.iconOnly)
+                    }
+                    .fixedSize()
+                }
+                HStack {
+                    if s.mode == .window {
+                        Text("Includes tabs you switch to in this window.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(action: startDesktopRecording) {
+                        Label("Record", systemImage: "record.circle.fill").font(.headline)
+                            .padding(.horizontal, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!desktopReady)
+                }
+            }
         }
-        .pickerStyle(.segmented)
-        .onChange(of: model.meetingMode) { _, meeting in
-            if !meeting { model.meetingCalendarReference = nil; model.meetingCalendarOccurrenceID = nil }
+        .padding(16)
+        .frame(width: 620)
+        .disabled(selectionTask != nil)
+    }
+
+    private var desktopReady: Bool {
+        guard model.phase == .idle else { return false }
+        switch s.mode {
+        case .window: return selectedWindow != nil
+        case .area: return selectedArea != nil
+        case .camera: return selectedCamera != nil
+        case .screen: return true
         }
     }
+
+    private func startDesktopRecording() {
+        guard desktopReady else { return }
+        if s.mode == .area, let selectedArea {
+            guard NSScreen.screens.contains(where: { $0.frame.contains(selectedArea) }) else {
+                self.selectedArea = nil
+                selectionError = "That display is unavailable. Select a new area."
+                return
+            }
+            start(nil, selectedArea)
+        } else if s.mode == .window, let selectedWindow {
+            selectionTask = Task {
+                defer { selectionTask = nil }
+                do {
+                    let current = try await ScreenCapture.refreshedWindow(selectedWindow)
+                    guard !Task.isCancelled, model.phase == .idle, s.mode == .window else { return }
+                    start(current, nil)
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.selectedWindow = nil
+                    selectionError = "That window closed or became unavailable. Choose another window."
+                }
+            }
+        } else {
+            start(nil, nil)
+        }
+    }
+
+    @ViewBuilder private var sourceControls: some View {
+        switch s.mode {
+        case .window:
+            HStack {
+                Text(selectedWindow.map { $0.title.flatMap { $0.isEmpty ? nil : $0 } ?? $0.owningApplication?.applicationName ?? "Selected window" }
+                     ?? "Choose a window")
+                    .font(.callout.weight(.medium)).lineLimit(1)
+                Spacer()
+                Button(selectedWindow == nil ? "Select on desktop" : "Change window") { selectWindow(onDesktop: true) }
+                Button("Browse windows") { selectWindow(onDesktop: false) }
+            }
+        case .area:
+            HStack {
+                Text(selectedArea.map { "\(Int($0.width)) × \(Int($0.height)) area" } ?? "Choose an area")
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Button(selectedArea == nil ? "Select area" : "Change area") { selectArea() }
+            }
+        case .screen:
+            displayRow
+        case .camera:
+            Label("Camera only", systemImage: "person.crop.square").font(.callout.weight(.medium))
+        }
+    }
+
+    private func selectWindow(onDesktop: Bool) {
+        selectionError = nil
+        selectionTask = Task {
+            defer { selectionTask = nil }
+            do {
+                let content = try await ScreenCapture.shareableContent()
+                guard !Task.isCancelled, model.phase == .idle, s.mode == .window else { return }
+                let items = WindowPicker.candidates(content)
+                if onDesktop && !items.contains(where: { $0.window.isOnScreen }) {
+                    selectionError = "No windows are visible on this desktop. Browse windows to see other Spaces."
+                    return
+                }
+                let target = if onDesktop { await WindowPicker.pickOnDesktop(items: items) } else { await WindowPicker.pick(items: items) }
+                guard !Task.isCancelled, model.phase == .idle, s.mode == .window else { return }
+                if let target {
+                    selectedWindow = try await ScreenCapture.refreshedWindow(target)
+                    guard !Task.isCancelled, model.phase == .idle, s.mode == .window else { selectedWindow = nil; return }
+                } else if items.isEmpty {
+                    selectionError = "No recordable windows are open."
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                selectedWindow = nil
+                selectionError = "The window is unavailable. Check Screen Recording access or choose another window."
+            }
+        }
+    }
+
+    private func selectArea() {
+        selectionError = nil
+        selectionTask = Task {
+            defer { selectionTask = nil }
+            guard let newArea = await AreaSelector.select(previous: s.lastArea?.cg), !Task.isCancelled,
+                  model.phase == .idle, s.mode == .area else { return }
+            selectedArea = newArea.rect
+            model.settings.lastArea = Rect(newArea.rect)
+        }
+    }
+
+    // MARK: Sections
 
     private var meetingForm: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -95,7 +249,7 @@ struct RecorderPanel: View {
     }
 
     private var meetingRecordButton: some View {
-        Button(action: start) {
+        Button { start(nil, nil) } label: {
             HStack(spacing: 8) {
                 Image(systemName: "record.circle")
                 Text("Start Meeting Recording").font(.headline)
@@ -134,7 +288,11 @@ struct RecorderPanel: View {
                 VStack(spacing: 8) {
                     Image(systemName: "video.slash").font(.system(size: 26))
                     if cameraOn {
-                        Text(devices?.cameras.isEmpty == true ? "No camera found" : "Starting camera…").font(.callout)
+                        if [.denied, .restricted].contains(AVCaptureDevice.authorizationStatus(for: .video)) {
+                            Text("Camera access is off").font(.callout)
+                        } else {
+                            Text(devices?.cameras.isEmpty == true ? "No camera found" : "Starting camera…").font(.callout)
+                        }
                     } else {
                         Text("Camera is off").font(.callout)
                         Button("Turn camera on") { setCamera(selectedCamera?.id) }
@@ -146,25 +304,6 @@ struct RecorderPanel: View {
             }
         }
         .frame(height: 186)
-    }
-
-    private var modeTiles: some View {
-        HStack(spacing: 8) {
-            ForEach(CaptureMode.allCases, id: \.self) { mode in
-                Button { model.settings.mode = mode } label: {
-                    VStack(spacing: 5) {
-                        Image(systemName: symbol(for: mode)).font(.system(size: 18))
-                        Text(mode.label).font(.caption).lineLimit(1).minimumScaleFactor(0.8)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(s.mode == mode ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05)))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(s.mode == mode ? Color.accentColor : .clear, lineWidth: 1.5))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(mode.label)
-            }
-        }
     }
 
     private var displayRow: some View {
@@ -219,73 +358,10 @@ struct RecorderPanel: View {
         }
     }
 
-    private var systemAudioRow: some View {
-        row(symbol: s.audio.usesSystem ? "speaker.wave.2.fill" : "speaker.slash", on: s.audio.usesSystem) {
-            Text("Record computer sound").frame(maxWidth: .infinity, alignment: .leading)
-        } trailing: {
-            Toggle("", isOn: Binding(get: { s.audio.usesSystem }, set: { setSystemAudio($0) }))
-                .toggleStyle(.switch).controlSize(.mini).labelsHidden().help("System audio on / off")
-        }
-    }
-
-    private var recordButton: some View {
-        Button(action: start) {
-            HStack(spacing: 8) {
-                Image(systemName: "record.circle")
-                Text("Start Recording").font(.headline)
-                Spacer()
-                Text(s.shortcut.display).font(.callout).opacity(0.8)
-            }
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .foregroundStyle(.white)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.red))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .keyboardShortcut(.defaultAction)
-    }
-
-    private var settingsSection: some View {
-        DisclosureGroup(isExpanded: $showSettings) {
-            VStack(spacing: 8) {
-                labeled("Countdown") {
-                    Picker("", selection: $model.settings.countdownSeconds) {
-                        Text("Off").tag(0)
-                        ForEach([1, 3, 5], id: \.self) { Text("\($0) s").tag($0) }
-                    }
-                }
-                labeled("Quality") {
-                    Picker("", selection: $model.settings.quality) {
-                        ForEach(QualityPreset.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }
-                }
-                labeled("Camera background") {
-                    Picker("", selection: $model.settings.cameraBackground) {
-                        ForEach(CameraBackground.allCases, id: \.self) { Text($0.label).tag($0) }
-                    }
-                    .onChange(of: model.settings.cameraBackground) { _, _ in RecorderController.shared.applyCameraEffect() }
-                }
-                labeled("Bubble size") {
-                    Picker("", selection: $model.settings.bubbleSize) {
-                        ForEach(BubbleSize.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
-                    }
-                }
-                Toggle("Highlight mouse clicks", isOn: $model.settings.highlightClicks)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Toggle("Show cursor", isOn: $model.settings.showCursor)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.top, 6)
-        } label: {
-            Text("Recording settings").font(.callout.weight(.medium))
-        }
-    }
-
     private var footer: some View {
         HStack {
-            Button("Meetings and notes") {
-                (NSApp.delegate as? AppDelegate)?.showMeetingWorkspace()
+            Button("Screen recording") {
+                (NSApp.delegate as? AppDelegate)?.showScreenRecordingPanel()
             }.buttonStyle(.link)
             Spacer()
             if let last = model.recordings.first, last.upload == .uploaded {
@@ -321,14 +397,17 @@ struct RecorderPanel: View {
         previewSession = await RecorderController.shared.startPanelPreview()
     }
 
-    private func restartMeter() {
+    private func restartMeter() async {
         micLevel.stop()
+        microphoneAccessDenied = false
         guard !model.meetingMode, s.audio.usesMic, devices != nil,
               let mic = CaptureDevices.defaultMicrophone(savedID: s.microphoneID) else { return }
-        Task {
-            guard await Permissions.request(.audio) else { return }
-            micLevel.start(device: mic)
-        }
+        let granted = await Permissions.request(.audio)
+        guard !Task.isCancelled, model.phase == .idle,
+              !model.meetingMode, s.audio.usesMic,
+              CaptureDevices.defaultMicrophone(savedID: s.microphoneID)?.uniqueID == mic.uniqueID else { return }
+        microphoneAccessDenied = !granted
+        if granted { micLevel.start(device: mic) }
     }
 
     private func setCamera(_ id: String?) {
@@ -359,15 +438,6 @@ struct RecorderPanel: View {
 
     // MARK: Helpers
 
-    private func symbol(for mode: CaptureMode) -> String {
-        switch mode {
-        case .screen: "display"
-        case .window: "macwindow"
-        case .area: "rectangle.dashed"
-        case .camera: "person.crop.square"
-        }
-    }
-
     private func row<Content: View, Trailing: View>(symbol: String, on: Bool, @ViewBuilder content: () -> Content,
                                                     @ViewBuilder trailing: () -> Trailing) -> some View {
         HStack(spacing: 10) {
@@ -379,18 +449,6 @@ struct RecorderPanel: View {
         .padding(.vertical, 6)
         .frame(minHeight: 34)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-    }
-
-    private func labeled<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            content().labelsHidden().fixedSize()
-        }
-    }
-
-    private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol) }.buttonStyle(.borderless).help(help)
     }
 
     private struct PreviewKey: Equatable { var on: Bool; var cameraID: String? }
