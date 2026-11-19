@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from app import create_app, DeliveryError, verify_firebase
+from app import create_app, deliver, DeliveryError, ProviderPending, verify_firebase
 from providers import choose_route
 from test_delivery import ROCKETSHIP_CONFIG, Service
 
@@ -66,6 +66,50 @@ class OrchestrationTests(unittest.TestCase):
         result = self.post(); self.assertEqual(result.status_code,200,result.json)
         self.assertEqual(result.json['recipients'], ['nonattendee@rocketshiphq.com','owner@rocketshiphq.com'])
         self.assertEqual(set(result.json), {'verified','page_id','url','recipients','email_status','route','suppressed_duplicate','notes_url'})
+    def test_calendar_followup_retries_without_repeating_gmail_or_acceptance(self):
+        self.event.update(recurringEventId='series', originalStartTime={'dateTime':'2026-11-10T11:00:00+01:00'})
+        choose = self.providers.choose_calendar_route = Mock(return_value={'kind':'client'})
+        submit = self.providers.submit_followups = Mock(side_effect=[False, True])
+        action_items = [{'owner':'Sam', 'task':' Send recap materials ', 'due':''}, {'task':'   '}]
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        with self.assertRaisesRegex(ProviderPending, 'Follow-up handoff is unconfirmed'):
+            deliver(*args, followup_items=action_items)
+        self.assertEqual(self.providers.sends, 1)
+        self.event['recurringEventId'] = 'edited-series'
+        receipt = deliver(*args)
+        self.assertEqual(receipt, deliver(*args, followup_items=action_items))
+        self.assertEqual(self.providers.sends, 1)
+        self.assertEqual(submit.call_count, 2)
+        self.assertEqual(submit.call_args_list[0], submit.call_args_list[1])
+        handoff = submit.call_args.kwargs
+        self.assertEqual(handoff['action_items'], ['Send recap materials'])
+        self.assertEqual(handoff['owner'], self.claims['email'])
+        self.assertEqual(handoff['meeting_id'], next(iter(self.providers.pages)))
+        self.assertEqual(handoff['notion_page_id'], 'page')
+        self.assertEqual(handoff['notion_url'], 'https://notion.so/page')
+        self.assertIn('Full transcript', handoff['transcript'])
+        self.assertEqual(handoff['calendar_context'], {
+            'event_id':'event', 'series_id':'series', 'ical_uid':'uid', 'original_start':'2026-11-10T10:00:00Z'})
+        attendees = sorted([self.claims['email'], *(attendee['email'] for attendee in self.event['attendees'])])
+        choose.assert_called_once_with(self.event['summary'], attendees, handoff['calendar_context'])
+
+    def test_http_payload_cannot_supply_followup_actions(self):
+        self.providers.submit_followups = Mock()
+        self.assertEqual(self.post({**self.payload, 'followup_items':[{'task':'Fake task'}]}).status_code, 422)
+        self.providers.submit_followups.assert_not_called()
+
+    def test_two_internal_invitees_skip_optional_calendar_hooks(self):
+        self.event['attendees'] = self.event['attendees'][:1]
+        choose = self.providers.choose_calendar_route = Mock(return_value={'kind':'client'})
+        submit = self.providers.submit_followups = Mock(return_value=True)
+        receipt = deliver(self.payload, self.claims['email'], self.store, self.providers,
+                          lambda owner: Service([self.event]), lambda: self.now,
+                          followup_items=[{'task':'Share the decision'}])
+        self.assertEqual(receipt['route'], 'private')
+        choose.assert_not_called()
+        submit.assert_not_called()
+
     def test_manual_is_owner_only_private(self):
         self.payload['calendar'] = None
         result = self.post(); self.assertEqual(result.status_code,200,result.json)

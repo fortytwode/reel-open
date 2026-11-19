@@ -341,6 +341,16 @@ class CanonicalProviders:
     def choose_route(self, title, attendees, manual):
         return choose_route(self.canonical, title, attendees, manual)
 
+    def choose_calendar_route(self, title, attendees, context):
+        resolve = getattr(self.canonical, 'resolve_reel_calendar_route', None)
+        route = resolve(title, attendees, context) if resolve else None
+        return self.choose_route(title, attendees, False) if route is None else route
+
+    def submit_followups(self, **kwargs):
+        """Return None when unavailable, or whether the queue accepted durably."""
+        queue = getattr(self.canonical, 'queue_reel_followups', None)
+        return queue(**kwargs) is True if queue else None
+
     def apply_route(self, page, route, meeting_id, payload, attendees):
         canonical = self.canonical
         page_id = page['page_id']

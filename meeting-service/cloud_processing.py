@@ -221,7 +221,8 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                                'calendar': None if manual else {'legacy_occurrence_id': event_id, 'occurrence_start': record['started_at']}}
                     delivery_store = GCSStateStore(os.environ['DELIVERY_RECEIPTS_BUCKET'])
                     receipt = deliver(payload, owner, delivery_store,
-                                      configured_providers(store=delivery_store), calendar_service, time.time, deadline=started + 570)
+                                      configured_providers(store=delivery_store), calendar_service, time.time,
+                                      deadline=started + 570, followup_items=summary.get('action_items'))
                     record['notion_url'] = receipt['url']
                     record['notion_status'] = 'delivered'
                     state_name = 'delivered'

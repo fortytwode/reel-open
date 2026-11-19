@@ -840,10 +840,11 @@ class ProviderRejected(ProviderPending):
         self.retry_after = retry_after
 
 
-def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None, *, slack=None):
+def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None, *, slack=None, followup_items=None):
     """File and share verified notes, then deliver the recap."""
     recording_id, content_hash = validate_payload(payload)
     deadline = deadline or clock() + 570  # Gunicorn kills the synchronous worker at 600s.
+    calendar_context = None
     if payload['calendar'] is None:
         identity = ('manual', owner, recording_id)
         attendees, recipients = [owner], [owner]
@@ -853,7 +854,10 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
         attendees = sorted(participant_emails(event))
         if owner not in attendees:
             raise Forbidden('Only an invited participant or organizer can deliver this meeting')
-        identity = ('calendar', *canonical_occurrence(event))
+        ical_uid, original_start = canonical_occurrence(event)
+        identity = ('calendar', ical_uid, original_start)
+        calendar_context = {'event_id': event.get('id') or '', 'series_id': event.get('recurringEventId') or '',
+                            'ical_uid': ical_uid, 'original_start': original_start}
         recipients = internal_recipients(event)
         title = str(event.get('summary') or payload['title'])
     occurrence_key = 'occurrence/' + digest_key(*identity)
@@ -902,8 +906,9 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
             # Recipient/title/route inputs belong to the first authoritative
             # snapshot, not a later invite edit during provider recovery.
             if 'recipients' not in state:
-                state = save(recipients=recipients, attendees=attendees, title=title)
+                state = save(recipients=recipients, attendees=attendees, title=title, calendar_context=calendar_context)
             recipients, attendees, title = state['recipients'], state['attendees'], state['title']
+            calendar_context = state.get('calendar_context')
             delivery_payload = {**payload, 'title':title}
             transcript = format_transcript(payload['segments'])
             meeting_id = 'reel_' + digest_key(*identity)
@@ -971,11 +976,16 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 state = save(notes_url=notes_url)
             route = state.get('route')
             people = [email for email in attendees if not email.endswith('@resource.calendar.google.com')]
-            if len(people) == 2 and all(is_internal_email(email) for email in people) and route and route.get('kind') != 'private':
-                route = {'kind':'private'}
-                state = save(route=route, route_verified=False, route_retry_after=0)
+            if len(people) == 2 and all(is_internal_email(email) for email in people):
+                if not route or route.get('kind') != 'private':
+                    route = {'kind':'private'}
+                    state = save(route=route, route_verified=False, route_retry_after=0)
             if route is None:
-                route = providers.choose_route(title, attendees, payload['calendar'] is None)
+                choose_calendar_route = getattr(providers, 'choose_calendar_route', None)
+                if calendar_context and choose_calendar_route:
+                    route = choose_calendar_route(title, attendees, calendar_context)
+                if route is None:
+                    route = providers.choose_route(title, attendees, payload['calendar'] is None)
                 state = save(route=route)
             if not state.get('route_verified'):
                 if state.get('route_retry_after', 0) > clock():
@@ -1008,6 +1018,12 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
             fence()
             if not state.get('notes_published'):
                 state = save(notes_published=True)
+            submit_followups = getattr(providers, 'submit_followups', None)
+            if calendar_context and route['kind'] == 'client' and submit_followups and 'followup_actions' not in state:
+                tasks = [item['task'].strip() for item in followup_items or []
+                         if isinstance(item, dict) and isinstance(item.get('task'), str) and item['task'].strip()]
+                if tasks:
+                    state = save(followup_actions=tasks)
             email = state.get('email') or {}
             if email.get('state') != 'sent':
                 if 'email_started_at' not in state:
@@ -1046,6 +1062,18 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                     if not email or email.get('state') != 'sent' or not email.get('provider_message_id'):
                         raise ProviderPending('Gmail send result is uncertain; retry to reconcile')
                 state = save(email=email, email_create_uncertain=False)
+            if submit_followups and route['kind'] == 'client' and calendar_context and state.get('followup_actions') and not state.get('followups_accepted'):
+                if not email.get('provider_message_id'):
+                    raise ProviderPending('Gmail send result is uncertain; retry to reconcile')
+                fence()
+                accepted = submit_followups(owner=owner, calendar_context=calendar_context, meeting_id=meeting_id,
+                                            notion_page_id=page['page_id'], notion_url=page['url'],
+                                            action_items=state['followup_actions'], transcript=transcript)
+                fence()
+                if accepted is True:
+                    state = save(followups_accepted=True)
+                elif accepted is not None:
+                    raise ProviderPending('Follow-up handoff is unconfirmed; retry to reconcile')
             receipt = {'verified':True, 'page_id':page['page_id'], 'url':page['url'], 'recipients':recipients, 'email_status':'confirmed', 'route':route['kind'], 'suppressed_duplicate':False, 'notes_url':notes_url}
             save(receipt=receipt)
             if slack is not None and notes_url:

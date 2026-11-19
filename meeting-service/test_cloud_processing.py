@@ -50,13 +50,16 @@ def setup(monkeypatch):
     bucket, store, tasks, deliveries = Bucket(), FakeStore(), [], []
     monkeypatch.setattr(google.cloud.storage, 'Client', lambda: types.SimpleNamespace(bucket=lambda _: bucket))
     monkeypatch.setattr(speech, 'transcribe_audio', lambda *args: {'text': 'A clear decision'})
-    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: {'summary': 'The decision', 'has_meeting_content': True})
+    monkeypatch.setattr(speech, 'summarize_text', lambda *args, **kwargs: {
+        'summary': 'The decision', 'has_meeting_content': True,
+        'action_items': [{'owner': 'Sam', 'task': 'Share the decision', 'due': ''}],
+    })
     package = types.ModuleType('canonical_delivery')
     package.__path__ = []
     app = types.ModuleType('canonical_delivery.app')
     app.GCSStateStore = lambda _: object()
     app.calendar_service = object()
-    app.deliver = lambda payload, owner, *args, **kw: deliveries.append((payload, owner)) or {'url': 'https://notes'}
+    app.deliver = lambda payload, owner, *args, **kw: deliveries.append((payload, owner, kw['followup_items'])) or {'url': 'https://notes'}
     providers = types.ModuleType('canonical_delivery.providers')
     providers.configured_providers = lambda **kwargs: object()
     for name, module in [('canonical_delivery', package), ('canonical_delivery.app', app), ('canonical_delivery.providers', providers)]:
@@ -91,11 +94,13 @@ def test_completed_execution_uses_immutable_transcript_summary_and_calendar_refe
     assert run(setup) == 'processing'
     assert run(setup) == 'delivered'
     assert len(deliveries) == 1
-    payload, owner = deliveries[0]
+    payload, owner, followups = deliveries[0]
     assert owner == record['owner_email']
     assert payload['summary'] == 'The decision'
     assert payload['segments'][0]['text'] == 'A clear decision'
     assert payload['calendar'] == {'legacy_occurrence_id': record['event_id'], 'occurrence_start': record['started_at']}
+    assert followups == [{'owner': 'Sam', 'task': 'Share the decision', 'due': ''}]
+    assert 'action_items' not in payload
     assert run(setup) == 'delivered' and len(deliveries) == 1
     assert len(tasks) == 3
 

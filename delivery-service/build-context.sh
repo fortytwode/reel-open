@@ -35,6 +35,10 @@ if [[ -n "$adapter_repo" ]]; then
     team_ops/google_drive/__init__.py team_ops/google_drive/auth.py team_ops/google_drive/client.py \
     team_ops/notion.py team_ops/pipedrive.py team_ops/slack.py team_ops/slack_idempotency.py \
     | tar -x -C "$destination/deployment-adapter"
+  if git -C "$adapter_repo" cat-file -e "$adapter_commit:team_ops/meeting_followups.py" 2>/dev/null; then
+    git -C "$adapter_repo" archive "$adapter_commit" team_ops/meeting_followups.py \
+      | tar -x -C "$destination/deployment-adapter"
+  fi
   mv "$destination/deployment-adapter/team-planning/meeting_transcription/config.py" "$destination/deployment-adapter/config.py"
   mv "$destination/deployment-adapter/team-planning/meeting_transcription/distribution.py" "$destination/deployment-adapter/distribution.py"
   rmdir "$destination/deployment-adapter/team-planning/meeting_transcription" "$destination/deployment-adapter/team-planning"
