@@ -65,6 +65,16 @@ final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         lock.withLock { latest = nil }
     }
 
+    func stopAndWait() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                if session.isRunning { session.stopRunning() }
+                lock.withLock { latest = nil }
+                continuation.resume()
+            }
+        }
+    }
+
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let mode = lock.withLock { effectMode }

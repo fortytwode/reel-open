@@ -129,6 +129,9 @@ private struct LibraryRow: View {
     let notes: () -> Void
     @State private var confirmMeetingShare = false
     @State private var meetingShareConsent: Publisher.MeetingShareConsent?
+    private var localVideoReady: Bool {
+        recording.discardRequested != true && (recording.captureState == .complete || recording.captureState == .recovered)
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -145,7 +148,7 @@ private struct LibraryRow: View {
                 if recording.upload == .uploaded {
                     Button("Copy link") { Publisher.shared.copyLink(recording) }
                     Button { NSWorkspace.shared.open(recording.shareURL()) } label: { Image(systemName: "safari") }.help("Open share page")
-                } else if model.uploadProgress[recording.id] == nil {
+                } else if localVideoReady && model.uploadProgress[recording.id] == nil {
                     Button(recording.isMeeting ? "Share video…" : "Upload") {
                         if recording.isMeeting {
                             guard let consent = Publisher.shared.meetingShareConsent() else {
@@ -159,10 +162,11 @@ private struct LibraryRow: View {
                         .help(model.account == nil ? "Sign in with Google in Settings first" : "Upload and copy link")
                 }
                 Button { NSWorkspace.shared.open(model.library.videoURL(for: recording)) } label: { Image(systemName: "play.rectangle") }.help("Open video")
+                    .disabled(!localVideoReady)
                 Menu {
                     Button("Rename…", action: rename)
                     Button("Share settings (password, expiry)…", action: share)
-                    Button("Trim…", action: trim)
+                    Button("Trim…", action: trim).disabled(!localVideoReady)
                     if recording.trim != nil {
                         Button("Export trimmed copy…") { exportTrimmed() }
                     }
@@ -235,7 +239,13 @@ private struct LibraryRow: View {
     }
 
     @ViewBuilder private var status: some View {
-        if let p = model.uploadProgress[recording.id] {
+        if recording.discardRequested == true {
+            Text("Discard pending").font(.caption).foregroundStyle(.secondary)
+        } else if let error = model.captureSaveErrors[recording.id] {
+            Text("Video save incomplete").font(.caption).foregroundStyle(.red).help(error)
+        } else if recording.captureState == .finalizing {
+            Text("Saving video…").font(.caption).foregroundStyle(.secondary)
+        } else if let p = model.uploadProgress[recording.id] {
             ProgressView(value: p) { Text("Uploading \(Int(p * 100))%").font(.caption) }.frame(width: 180)
         } else {
             HStack(spacing: 8) {

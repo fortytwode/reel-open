@@ -18,7 +18,12 @@ enum Recovery {
         let model = AppModel.shared
         model.reloadLibrary()
         var outcome = Outcome()
-        for r in model.recordings where r.captureState == .recording || r.captureState == .finalizing {
+        for r in model.recordings where r.discardRequested == true || r.captureState == .recording || r.captureState == .finalizing {
+            if r.discardRequested == true {
+                await Publisher.shared.delete(r)
+                if model.recording(id: r.id) == nil { outcome.discarded.append(r.id) }
+                continue
+            }
             let folder = model.library.folder(for: r)
             let segDir = folder.appendingPathComponent(SegmentLog.directoryName, isDirectory: true)
             let files = (try? FileManager.default.contentsOfDirectory(atPath: segDir.path)) ?? []
@@ -41,13 +46,14 @@ enum Recovery {
                         if let data = try? JSONEncoder().encode(log) { try? data.write(to: segDir.appendingPathComponent(SegmentLog.fileName), options: .atomic) }
                         try await RecorderController.shared.finalizeLocal(r, log: log, segments: segDir, recovered: true)
                     } else {
-                        var done = r
-                        done.captureState = .recovered
-                        if !done.hasThumbnail {
-                            done.hasThumbnail = await PostProcessor.makeThumbnail(video: model.library.videoURL(for: r), to: model.library.thumbnailURL(for: r))
+                        let video = model.library.videoURL(for: r)
+                        let duration = await PostProcessor.duration(of: video)
+                        guard duration.isFinite, duration > 0 else {
+                            throw CocoaError(.fileReadCorruptFile)
                         }
-                        done.durationSeconds = await PostProcessor.duration(of: model.library.videoURL(for: r))
-                        model.update(done)
+                        let hasThumbnail = r.hasThumbnail ? true : await PostProcessor.makeThumbnail(
+                            video: video, to: model.library.thumbnailURL(for: r))
+                        try model.updateCapture(r, state: .recovered, duration: duration, hasThumbnail: hasThumbnail)
                     }
                     guard var saved = model.recording(id: r.id) else { continue }
                     if saved.transcriptStatus == .pending || saved.transcriptStatus == .failed {
@@ -61,6 +67,7 @@ enum Recovery {
                     outcome.recovered.append(r.id)
                 } catch {
                     outcome.failed[r.id] = error.localizedDescription
+                    model.captureSaveErrors[r.id] = error.localizedDescription
                     Log.app.error("Recovery failed for \(r.folderName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
             }

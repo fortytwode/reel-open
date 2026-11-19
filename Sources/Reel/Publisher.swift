@@ -15,6 +15,7 @@ final class Publisher {
     private var transcriptions: [String: Task<Void, Never>] = [:]
     private var deliveries: [String: Task<Void, Never>] = [:]
     private var deleting = Set<String>()
+    private var liveStarts: [String: Task<SegmentUploader?, Never>] = [:]
     private var liveFinish: [String: Task<Bool, Never>] = [:]
     /// Seconds from "stop" to the final playlist + ready meta being uploaded, per recording id.
     private(set) var stopToPlayable: [String: Double] = [:]
@@ -43,9 +44,23 @@ final class Publisher {
 
     /// Called when capture starts. Publishes a "recording" meta and returns an uploader the
     /// writer feeds; nil when live upload is off or the user isn't signed in.
-    func beginLive(_ r: Recording) async -> SegmentUploader? {
+    func beginLive(_ recording: Recording) -> Task<SegmentUploader?, Never> {
+        let task = Task { await makeLiveUploader(recording) }
+        liveStarts[recording.id] = task
+        return task
+    }
+
+    func cancelLiveStart(for id: String) async {
+        guard let start = liveStarts[id] else { return }
+        start.cancel()
+        if let uploader = await start.value { await uploader.cancel() }
+        liveStarts[id] = nil
+    }
+
+    private func makeLiveUploader(_ r: Recording) async -> SegmentUploader? {
         guard r.allowsAutomaticCloudDelivery, model.settings.autoUpload, model.settings.liveUpload, let cloud = try? await CloudAuth.shared.validSession() else { return nil }
-        var r = model.recording(id: r.id) ?? r
+        guard !Task.isCancelled, !deleting.contains(r.id), var r = model.recording(id: r.id),
+              r.allowsAutomaticCloudDelivery else { return nil }
         do { try prepareForPublication(&r, cloud: cloud) } catch {
             Log.cloud.error("Live upload disabled: \(error.localizedDescription, privacy: .public)")
             return nil
@@ -57,11 +72,14 @@ final class Publisher {
             try await uploadMeta(r, status: "recording", client: client, owner: owner(cloud))
         } catch {
             Log.cloud.error("Live upload disabled: \(error.localizedDescription, privacy: .public)")
-            r.upload = .pending
+            r = model.recording(id: r.id) ?? r
+            // A lost response may have left a remote copy for Discard to clean up.
+            r.upload = .failed(error.localizedDescription)
             model.update(r)
             return nil
         }
-        Task { try? await FirestoreClient(cloud: cloud).ensureRoom(r.room, createdAt: r.createdAt, expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce) }
+        try? await FirestoreClient(cloud: cloud).ensureRoom(r.room, createdAt: r.createdAt,
+            expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
         return SegmentUploader(shareID: r.shareID, ownerUID: cloud.userID, directory: segmentsDirectory(r), location: r.location, expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
     }
 
@@ -69,12 +87,12 @@ final class Publisher {
     /// flips meta to ready, so the link plays. Returns whether the HLS copy is complete.
     @discardableResult
     func finishLive(_ recording: Recording, uploader: SegmentUploader, log: SegmentLog, stoppedAt: Date) -> Task<Bool, Never> {
-        guard recording.allowsAutomaticCloudDelivery else { return Task { false } }
         let id = recording.id
+        guard recording.allowsAutomaticCloudDelivery, !deleting.contains(id) else { return Task { false } }
         let task = Task { @MainActor () -> Bool in
             do {
                 try await uploader.finish(log: log)
-                guard var r = self.model.recording(id: id) else { return false }
+                guard !Task.isCancelled, !self.deleting.contains(id), var r = self.model.recording(id: id) else { return false }
                 r.playback.hls = true
                 r.durationSeconds = max(r.durationSeconds, log.totalDuration)
                 self.model.update(r)
@@ -88,12 +106,18 @@ final class Publisher {
                 if self.model.settings.copyLinkOnStop { Notifier.post(title: "Video ready", body: r.title, url: r.shareURL()) }
                 return true
             } catch {
+                await uploader.cancel()
                 Log.cloud.error("Finishing live upload failed: \(error.localizedDescription, privacy: .public)")
                 return false
             }
         }
         liveFinish[id] = task
+        liveStarts[id] = nil
         return task
+    }
+
+    func clearFinishedLiveStart(for id: String) {
+        liveStarts[id] = nil
     }
 
     // MARK: Transcript + AI summary
@@ -370,7 +394,7 @@ final class Publisher {
     @discardableResult
     func publish(_ recording: Recording, copyLink: Bool, meetingConsent: MeetingShareConsent? = nil) -> Task<Void, Never> {
         let current = model.recording(id: recording.id) ?? recording
-        guard current.permitsPublishing(allowMeetingShare: meetingConsent != nil) else { return Task {} }
+        guard !deleting.contains(recording.id), current.permitsPublishing(allowMeetingShare: meetingConsent != nil) else { return Task {} }
         if let t = uploads[recording.id] { return t }
         let id = recording.id
         let task = Task { @MainActor in
@@ -543,7 +567,7 @@ final class Publisher {
     private func owner(_ cloud: CloudSession) -> String? { cloud.displayName ?? cloud.email }
 
     func copyLinkToClipboard(_ r: Recording, uploading: Bool = false, openPage: Bool = false) {
-        guard r.hasPublishableShareID, !r.isMeeting || r.upload == .uploaded else { return }
+        guard !deleting.contains(r.id), r.discardRequested != true, r.hasPublishableShareID, !r.isMeeting || r.upload == .uploaded else { return }
         let url = r.shareURL().absoluteString
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url, forType: .string)
@@ -707,7 +731,14 @@ final class Publisher {
         defer { deleting.remove(recording.id) }
         transcriptions[recording.id]?.cancel()
         deliveries[recording.id]?.cancel()
-        uploads[recording.id]?.cancel()
+        let upload = uploads[recording.id]
+        let live = liveFinish[recording.id]
+        upload?.cancel()
+        live?.cancel()
+        await cancelLiveStart(for: recording.id)
+        _ = await live?.value
+        _ = await upload?.value
+        liveFinish[recording.id] = nil
         let r = model.recording(id: recording.id) ?? recording
         if r.upload.mayHaveRemote || r.playback.hls || r.playback.mp4 {
             do {

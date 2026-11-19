@@ -33,6 +33,8 @@ final class AppModel: ObservableObject {
     private(set) var accountGeneration: UInt64 = 0
     @Published var phase: Phase = .idle
     @Published var uploadProgress: [String: Double] = [:]
+    @Published var captureSaveErrors: [String: String] = [:]
+    @Published var captureStopSlow = false
     @Published var meetingMode = false
     @Published var meetingTitle = ""
     @Published var meetingAttendees = ""
@@ -89,6 +91,17 @@ final class AppModel: ObservableObject {
 
     func saveRecording(_ r: Recording) throws {
         updateRecordingList(try library.save(r))
+    }
+
+    @discardableResult
+    func updateCapture(_ r: Recording, state: CaptureState, duration: Double, hasThumbnail: Bool? = nil) throws -> Recording {
+        let updated = try library.updateCapture(r, state: state, duration: duration, hasThumbnail: hasThumbnail)
+        updateRecordingList(updated)
+        return updated
+    }
+
+    func requestDiscard(_ recording: Recording) throws {
+        updateRecordingList(try library.requestDiscard(recording))
     }
 
     /// Bind the current manifest, including the persisted meeting owner, before any share write.

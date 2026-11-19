@@ -20,6 +20,7 @@ final class SegmentedWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendabl
     private let queue = DispatchQueue(label: "com.rocketshiphq.reel.writer")
     private let logLock = NSLock()
     private var log = SegmentLog()
+    private var writeError: Error?
     private var lastVideoPTS = -Double.infinity
     private(set) var videoFrames = 0
     private(set) var audioBuffers = 0
@@ -27,6 +28,7 @@ final class SegmentedWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendabl
     private var audioFormat: CMAudioFormatDescription?
     /// Called on the writer's queue after each segment file is on disk (init has index 0).
     var onSegment: ((SegmentEntry?, SegmentLog) -> Void)?
+    var onStorageError: ((Error) -> Void)?
 
     var hasAudio: Bool { audioInput != nil }
     var currentLog: SegmentLog { logLock.withLock { log } }
@@ -142,37 +144,48 @@ final class SegmentedWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendabl
     // MARK: AVAssetWriterDelegate
 
     func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData segmentData: Data, segmentType: AVAssetSegmentType, segmentReport: AVAssetSegmentReport?) {
-        var entry: SegmentEntry?
-        let snapshot: SegmentLog = logLock.withLock {
-            if segmentType == .initialization {
-                write(segmentData, name: RemoteFile.initSegment.rawValue)
-                log.hasInit = true
-            } else {
-                let index = log.nextIndex
-                write(segmentData, name: RemoteFile.segment(index).rawValue)
-                let reports = segmentReport?.trackReports ?? []
-                let duration = reports.first(where: { $0.mediaType == .video })?.duration.seconds
-                    ?? reports.map(\.duration.seconds).max() ?? Self.segmentInterval
-                let e = SegmentEntry(index: index, duration: duration.isFinite ? duration : Self.segmentInterval, bytes: segmentData.count)
-                log.append(e)
-                entry = e
+        let result: Result<(SegmentEntry?, SegmentLog), Error>? = logLock.withLock {
+            guard writeError == nil else { return nil }
+            do {
+                var entry: SegmentEntry?
+                if segmentType == .initialization {
+                    try write(segmentData, name: RemoteFile.initSegment.rawValue)
+                    log.hasInit = true
+                } else {
+                    let index = log.nextIndex
+                    try write(segmentData, name: RemoteFile.segment(index).rawValue)
+                    let reports = segmentReport?.trackReports ?? []
+                    let duration = reports.first(where: { $0.mediaType == .video })?.duration.seconds
+                        ?? reports.map(\.duration.seconds).max() ?? Self.segmentInterval
+                    let segment = SegmentEntry(index: index, duration: duration.isFinite ? duration : Self.segmentInterval, bytes: segmentData.count)
+                    log.append(segment)
+                    entry = segment
+                }
+                try persistLog()
+                return .success((entry, log))
+            } catch {
+                writeError = error
+                return .failure(error)
             }
-            persistLog()
-            return log
         }
-        onSegment?(entry, snapshot)
+        switch result {
+        case .success(let (entry, snapshot)):
+            onSegment?(entry, snapshot)
+        case .failure(let error):
+            Log.writer.error("Segment write failed: \(error.localizedDescription, privacy: .public)")
+            onStorageError?(error)
+        case nil:
+            break
+        }
     }
 
-    private func write(_ data: Data, name: String) {
-        do { try data.write(to: directory.appendingPathComponent(name), options: .atomic) }
-        catch { Log.writer.error("Segment write failed: \(error.localizedDescription, privacy: .public)") }
+    private func write(_ data: Data, name: String) throws {
+        try data.write(to: directory.appendingPathComponent(name), options: .atomic)
     }
 
     /// Call with `logLock` held.
-    private func persistLog() {
-        if let data = try? JSONEncoder().encode(log) {
-            try? data.write(to: directory.appendingPathComponent(SegmentLog.fileName), options: .atomic)
-        }
+    private func persistLog() throws {
+        try write(JSONEncoder().encode(log), name: SegmentLog.fileName)
     }
 
     /// Flushes the last segment and marks the log ended.
@@ -188,9 +201,13 @@ final class SegmentedWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendabl
         guard w.status == .completed else {
             throw w.error ?? NSError(domain: "Reel", code: 12, userInfo: [NSLocalizedDescriptionKey: "Recording could not be finalized"])
         }
-        let final: SegmentLog = logLock.withLock {
+        let final: SegmentLog = try logLock.withLock {
+            if let writeError { throw writeError }
+            guard log.hasInit, !log.segments.isEmpty else {
+                throw NSError(domain: "Reel", code: 12, userInfo: [NSLocalizedDescriptionKey: "No playable frames were saved"])
+            }
             log.ended = true
-            persistLog()
+            try persistLog()
             return log
         }
         Log.writer.info("Wrote \(self.videoFrames) frames, \(self.audioBuffers) audio buffers, \(final.segments.count) segments")
@@ -199,7 +216,6 @@ final class SegmentedWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendabl
 
     func cancel() {
         queue.sync { if writer.status == .writing { writer.cancelWriting() } }
-        try? FileManager.default.removeItem(at: directory)
     }
 }
 

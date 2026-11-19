@@ -114,6 +114,10 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         guard let stream else { return }
         self.stream = nil
         do { try await stream.stopCapture() } catch { Log.capture.error("stopCapture: \(error.localizedDescription, privacy: .public)") }
+        try? stream.removeStreamOutput(self, type: .screen)
+        try? stream.removeStreamOutput(self, type: .audio)
+        videoQueue.sync {}
+        audioQueue.sync {}
         lock.withLock { latest = nil }
     }
 
