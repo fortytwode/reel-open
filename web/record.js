@@ -4,12 +4,12 @@
 // (link copied immediately, plays within seconds) / cancel / restart → video.mp4 assembled
 // locally → background upload. Recordings live in IndexedDB; an interrupted one is rebuilt on
 // the next visit.
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261118-orgstate1";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261119-choice1";
 import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
-import * as C from "./reel/core.js?v=20261119-owner2";
+import * as C from "./reel/core.js?v=20261119-choice1";
 import * as store from "./reel/store.js?v=20261119-owner2";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
-import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261110-delivery1";
+import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
 import { Library, Publisher, APP } from "./reel/publisher.js?v=20261119-owner2";
@@ -594,6 +594,7 @@ const MEETING_SERVICE = CLOUD_CONFIG.meetingServiceURL;
 const SPEECH_SERVICE = CLOUD_CONFIG.speechServiceURL;
 const DELIVERY_SERVICE = CLOUD_CONFIG.deliveryServiceURL;
 const deliveryCalendarEvents = new Map();
+let deliveryInvitesRequest = 0;
 
 const portalJobs = new Map();
 function syncMeetingMetadata(recording) {
@@ -815,8 +816,10 @@ async function sendMeetingDelivery(recording, {lockHeld=false}={}) {
   } catch (error) {
     r = recording && library.get(recording.id);
     if (r && authGeneration === generation && r.meeting.ownerUID === owner) {
-      r.meeting.deliveryStatus = "failed"; r.meeting.deliveryError = error.message;
-      r.meeting.deliveryRetryAt = new Date(Date.now() + 300000).toISOString();
+      const needsCalendar = error.code === "calendar_selection_required";
+      r.meeting.deliveryStatus = needsCalendar ? "calendarSelectionRequired" : "failed";
+      r.meeting.deliveryError = error.message;
+      r.meeting.deliveryRetryAt = needsCalendar ? null : new Date(Date.now() + 300000).toISOString();
       await library.updateExisting(r);
     }
     throw error;
@@ -838,6 +841,7 @@ function resumeMeetingDelivery() {
 }
 async function loadDeliveryInvites() {
   const owner = user?.uid, generation = authGeneration;
+  const request = ++deliveryInvitesRequest;
   const select = $("meeting-calendar-invite"), status = $("meeting-calendar-status");
   select.replaceChildren(new Option("Manual meeting — private Calls and recap to you", ""));
   deliveryCalendarEvents.clear();
@@ -852,13 +856,17 @@ async function loadDeliveryInvites() {
   };
   try {
     const events = await listDeliveryCalendar({serviceURL:DELIVERY_SERVICE,authorize});
-    if (user?.uid !== owner || authGeneration !== generation) return;
+    if (user?.uid !== owner || authGeneration !== generation || deliveryInvitesRequest !== request) return;
     for (const event of events) {
       deliveryCalendarEvents.set(event.id,event);
       select.add(new Option(event.title + " — " + new Date(event.start).toLocaleString(),event.id));
     }
-    status.textContent = events.length ? "Choose the invitation to send recaps to its internal invitees." : "No eligible calendar invitations found; manual meetings send a recap only to you.";
-  } catch { status.textContent = "Calendar invitations are unavailable. Team delivery requires a verified invitation; manual meetings send a recap only to you."; }
+    status.textContent = events.length ? "Choose the invitation to send recaps to its internal invitees." : "No eligible invitations from your selected Google calendars. Manual meetings send a recap only to you.";
+  } catch {
+    if (user?.uid === owner && authGeneration === generation && deliveryInvitesRequest === request) {
+      status.textContent = "Calendar invitations are unavailable. Team delivery requires a verified invitation; manual meetings send a recap only to you.";
+    }
+  }
 }
 $("meeting-calendar-invite").onchange = () => {
   const event = deliveryCalendarEvents.get($("meeting-calendar-invite").value);
@@ -1014,4 +1022,5 @@ if (new URLSearchParams(location.search).get("mode") === "meeting") {
 boot();
 console.info(APP, EMU ? "(emulators)" : "");
 
-mountMeetingCalendar({ container: $("meeting-calendar-panel"), session: () => session.session(), onError: () => {} });
+mountMeetingCalendar({ container: $("meeting-calendar-panel"), session: () => session.session(),
+  onSelectionChange: () => { if ($("recording-kind").value === "meeting") loadDeliveryInvites(); } });

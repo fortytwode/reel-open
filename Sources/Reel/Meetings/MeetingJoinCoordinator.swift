@@ -29,6 +29,7 @@ final class MeetingJoinCoordinator: ObservableObject {
     }
     @Published private(set) var autoJoin = OrganizationState.defaults.bool(forKey: "meetingCalendar.localAutoJoin")
     @Published private(set) var standingConsent = OrganizationState.defaults.bool(forKey: "meetingCalendar.standingConsent")
+    @Published private(set) var desktopCalendarSelection = CalendarSelection.load(from: OrganizationState.defaults)
     private let discovery = CalendarDiscovery()
     private var loop: Task<Void, Never>?
     private var joinTask: Task<Void, Never>?
@@ -40,9 +41,9 @@ final class MeetingJoinCoordinator: ObservableObject {
     private var schedule = MeetingJoinSchedule()
     private struct RefreshScope: Equatable {
         let generation: UInt64
-        let calendarIDs: Set<String>
-        let useAll: Bool
+        let selection: CalendarSelection
     }
+    private var reconciledReminderScope: RefreshScope?
     private var refreshTask: (scope: RefreshScope, task: Task<Void, Never>)?
     private var refreshing: Bool { refreshTask != nil }
     private var manualMeetings: [CalendarMeeting] = []
@@ -57,7 +58,13 @@ final class MeetingJoinCoordinator: ObservableObject {
     private var hasCurrentAccount: Bool {
         accountIdentity == AppModel.shared.account?.userID && calendarAccountGeneration == AppModel.shared.accountGeneration
     }
-    var visibleMeetings: [CalendarMeeting] { hasCurrentAccount ? meetings : [] }
+    var visibleMeetings: [CalendarMeeting] {
+        guard hasCurrentAccount else { return [] }
+        let available = includedCalendars(refreshScope)
+        let hasAccess = EKEventStore.authorizationStatus(for: .event) == .fullAccess
+        return meetings.filter { $0.calendarID == "manual" || $0.calendarID == "reel-cloud" ||
+            (hasAccess && available.contains($0.calendarID)) }
+    }
     var visibleCloudMeetings: [CloudCalendarMeeting] { hasCurrentAccount ? cloudMeetings : [] }
     var visibleCloudCalendarStatus: String {
         hasCurrentAccount ? cloudCalendarStatus : "Checking Reel notetaker meetings for this account…"
@@ -69,13 +76,13 @@ final class MeetingJoinCoordinator: ObservableObject {
 
     var hasStandingConsentForCurrentScope: Bool {
         let scope = refreshScope
-        guard standingConsent, hasCurrentAccount else { return false }
+        guard standingConsent, hasCurrentAccount, let selected = scope.selection.savedIDs else { return false }
         let owner = AppModel.shared.account?.userID ?? "local:\(getuid())"
         let defaults = OrganizationState.defaults
         guard defaults.string(forKey: "meetingCalendar.standingConsentOwner") == owner else { return false }
         let hasAppleCalendarAccess = EKEventStore.authorizationStatus(for: .event) == .fullAccess
-        guard defaults.object(forKey: "meetingCalendar.standingConsentUseAll") as? Bool == scope.useAll,
-              defaults.stringArray(forKey: "meetingCalendar.standingConsentSelection").map(Set.init) == scope.calendarIDs else { return false }
+        guard defaults.object(forKey: "meetingCalendar.standingConsentUseAll") as? Bool == false,
+              defaults.stringArray(forKey: "meetingCalendar.standingConsentSelection").map(Set.init) == selected else { return false }
         return !hasAppleCalendarAccess ||
             defaults.stringArray(forKey: "meetingCalendar.standingConsentCalendars").map(Set.init) == includedCalendars(scope)
     }
@@ -113,34 +120,44 @@ final class MeetingJoinCoordinator: ObservableObject {
         OrganizationState.defaults.set(false, forKey: "meetingCalendar.standingConsent")
     }
 
-    private func includedCalendars(_ scope: RefreshScope) -> Set<String> {
-        CalendarSelection.identifiers(available: Set(discovery.calendars.map(\.id)),
-                                      selected: scope.calendarIDs, useAll: scope.useAll)
+    func saveDesktopCalendarSelection(_ ids: Set<String>) {
+        let selection = CalendarSelection.saved(ids)
+        guard refreshScope.selection != selection else { return }
+        invalidateStandingConsent()
+        CalendarSelection.save(ids, to: OrganizationState.defaults)
+        desktopCalendarSelection = selection
+        let excluded = meetings.filter { $0.calendarID != "manual" && $0.calendarID != "reel-cloud" && !ids.contains($0.calendarID) }
+        removeReminders(Set(excluded.map(Self.reminderIdentifier)))
+        Task { await refresh() }
     }
 
-    private func saveConsentScope(_ scope: RefreshScope, included: Set<String>?) {
+    private func includedCalendars(_ scope: RefreshScope) -> Set<String> {
+        scope.selection.identifiers(available: Set(discovery.calendars.map(\.id)))
+    }
+
+    private func saveConsentScope(_ selected: Set<String>, included: Set<String>?) {
         let defaults = OrganizationState.defaults
-        defaults.set(scope.useAll, forKey: "meetingCalendar.standingConsentUseAll")
-        defaults.set(scope.calendarIDs.sorted(), forKey: "meetingCalendar.standingConsentSelection")
+        defaults.set(false, forKey: "meetingCalendar.standingConsentUseAll")
+        defaults.set(selected.sorted(), forKey: "meetingCalendar.standingConsentSelection")
         defaults.set(included?.sorted(), forKey: "meetingCalendar.standingConsentCalendars")
     }
 
     /// Setup saves consent only against the exact scope that the user reviewed.
     func completeSetup(expectedOwner: String, expectedGeneration: UInt64,
-                       selectedCalendarIDs: Set<String>, useAllCalendars: Bool,
+                       selectedCalendarIDs: Set<String>,
                        includedCalendarIDs: Set<String>, consentConfirmed: Bool) -> Bool {
         let scope = refreshScope
         let appOwner = AppModel.shared.account?.userID ?? "local:\(getuid())"
         guard consentConfirmed, !refreshing, consentOwner == expectedOwner, appOwner == expectedOwner,
               hasCurrentAccount, scope.generation == expectedGeneration,
-              scope.calendarIDs == selectedCalendarIDs, scope.useAll == useAllCalendars,
+              scope.selection == .saved(selectedCalendarIDs),
               !includedCalendarIDs.isEmpty, includedCalendars(scope) == includedCalendarIDs,
               EKEventStore.authorizationStatus(for: .event) == .fullAccess,
               AXIsProcessTrusted(), NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil,
               AppModel.shared.phase == .idle else { return false }
         let defaults = OrganizationState.defaults
         defaults.set(expectedOwner, forKey: "meetingCalendar.standingConsentOwner")
-        saveConsentScope(scope, included: includedCalendarIDs)
+        saveConsentScope(selectedCalendarIDs, included: includedCalendarIDs)
         defaults.set(true, forKey: "meetingCalendar.standingConsent")
         standingConsent = true
         setAutomaticJoining(setupWillEnableJoining)
@@ -174,10 +191,8 @@ final class MeetingJoinCoordinator: ObservableObject {
     }
 
     private var refreshScope: RefreshScope {
-        let ids = Set(OrganizationState.defaults.stringArray(forKey: "meetingCalendar.selectedIDs") ?? [])
-        let mode = CalendarSelection.initialMode(
-            stored: OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool, selected: ids)
-        return RefreshScope(generation: AppModel.shared.accountGeneration, calendarIDs: ids, useAll: mode.useAll)
+        RefreshScope(generation: AppModel.shared.accountGeneration,
+                     selection: CalendarSelection.load(from: OrganizationState.defaults))
     }
 
     private func reloadCalendars(scope: RefreshScope) async {
@@ -196,39 +211,29 @@ final class MeetingJoinCoordinator: ObservableObject {
             if accountIdentity != nil, owner != accountIdentity {
                 invalidateStandingConsent()
             }
-            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: Array(scheduled))
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: Array(scheduled))
-            scheduled = []; schedule.reset(); cloudIDs = [:]; desktopRouting = nil
+            removeReminders(scheduled)
+            reconciledReminderScope = nil
+            schedule.reset(); cloudIDs = [:]; desktopRouting = nil
             routingRevision += 1; accountIdentity = owner; calendarAccountGeneration = scope.generation
         }
-        let ids = scope.calendarIDs
-        let storedMode = OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool
-        let mode = CalendarSelection.initialMode(stored: storedMode, selected: ids)
-        if storedMode == nil {
-            OrganizationState.defaults.set(mode.useAll, forKey: "meetingCalendar.useAll")
-            // Earlier cloud-only consent did not cover all local desktop calendars.
-            if mode.expandsLegacyScope { invalidateStandingConsent() }
-        }
-        let useAll = mode.useAll
         // Never retain another refresh/account's authority while a routing request is pending.
         desktopRouting = nil; cloudIDs = [:]
-        await discovery.refresh(selectedCalendarIDs: ids, useAllCalendars: useAll)
-        guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
-        if standingConsent {
+        discovery.refresh()
+        if let selected = scope.selection.savedIDs, standingConsent {
             let defaults = OrganizationState.defaults
             let hasAppleCalendarAccess = EKEventStore.authorizationStatus(for: .event) == .fullAccess
             // Earlier releases invalidated consent on every in-app selection change.
             // Preserve that scope for existing users, even if they only use Google Calendar.
             if defaults.object(forKey: "meetingCalendar.standingConsentUseAll") == nil {
-                saveConsentScope(scope, included: hasAppleCalendarAccess ? includedCalendars(scope) : nil)
+                saveConsentScope(selected, included: hasAppleCalendarAccess ? includedCalendars(scope) : nil)
             } else if hasAppleCalendarAccess,
                       defaults.stringArray(forKey: "meetingCalendar.standingConsentCalendars") == nil,
-                      defaults.object(forKey: "meetingCalendar.standingConsentUseAll") as? Bool == scope.useAll,
-                      defaults.stringArray(forKey: "meetingCalendar.standingConsentSelection").map(Set.init) == scope.calendarIDs {
+                      defaults.object(forKey: "meetingCalendar.standingConsentUseAll") as? Bool == false,
+                      defaults.stringArray(forKey: "meetingCalendar.standingConsentSelection").map(Set.init) == selected {
                 defaults.set(includedCalendars(scope).sorted(), forKey: "meetingCalendar.standingConsentCalendars")
             }
-            if !hasStandingConsentForCurrentScope { invalidateStandingConsent() }
         }
+        if !hasStandingConsentForCurrentScope { invalidateStandingConsent() }
         var found = discovery.meetings + manualMeetings
         var cloudFound: [CloudCalendarMeeting] = []
         var cloudFailure = false
@@ -278,7 +283,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         if let selectedID, !meetings.contains(where: { $0.id == selectedID }) {
             joinTask?.cancel(); self.selectedID = nil; consent = false
         }
-        await updateReminders()
+        await updateReminders(scope: scope)
         guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
         if cloudFailure { calendarStatus = "Reel couldn’t check which meetings the notetaker is handling. Chrome joining is available for Zoom. Check your connection and Reel sign-in." }
         else if EKEventStore.authorizationStatus(for: .event) != .fullAccess &&
@@ -288,7 +293,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         else if !hasStandingConsentForCurrentScope { calendarStatus = "Set up Chrome joining and confirm consent for the included calendars." }
         else if !autoJoin { calendarStatus = "Joining in Chrome on this Mac is paused." }
         else if !AXIsProcessTrusted() { calendarStatus = "To join in Chrome, allow Reel in System Settings → Privacy & Security → Accessibility." }
-        else if CalendarSelection.identifiers(available: Set(discovery.calendars.map(\.id)), selected: ids, useAll: useAll).isEmpty && meetings.allSatisfy({ $0.calendarID != "reel-cloud" }) { calendarStatus = discovery.authorizationMessage }
+        else if includedCalendars(scope).isEmpty && meetings.allSatisfy({ $0.calendarID != "reel-cloud" }) { calendarStatus = discovery.authorizationMessage }
         else { calendarStatus = "Joining in Chrome is on while this Mac is awake. \(meetings.filter { $0.calendarID != "manual" }.count) upcoming or ongoing meetings found." }
         if autoJoin && hasStandingConsentForCurrentScope && !busy && AppModel.shared.phase == .idle {
             if let due = meetings.first(where: {
@@ -302,7 +307,7 @@ final class MeetingJoinCoordinator: ObservableObject {
 
     func select(id: String) async {
         await refresh()
-        selectedID = cloudIDs[id] ?? meetings.first { Self.key($0) == id || $0.id == id }?.id
+        selectedID = cloudIDs[id] ?? visibleMeetings.first { Self.key($0) == id || $0.id == id }?.id
         consent = false
     }
 
@@ -567,13 +572,37 @@ final class MeetingJoinCoordinator: ObservableObject {
         }
     }
 
-    private func updateReminders() async {
+    private static let reminderPrefix = "reel-meeting-"
+
+    private static func reminderIdentifier(_ meeting: CalendarMeeting) -> String {
+        reminderPrefix + key(meeting)
+    }
+
+    private func removeReminders(_ identifiers: Set<String>) {
+        guard !identifiers.isEmpty else { return }
         let center = UNUserNotificationCenter.current()
-        let upcoming = reminders ? Array(meetings.prefix(32)) : []
-        let wanted = Set(upcoming.map { "reel-meeting-" + Self.key($0) })
-        center.removePendingNotificationRequests(withIdentifiers: Array(scheduled.subtracting(wanted)))
+        center.removePendingNotificationRequests(withIdentifiers: Array(identifiers))
+        center.removeDeliveredNotifications(withIdentifiers: Array(identifiers))
+        scheduled.subtract(identifiers)
+    }
+
+    private func updateReminders(scope: RefreshScope) async {
+        let center = UNUserNotificationCenter.current()
+        let enabled = reminders
+        let upcoming = enabled ? Array(visibleMeetings.prefix(32)) : []
+        let wanted = Set(upcoming.map(Self.reminderIdentifier))
+        if reconciledReminderScope != scope {
+            // macOS persists requests and delivered alerts across application launches.
+            let pending = await center.pendingNotificationRequests()
+            let delivered = await center.deliveredNotifications()
+            guard refreshScope == scope, reminders == enabled else { return }
+            let existing = pending.map(\.identifier) + delivered.map(\.request.identifier)
+            scheduled.formUnion(existing.filter { $0.hasPrefix(Self.reminderPrefix) })
+            reconciledReminderScope = scope
+        }
+        removeReminders(scheduled.subtracting(wanted))
         for meeting in upcoming {
-            let id = "reel-meeting-" + Self.key(meeting)
+            let id = Self.reminderIdentifier(meeting)
             guard !scheduled.contains(id), schedule.shouldAttempt(key: Self.key(meeting), start: meeting.start, end: meeting.end, now: meeting.start) else { continue }
             var url = URLComponents(); url.scheme = "reel"; url.host = "join-meeting"
             url.queryItems = [URLQueryItem(name: "id", value: Self.key(meeting))]
@@ -582,9 +611,17 @@ final class MeetingJoinCoordinator: ObservableObject {
             content.userInfo = ["url": url.url!.absoluteString]
             let trigger: UNNotificationTrigger? = meeting.start > Date()
                 ? UNCalendarNotificationTrigger(dateMatching: Calendar.current.dateComponents([.year,.month,.day,.hour,.minute,.second], from: meeting.start), repeats: false) : nil
-            try? await center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
+            do {
+                try await center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
+                guard refreshScope == scope, reminders == enabled else {
+                    removeReminders([id])
+                    return
+                }
+                scheduled.insert(id)
+            } catch {
+                guard refreshScope == scope, reminders == enabled else { return }
+            }
         }
-        scheduled = wanted
     }
 
     private static func date(_ value: Any?) -> Date? {

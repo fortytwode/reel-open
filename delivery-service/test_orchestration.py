@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from app import create_app, deliver, DeliveryError, ProviderPending, verify_firebase
 from providers import choose_route
-from test_delivery import ROCKETSHIP_CONFIG, Service
+from test_delivery import CalendarSelections, ROCKETSHIP_CONFIG, Service
 
 class Store:
     def __init__(self): self.items = {}
@@ -60,7 +60,11 @@ class OrchestrationTests(unittest.TestCase):
         self.event = {'id':'event', 'iCalUID':'uid','start':{'dateTime':'2026-11-10T10:00:00Z'}, 'summary':'Authoritative title', 'attendees':[{'email':'nonattendee@rocketshiphq.com','responseStatus':'declined'},{'email':'external@example.com'},{'email':'x@rocketshiphq.com.evil'}], 'organizer':{'email':'owner@rocketshiphq.com'}}
         self.payload = {'id':'ee5ecec6-e403-4163-8f95-b503e3648c40','title':'Test','started_at':'2026-11-10T10:00:00Z','attendees':['forged@rocketshiphq.com'],'summary':'Notes','segments':[{'start':0,'end':1,'text':'Full transcript'}], 'calendar':{'event_id':'event','ical_uid':'uid','occurrence_start':'2026-11-10T10:00:00Z'}}
         self.claims = {'iss':'https://securetoken.google.com/advisr-485ac','aud':'advisr-485ac','sub':'uid','email':'owner@rocketshiphq.com','email_verified':True}
-        self.client = create_app(lambda token:self.claims, lambda email:Service([self.event]), store=self.store, providers=self.providers, clock=lambda:self.now).test_client()
+        self.calendar_store = CalendarSelections()
+        for name in ('owner', 'nonattendee', 'reader', 'uninvited', 'late', 'third'):
+            self.calendar_store.select(f'{name}@rocketshiphq.com')
+        self.client = create_app(lambda token:self.claims, lambda email:Service([self.event]), store=self.store,
+                                 calendar_store=self.calendar_store, providers=self.providers, clock=lambda:self.now).test_client()
     def post(self, payload=None): return self.client.post('/delivery/complete', json=payload or self.payload, headers={'Authorization':'Bearer x'})
     def test_authoritative_recipients_and_receipt(self):
         result = self.post(); self.assertEqual(result.status_code,200,result.json)
@@ -74,11 +78,11 @@ class OrchestrationTests(unittest.TestCase):
         args = (self.payload, self.claims['email'], self.store, self.providers,
                 lambda owner: Service([self.event]), lambda: self.now)
         with self.assertRaisesRegex(ProviderPending, 'Follow-up handoff is unconfirmed'):
-            deliver(*args, followup_items=action_items)
+            deliver(*args, followup_items=action_items, calendar_selection=lambda: ('primary',))
         self.assertEqual(self.providers.sends, 1)
         self.event['recurringEventId'] = 'edited-series'
-        receipt = deliver(*args)
-        self.assertEqual(receipt, deliver(*args, followup_items=action_items))
+        receipt = deliver(*args, calendar_selection=lambda: ('primary',))
+        self.assertEqual(receipt, deliver(*args, followup_items=action_items, calendar_selection=lambda: ('primary',)))
         self.assertEqual(self.providers.sends, 1)
         self.assertEqual(submit.call_count, 2)
         self.assertEqual(submit.call_args_list[0], submit.call_args_list[1])
@@ -105,7 +109,7 @@ class OrchestrationTests(unittest.TestCase):
         submit = self.providers.submit_followups = Mock(return_value=True)
         receipt = deliver(self.payload, self.claims['email'], self.store, self.providers,
                           lambda owner: Service([self.event]), lambda: self.now,
-                          followup_items=[{'task':'Share the decision'}])
+                          followup_items=[{'task':'Share the decision'}], calendar_selection=lambda: ('primary',))
         self.assertEqual(receipt['route'], 'private')
         choose.assert_not_called()
         submit.assert_not_called()
@@ -114,6 +118,38 @@ class OrchestrationTests(unittest.TestCase):
         self.payload['calendar'] = None
         result = self.post(); self.assertEqual(result.status_code,200,result.json)
         self.assertEqual(result.json['recipients'], ['owner@rocketshiphq.com']); self.assertEqual(result.json['route'],'private')
+    def test_unselected_calendar_cannot_route_or_send_notes(self):
+        service = Service([])
+        service.event_api.get = Mock()
+        service.event_api.list = Mock()
+        self.client = create_app(lambda _: self.claims, lambda _: service, store=self.store,
+                                 calendar_store=self.calendar_store, providers=self.providers).test_client()
+        self.payload['calendar']['calendar_id'] = 'shared'
+        result = self.post()
+        self.assertEqual((result.status_code, result.json['code']), (403, 'calendar_selection_required'))
+        service.event_api.get.assert_not_called()
+        service.event_api.list.assert_not_called()
+        self.assertEqual(self.providers.creates, 0)
+        self.assertEqual(self.providers.sends, 0)
+
+    def test_disabling_scope_during_lookup_stops_delivery_and_keeps_manual_available(self):
+        service = Service([self.event])
+        original = service.event_api.get
+        def revoke(**args):
+            self.calendar_store.select(self.claims['email'], enabled=False)
+            return original(**args)
+        service.event_api.get = revoke
+        factory = Mock(return_value=service)
+        self.client = create_app(lambda _: self.claims, factory, store=self.store, calendar_store=self.calendar_store,
+                                 providers=self.providers, clock=lambda: self.now).test_client()
+        self.assertEqual(self.post().status_code, 409)
+        self.assertEqual(self.providers.sends, 0)
+        result = self.post()
+        self.assertEqual((result.status_code, result.json['code']), (403, 'calendar_selection_required'))
+        factory.assert_called_once_with(self.claims['email'])
+        result = self.post({**self.payload, 'calendar': None})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json['recipients'], [self.claims['email']])
     def test_shared_calendar_reader_cannot_trigger_delivery(self):
         self.claims['email'] = 'reader@rocketshiphq.com'
         result = self.post()
@@ -228,7 +264,7 @@ class SlackRecapTests(unittest.TestCase):
         self.slack.post_dm.return_value = '1000.001'
         self.client = create_app(
             lambda token: self.claims, lambda email: Service([self.event]), store=self.store,
-            providers=self.providers, clock=lambda: self.now, slack=self.slack).test_client()
+            calendar_store=self.calendar_store, providers=self.providers, clock=lambda: self.now, slack=self.slack).test_client()
 
     def test_one_private_dm_per_matched_reel_recipient(self):
         self.enable_slack()
@@ -698,9 +734,12 @@ class OrganizationTests(unittest.TestCase):
             },
         }
         self.headers = {'Authorization': 'Bearer token'}
+        selections = CalendarSelections()
+        for name in ('owner', 'declined', 'unanswered'):
+            selections.select(f'{name}@acme.example', self.claims['sub'])
         self.client = create_app(
             lambda token: self.claims, lambda email: Service([self.event]),
-            store=self.store, providers=self.providers, clock=lambda: 1000,
+            store=self.store, calendar_store=selections, providers=self.providers, clock=lambda: 1000,
         ).test_client()
 
     def complete(self, payload=None):

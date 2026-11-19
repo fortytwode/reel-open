@@ -59,9 +59,9 @@ function readFragmentRequest() {
   return { url: request.url, title: typeof request.title === "string" ? request.title.slice(0, 180) : "" };
 }
 
-export function mountMeetingCalendar({ container, session, onError } = {}) {
+export function mountMeetingCalendar({ container, session, onError, onSelectionChange } = {}) {
   if (!container || typeof session !== "function") throw new TypeError("container and session are required");
-  const state = { uid: null, config: null, events: [], due: [], capabilities: null, busy: false, error: "", download: null, browserRequest: null, disposed: false };
+  const state = { uid: null, config: null, events: [], due: [], capabilities: null, busy: false, error: "", download: null, browserRequest: null, disposed: false, picker: null };
   let pollTimer = null;
 
   container.innerHTML = `
@@ -107,7 +107,7 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
   function clearForAccountChange(uid = null) {
     state.uid = uid;
     state.config = null; state.events = []; state.due = []; state.capabilities = null;
-    state.error = ""; state.busy = false; state.download = null;
+    state.error = ""; state.busy = false; state.download = null; state.picker = null;
     relaySchedule();
     for (const element of container.querySelectorAll('input[type="checkbox"]')) element.checked = false;
   }
@@ -141,10 +141,14 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
 
   function render() {
     if (state.disposed) return;
-    const savedInputs = [...container.querySelectorAll('input[type="checkbox"],select')].map(el => ({
+    const consentKey = JSON.stringify([state.uid, state.config?.enabled, state.config?.scope_revision, state.config?.consent_mode]);
+    const savedInputs = [...container.querySelectorAll('input[type="checkbox"]:not([data-calendar-choice]),select')]
+      .filter(el => consentKey === state.renderedConsentKey || !["consent", "standing-attest"].includes(el.dataset.field))
+      .map(el => ({
       selector: el.id ? '#' + CSS.escape(el.id) : el.dataset.attest ? '[data-attest="' + CSS.escape(el.dataset.attest) + '"]' : '[data-field="' + el.dataset.field + '"]',
       checked: el.checked, value: el.value,
     }));
+    state.renderedConsentKey = consentKey;
     const capability = state.capabilities || {};
     const calendarAvailable = capability.calendar === true;
     const botAvailable = capability.bot === true;
@@ -154,7 +158,7 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
     const hybridCloud = cloudNames.length > 0;
     const platform = String(capability.platform || navigator.platform || "").toLowerCase();
     const isMac = /mac|darwin/.test(platform);
-    q(".mc-subtitle").textContent = desktop ? "Connect Google Calendar to manage meetings in Reel." : "Connect Google Calendar to request meeting entry.";
+    q(".mc-subtitle").textContent = "Choose which Google calendars Reel can use for meetings and recaps.";
     q("[data-extension-note]").hidden = desktop;
     q("[data-cloud-note]").hidden = desktop && !hybridCloud;
     q("[data-cloud-note]").textContent = desktop && hybridCloud
@@ -174,9 +178,18 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
     ].join("");
 
     const connected = !!state.config?.enabled;
-    q("[data-connect]").innerHTML = !calendarAvailable ? "" : connected
-      ? `<p class="mc-connected">Google Calendar connected</p>`
-      : `<button type="button" class="mc-primary" data-action="connect" ${!state.uid || state.busy ? "disabled" : ""}>Connect Google Calendar</button>`;
+    const picker = state.picker;
+    const ready = state.uid && !state.busy;
+    const count = state.config?.calendar_ids?.length || 0;
+    q("[data-connect]").innerHTML = !calendarAvailable ? "" : picker ? `
+      <fieldset class="mc-calendar-choices" ${state.busy ? "disabled" : ""}>
+        <legend>Google calendars</legend>
+        ${picker.sources.map(({id, title, primary}) => `<label class="mc-check"><input type="checkbox" data-calendar-choice value="${esc(id)}" ${picker.selected.has(id) ? "checked" : ""}>${esc(title)}${primary ? " (work primary)" : ""}</label>`).join("") || '<p class="mc-note">No Google calendars are available to this work account.</p>'}
+        ${picker.unavailable ? '<p class="mc-note">Some saved calendars are unavailable. Saving replaces them with your current choices.</p>' : ""}
+        <div class="mc-actions"><button type="button" class="mc-primary" data-action="save-calendars" ${!picker.selected.size || picker.selected.size > 25 ? "disabled" : ""}>Save selected calendars</button><button type="button" data-action="cancel-calendars">Cancel</button></div>
+      </fieldset>` : `
+      ${connected ? `<p class="mc-connected">${count} Google ${count === 1 ? "calendar" : "calendars"} selected</p>` : ""}
+      <button type="button" class="mc-primary" data-action="choose-calendars" ${!ready ? "disabled" : ""}>${connected ? "Change calendars" : "Choose Google calendars"}</button>`;
 
     const mode = state.config?.consent_mode === "approved" ? "approved" : "ask";
     const cloudCalendar = !desktop || hybridCloud;
@@ -211,7 +224,8 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
       const desktopJoin = eventDesktop && isMac && /^[a-f0-9]{64}$/i.test(String(event.id || ""))
         ? `<a class="mc-primary" href="reel://join-meeting?id=${encodeURIComponent(event.id)}">Open in Reel</a>`
         : eventDesktop && !isMac ? `<a href="/record?mode=meeting">Capture manually</a>` : "";
-      return `<li class="mc-event"><div class="mc-event-copy"><strong>${esc(event.title || "Untitled meeting")}</strong><time>${esc(dateText(event.start))}</time><span class="mc-status mc-status-${esc(event.status || "unknown")}">${esc(statusText(event.status))}</span><div class="mc-actions">${downloads}${notion}${desktopJoin}</div></div>${actionable ? `<div class="mc-event-actions"><label class="mc-check"><input type="checkbox" data-attest="${esc(event.id)}"> I confirm participants agreed to recording</label><button type="button" data-action="approve" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Approve and join</button><button type="button" data-action="decline" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Decline</button></div>` : ""}</li>`;
+      const detail = event.notion_status === "calendar_selection_required" ? `<span class="mc-status">${esc(event.detail)}</span>` : "";
+      return `<li class="mc-event"><div class="mc-event-copy"><strong>${esc(event.title || "Untitled meeting")}</strong><time>${esc(dateText(event.start))}</time><span class="mc-status mc-status-${esc(event.status || "unknown")}">${esc(statusText(event.status))}</span>${detail}<div class="mc-actions">${downloads}${notion}${desktopJoin}</div></div>${actionable ? `<div class="mc-event-actions"><label class="mc-check"><input type="checkbox" data-attest="${esc(event.id)}"> I confirm participants agreed to recording</label><button type="button" data-action="approve" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Approve and join</button><button type="button" data-action="decline" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Decline</button></div>` : ""}</li>`;
     }).join("")}</ul>`;
 
     const browserHost = q("[data-browser]");
@@ -240,6 +254,7 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
         request("/calendar/meetings", "GET", undefined, uid).catch((error) => ({ _error: error })),
       ]);
       if (state.uid !== uid || state.disposed) return;
+      const previous = state.config;
       state.config = settings.config || null;
       state.events = Array.isArray(settings.events) ? settings.events : [];
       state.capabilities = settings.capabilities || { calendar: false, bot: false };
@@ -247,6 +262,10 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
       state.due = Array.isArray(due) ? due : Array.isArray(due.meetings) ? due.meetings : Array.isArray(due.events) ? due.events : [];
       if (due._error) state.error = due._error.message;
       else state.error = "";
+      if (previous?.scope_revision !== state.config?.scope_revision || previous?.enabled !== state.config?.enabled) {
+        state.picker = null;
+        onSelectionChange?.();
+      }
       render();
     } catch (error) { if (!state.disposed) notifyError(error); }
   }
@@ -257,9 +276,11 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
     const eventId = button.dataset.id;
     const selectedMode = q('[data-field="consent"]')?.value || "ask";
     const standingAttested = !!q('[data-field="standing-attest"]')?.checked;
+    const scopeRevision = state.config?.scope_revision;
     const meetingAttested = eventId ? !!q(`[data-attest="${CSS.escape(eventId)}"]`)?.checked : false;
     const browserAttested = !!q('[data-field="browser-attest"]')?.checked;
     state.busy = true; state.error = ""; render();
+    let syncError;
     try {
       const uid = state.uid;
       if (action.startsWith("download-")) {
@@ -272,18 +293,31 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
         q('[data-message]').replaceChildren(link); link.click();
       } else if (action === "retry-notion") {
         await request(`/calendar/meetings/${encodeURIComponent(eventId)}/notion`, "POST", {}, uid);
-      } else if (action === "connect") {
-        await request("/calendar/connect", "POST", { calendar_ids: ["primary"] }, uid);
+      } else if (action === "choose-calendars") {
+        const result = await request("/calendar/sources", "GET", undefined, uid);
+        const sources = result.sources;
+        if (!Array.isArray(sources)) throw new Error("Google calendar choices are unavailable.");
+        const saved = state.config?.enabled ? state.config.calendar_ids || [] : [];
+        const selected = new Set(sources.filter(source => saved.includes(source.id)).map(source => source.id));
+        state.picker = {sources, selected, unavailable: saved.length > selected.size};
+      } else if (action === "cancel-calendars") {
+        state.picker = null;
+      } else if (action === "save-calendars") {
+        const result = await request("/calendar/connect", "POST", { calendar_ids: [...state.picker.selected] }, uid);
+        syncError = result.sync_error;
+        state.picker = null;
       } else if (action === "save-consent") {
         const mode = selectedMode;
         const payload = { consent_mode: mode };
         if (mode === "approved") {
           if (!standingAttested) throw new Error("Confirm participant consent before enabling standing consent.");
           payload.participant_consent_attested = true;
+          payload.scope_revision = scopeRevision;
         }
         await request("/calendar/settings", "POST", payload, uid);
       } else if (action === "disconnect") {
         await request("/calendar/disconnect", "POST", {}, uid);
+        state.picker = null;
       } else if (action === "sync") {
         await request("/calendar/sync", "POST", {}, uid);
       } else if (action === "approve") {
@@ -302,7 +336,10 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
       } else if (action === "browser-dismiss") {
         state.browserRequest = null;
       }
-      if (state.uid === uid) await refresh(true);
+      if (state.uid === uid) {
+        await refresh(true);
+        if (syncError && state.uid === uid) state.error = syncError;
+      }
     } catch (error) { if (!state.disposed) notifyError(error); }
     finally { state.busy = false; render(); }
   }
@@ -310,6 +347,14 @@ export function mountMeetingCalendar({ container, session, onError } = {}) {
   container.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-action]");
     if (button && container.contains(button)) act(button);
+  });
+  container.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("input[data-calendar-choice]");
+    if (!checkbox || !state.picker) return;
+    const selected = state.picker.selected;
+    if (checkbox.checked) selected.add(checkbox.value);
+    else selected.delete(checkbox.value);
+    q('[data-action="save-calendars"]').disabled = !selected.size || selected.size > 25;
   });
   const onVisibility = () => {
     clearInterval(pollTimer);

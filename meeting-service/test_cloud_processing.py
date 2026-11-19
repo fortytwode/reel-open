@@ -59,6 +59,8 @@ def setup(monkeypatch):
     app = types.ModuleType('canonical_delivery.app')
     app.GCSStateStore = lambda _: object()
     app.calendar_service = object()
+    app.CalendarSelectionRequired = type('CalendarSelectionRequired', (Exception,), {})
+    app.selected_calendar_ids = lambda store, owner, uid: ('primary',)
     app.deliver = lambda payload, owner, *args, **kw: deliveries.append((payload, owner, kw['followup_items'])) or {'url': 'https://notes'}
     providers = types.ModuleType('canonical_delivery.providers')
     providers.configured_providers = lambda **kwargs: object()
@@ -103,6 +105,29 @@ def test_completed_execution_uses_immutable_transcript_summary_and_calendar_refe
     assert 'action_items' not in payload
     assert run(setup) == 'delivered' and len(deliveries) == 1
     assert len(tasks) == 3
+
+
+def test_removed_calendar_holds_recaps_without_discarding_capture_or_retry_step(setup, monkeypatch):
+    import sys
+    store, bucket, record, _, tasks, deliveries = setup
+    app = sys.modules['canonical_delivery.app']
+    original = app.deliver
+    def reject(*args, **kwargs):
+        raise app.CalendarSelectionRequired()
+    monkeypatch.setattr(app, 'deliver', reject)
+    for _ in range(3):
+        assert run(setup) == 'processing'
+    assert run(setup) == 'calendar_selection_required'
+    assert run(setup) == 'calendar_selection_required'
+    key = 'executions/' + record['execution_id']
+    saved, generation = store.load(key)
+    assert saved['artifacts']['transcript.txt'] and saved['status'] == 'completed'
+    assert not saved['processing_enqueue_needed'] and not saved['processing_lease_until']
+    assert deliveries == [] and len(tasks) == 3
+    monkeypatch.setattr(app, 'deliver', original)
+    saved['processing_status'] = 'processing'
+    store.cas(key, saved, generation)
+    assert run(setup) == 'delivered' and len(deliveries) == 1
 
 
 def test_caption_labels_survive_saved_transcript_summary_and_delivery(setup, monkeypatch):

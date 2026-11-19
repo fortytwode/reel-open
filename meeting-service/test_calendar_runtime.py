@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import uuid
@@ -9,6 +10,10 @@ import pytest
 from app import create_app
 from test_app import FakeStore
 from calendar_runtime import BotDispatcher as RealBotDispatcher
+
+
+def available_calendars():
+    return [{"id": "work@example.com", "primary": True, "summary": "Work"}, {"id": "shared", "summary": "Shared"}]
 
 
 @pytest.fixture
@@ -32,6 +37,8 @@ def setup(monkeypatch, tmp_path):
              "hangoutLink": "https://meet.google.com/abc-defg-hij"}
 
     class Calendar:
+        list_calendars = staticmethod(available_calendars)
+
         def list_events(self, *args):
             return [event]
 
@@ -63,6 +70,108 @@ def test_explicit_connect_and_private_event_projection(setup):
     assert response.headers["Cache-Control"] == "no-store"
     key = "calendar/" + hashlib.sha256(claims["email"].encode()).hexdigest()
     assert store.load(key)[0]["identity"]["owner_uid"] == claims["sub"]
+
+
+def test_calendar_picker_reads_metadata_before_confirmation_and_events_only_after_save(setup, monkeypatch):
+    import calendar_runtime as runtime
+    client, store, claims, _, _ = setup
+    key = "calendar/" + runtime.digest(claims["email"])
+    reads = []
+
+    class Calendar:
+        def list_calendars(self):
+            reads.append("metadata")
+            return [
+                {"id": claims["email"], "primary": True, "summary": "Work", "description": "private"},
+                {"id": "team", "summaryOverride": "Team calendar", "private": "omit"},
+            ]
+
+        def list_events(self, calendar_id, *_):
+            assert store.load(key)[0]["config"]["calendar_ids"] == ["team"]
+            reads.append(calendar_id)
+            return []
+
+    def factory(owner, _):
+        assert owner == claims["email"]
+        return Calendar()
+
+    monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: factory)
+    auth = {"Authorization": "Bearer firebase"}
+    assert client.get("/calendar/sources").status_code == 401
+    assert client.get("/calendar/settings", headers=auth).json["config"] is None
+    result = client.get("/calendar/sources", headers=auth)
+    assert result.headers["Cache-Control"] == "no-store"
+    assert result.json["sources"] == [{"id": "primary", "title": "Work", "primary": True},
+                                      {"id": "team", "title": "Team calendar", "primary": False}]
+    assert reads == ["metadata"] and store.load(key) == (None, 0)
+    assert post(client, "/calendar/connect", {"calendar_ids": ["forged"]}).status_code == 400
+    assert store.load(key) == (None, 0)
+    result = post(client, "/calendar/connect", {"calendar_ids": ["team"]})
+    assert result.status_code == 200
+    assert reads == ["metadata", "metadata", "metadata", "team"]
+    assert post(client, "/calendar/sync", {}).status_code == 200
+    assert reads[-2:] == ["team", "team"]
+
+
+def test_calendar_choices_stay_saved_when_initial_event_sync_is_unavailable(setup, monkeypatch):
+    import calendar_runtime as runtime
+    client, _, _, _, _ = setup
+
+    def unavailable(*_):
+        raise runtime.CalendarProviderError("unavailable")
+
+    calendar = SimpleNamespace(list_calendars=available_calendars, list_events=unavailable)
+    monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: lambda *_: calendar)
+    response = post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
+    assert response.status_code == 200
+    assert response.json["config"]["calendar_ids"] == ["primary"]
+    assert "saved" in response.json["sync_error"]
+    assert post(client, "/calendar/sync", {}).status_code == 503
+
+
+def test_standing_consent_rejects_a_stale_tab_even_when_scope_changes_back(setup):
+    client, _, _, _, _ = setup
+    first = post(client, "/calendar/connect", {"calendar_ids": ["primary"]}).json["config"]
+    attestation = {"consent_mode": "approved", "participant_consent_attested": True}
+    assert post(client, "/calendar/settings", attestation).status_code == 409
+    changed = post(client, "/calendar/connect", {"calendar_ids": ["shared"]}).json["config"]
+    expected = {**attestation, "scope_revision": first["scope_revision"]}
+    assert post(client, "/calendar/settings", expected).status_code == 409
+    restored = post(client, "/calendar/connect", {"calendar_ids": ["primary"]}).json["config"]
+    assert changed["scope_revision"] != restored["scope_revision"] != first["scope_revision"]
+    assert restored["consent_mode"] == "ask"
+    assert post(client, "/calendar/settings", expected).status_code == 409
+    result = post(client, "/calendar/settings", {**attestation, "scope_revision": restored["scope_revision"]})
+    assert result.json["config"]["consent_mode"] == "approved"
+    same = post(client, "/calendar/connect", {"calendar_ids": ["primary"]}).json["config"]
+    assert same == result.json["config"]
+
+
+def test_excluded_cloud_recap_requires_explicit_retry_after_selection_returns(setup, monkeypatch):
+    import calendar_runtime as runtime
+    client, store, claims, _, _ = setup
+    connected = post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
+    event_id = connected.json["events"][0]["id"]
+    owner_key = "calendar/" + runtime.digest(claims["email"])
+    state, generation = store.load(owner_key)
+    state["events"][event_id].update(status="completed", attempted=True, execution_id="saved")
+    store.cas(owner_key, state, generation)
+    store.cas("executions/saved", {"execution_id": "saved", "owner_id": claims["sub"], "status": "completed",
+              "processing_status": "calendar_selection_required", "audio_generation": 1, "processing_step": 3,
+              "artifacts": {"transcript.txt": True, "recording.mp4": True}}, 0)
+    response = post(client, "/calendar/disconnect", {})
+    old_capture = response.json["events"][0]
+    assert old_capture["video_available"] and old_capture["transcript_available"]
+    retry = f"/calendar/meetings/{event_id}/notion"
+    assert post(client, retry, {}).status_code == 400
+    post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
+    scheduled = []
+    monkeypatch.setattr(runtime, "CloudTasks", lambda: SimpleNamespace(schedule_processing=scheduled.append))
+    result = post(client, retry, {})
+    assert result.json["status"] == "processing"
+    assert scheduled == ["saved"]
+    saved, _ = store.load("executions/saved")
+    assert saved["processing_step"] == 3 and saved["artifacts"]["transcript.txt"]
 
 
 def test_new_uid_cannot_read_previous_calendar_for_same_email(setup):
@@ -599,6 +708,8 @@ def hybrid_calendar(setup, monkeypatch, pilot="teams"):
                                    ("meet", "https://meet.google.com/abc-defg-hij"),
                                    ("zoom", "https://acme.zoom.us/j/123456789")]]
     class Calendar:
+        list_calendars = staticmethod(available_calendars)
+
         def list_events(self, *args):
             return items
     monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: lambda *args: Calendar())
@@ -635,6 +746,8 @@ def shared_calendar(setup, monkeypatch, *, difference=None, uncertain=False, pil
             if difference == "missing_uid": item.pop("iCalUID")
         items[owner] = item
     class Calendar:
+        list_calendars = staticmethod(available_calendars)
+
         def __init__(self, owner): self.owner = owner
         def list_events(self, *args): return [items[self.owner]]
     monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: lambda owner, *_: Calendar(owner))
@@ -664,7 +777,8 @@ def shared_calendar(setup, monkeypatch, *, difference=None, uncertain=False, pil
         connected = post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
         assert connected.status_code == 200
         events[owner] = connected.json["events"][0]["id"]
-        assert post(client, "/calendar/settings", {"consent_mode": "approved", "participant_consent_attested": True}).status_code == 200
+        assert post(client, "/calendar/settings", {"consent_mode": "approved", "participant_consent_attested": True,
+                    "scope_revision": connected.json["config"]["scope_revision"]}).status_code == 200
     def dispatch(owner):
         select(owner)
         core = runtime.CalendarMeetings(store, runtime.GoogleCalendarFactory(), runtime.CloudTasks(), RealBotDispatcher(store))
@@ -927,6 +1041,26 @@ def test_hybrid_browser_cancellation_wins_and_revoked_owner_capability_does_not_
     assert store.load(key) == before
 
 
+@pytest.mark.parametrize("same_roster", [False, True])
+def test_browser_collapses_only_identical_eligible_calendar_copies(setup, monkeypatch, same_roster):
+    import calendar_runtime as runtime
+    client, _, _, calls, _ = setup
+    _, items = hybrid_calendar(setup, monkeypatch)
+    teams = dict(items[0], iCalUID="same-invitation@example.com")
+    shared = dict(teams, id="shared-copy")
+    if not same_roster:
+        shared["attendees"] = [{"email": "another@example.com"}]
+    calendar = SimpleNamespace(list_calendars=available_calendars,
+                               list_events=lambda calendar_id, *_: [teams if calendar_id == "primary" else shared])
+    monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: lambda *_: calendar)
+    connected = post(client, "/calendar/connect", {"calendar_ids": ["primary", "shared"]})
+    assert len([event for event in connected.json["events"] if event["title"] == "teams"]) == 2
+    body = {"meeting_url": teams["hangoutLink"], "participant_consent_attested": True}
+    response = post(client, "/calendar/browser", body)
+    assert response.status_code == (200 if same_roster else 400)
+    assert len(calls) == int(same_roster)
+
+
 @pytest.mark.parametrize("url", ["https://teams.microsoft.com/meet/123456789", "https://evil.test/teams.microsoft.com/meet/123456789"])
 def test_hybrid_dispatcher_requires_valid_server_known_occurrence_before_writes(monkeypatch, url):
     import calendar_runtime as runtime
@@ -940,6 +1074,65 @@ def test_hybrid_dispatcher_requires_valid_server_known_occurrence_before_writes(
     assert store.data == before
 
 
+def test_rearmed_cloud_task_uses_a_fresh_idempotent_name_and_callback(monkeypatch):
+    import calendar_runtime as runtime
+    monkeypatch.setenv("CALENDAR_TASK_QUEUE", "projects/test/locations/us-central1/queues/start")
+    monkeypatch.setenv("MEETING_SERVICE_URL", "https://meeting.example")
+    monkeypatch.setenv("INTERNAL_SERVICE_ACCOUNT", "reel@example.com")
+    submitted = []
+    def post(_url, *, json, timeout):
+        submitted.append(json["task"])
+        return SimpleNamespace(status_code=409)
+    monkeypatch.setattr(runtime, "cloud_session", lambda: SimpleNamespace(post=post))
+    request = ("owner", "event", "2026-11-19T18:00:00Z")
+    assert runtime.CloudTasks().schedule(*request) != runtime.CloudTasks().schedule(*request, "rearmed")
+    assert runtime.CloudTasks().schedule(*request, "rearmed") == submitted[-2]["name"]
+    bodies = [json.loads(base64.b64decode(task["httpRequest"]["body"])) for task in submitted]
+    assert "task_generation" not in bodies[0] and bodies[1]["task_generation"] == "rearmed"
+
+
+@pytest.mark.parametrize("phase", ["reserve", "before_launch"])
+def test_unshared_calendar_dispatch_stops_when_selection_changes(monkeypatch, phase):
+    import calendar_runtime as runtime
+    from google.cloud import storage
+    monkeypatch.delenv("MEETING_CAPTURE_PROVIDER", raising=False)
+    monkeypatch.delenv("REEL_MEETING_ALLOWED_DOMAIN", raising=False)
+    monkeypatch.setenv("BOT_JOB_NAME", "projects/test/locations/us-central1/jobs/bot")
+    monkeypatch.setenv("BOT_BUCKET", "private-test-bucket")
+    monkeypatch.setenv("MEETING_SERVICE_URL", "https://meeting.example")
+    owner, store = "owner@example.com", FakeStore()
+    key, now = "calendar/" + runtime.digest(owner), datetime.now(UTC)
+    event = {"id": "occurrence", "calendar_id": "primary", "title": "Meeting", "start": now.isoformat(),
+             "end": (now + timedelta(minutes=30)).isoformat(), "join_url": "https://meet.google.com/abc-defg-hij",
+             "attendees": [owner], "status": "dispatching", "attempted": True}
+    store.cas(key, {"identity": {"owner_uid": "owner-uid"}, "config": {"enabled": True, "calendar_ids": ["primary"]},
+                    "events": {event["id"]: event}}, 0)
+    load, loaded = store.load, []
+
+    def remove_selection():
+        state, generation = load(key)
+        state["config"]["calendar_ids"] = ["shared"]
+        store.cas(key, state, generation)
+
+    def withdraw_on_reservation(path):
+        if path == key:
+            loaded.append(path)
+            if len(loaded) == 2:
+                remove_selection()
+        return load(path)
+
+    if phase == "reserve":
+        store.load = withdraw_on_reservation
+    blob = SimpleNamespace(upload_from_string=lambda *_a, **_kw: remove_selection())
+    bucket = SimpleNamespace(blob=lambda _path: blob)
+    monkeypatch.setattr(storage, "Client", lambda: SimpleNamespace(bucket=lambda _name: bucket))
+    launches = []
+    monkeypatch.setattr(runtime, "cloud_session", lambda: SimpleNamespace(post=lambda *a, **kw: launches.append((a, kw))))
+    with pytest.raises(runtime.CalendarMeetingError, match="revoked"):
+        runtime.BotDispatcher(store)(owner, event)
+    assert launches == []
+
+
 
 @pytest.mark.parametrize("mode", ["ask", "approved"])
 @pytest.mark.parametrize("calendar_copies", [False, True])
@@ -949,11 +1142,13 @@ def test_hybrid_browser_launches_real_dispatcher_once_for_known_occurrence(setup
     import calendar_runtime as runtime
     from google.cloud import storage
     client, store, claims, _, _ = setup
-    hybrid_calendar(setup, monkeypatch, pilot)
+    connected, _ = hybrid_calendar(setup, monkeypatch, pilot)
     if calendar_copies:
-        assert post(client, "/calendar/connect", {"calendar_ids": ["primary", "shared"]}).status_code == 200
+        connected = post(client, "/calendar/connect", {"calendar_ids": ["primary", "shared"]})
+        assert connected.status_code == 200
     if mode == "approved":
-        assert post(client, "/calendar/settings", {"consent_mode": mode, "participant_consent_attested": True}).status_code == 200
+        assert post(client, "/calendar/settings", {"consent_mode": mode, "participant_consent_attested": True,
+                    "scope_revision": connected.json["config"]["scope_revision"]}).status_code == 200
     monkeypatch.setattr(runtime, "BotDispatcher", RealBotDispatcher)
     monkeypatch.setenv("MEETING_SERVICE_URL", "https://meeting.example")
     uploads, launches = [], []

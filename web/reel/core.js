@@ -55,7 +55,7 @@ export function decodeMeeting(value) {
   const result = { attendees: parseAttendees(value && typeof value === "object" && !Array.isArray(value) ? value.attendees : []) };
   if (typeof value?.ownerUID === "string" && value.ownerUID.length <= 128) result.ownerUID = value.ownerUID;
   if (value && Object.prototype.hasOwnProperty.call(value, "calendar")) result.calendar = value.calendar;
-  if (["pending", "failed", "confirmed", "noSpeech"].includes(value?.deliveryStatus)) result.deliveryStatus = value.deliveryStatus;
+  if (["pending", "failed", "confirmed", "noSpeech", "calendarSelectionRequired"].includes(value?.deliveryStatus)) result.deliveryStatus = value.deliveryStatus;
   if (typeof value?.deliveryPayload === "string") result.deliveryPayload = value.deliveryPayload;
   for (const field of ["deliveryReceipt", "deliveryError", "deliveryRetryAt"]) {
     if (value && Object.prototype.hasOwnProperty.call(value, field)) result[field] = value[field];

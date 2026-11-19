@@ -295,11 +295,12 @@ final class Publisher {
                     self.holdMeetingForReview(&latest)
                     return
                 }
+                let requiresCalendarSelection = error is MeetingDeliveryService.CalendarSelectionRequired
                 latest.meeting?.deliveryStatus = .failed
                 latest.meeting?.deliveryError = error.localizedDescription
-                latest.meeting?.deliveryRetryAt = Date().addingTimeInterval(300)
+                latest.meeting?.deliveryRetryAt = requiresCalendarSelection ? .distantFuture : Date().addingTimeInterval(300)
                 self.model.update(latest)
-                Toast.show("Meeting delivery needs attention. Your transcript and video are saved.", isError: true)
+                Toast.show(requiresCalendarSelection ? error.localizedDescription : "Meeting delivery needs attention. Your transcript and video are saved.", isError: true)
             }
         }
         deliveries[id] = task

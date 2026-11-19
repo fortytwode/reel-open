@@ -7,7 +7,12 @@ if let exitCode = CLI.handleImmediate(CommandLine.arguments) {
 
 let app = NSApplication.shared
 let delegate = MainActor.assumeIsolated { AppDelegate() }
-MainActor.assumeIsolated { delegate.cliRecordTest = CLI.parseRecordTest(CommandLine.arguments) }
+let recordTest = CLI.parseRecordTest(CommandLine.arguments)
+if CommandLine.arguments.contains("--record-test"), recordTest == nil {
+    FileHandle.standardError.write(Data("Invalid --record-test arguments. See Reel --help.\n".utf8))
+    exit(2)
+}
+MainActor.assumeIsolated { delegate.cliRecordTest = recordTest }
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

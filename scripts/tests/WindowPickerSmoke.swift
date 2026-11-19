@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreImage
 import ScreenCaptureKit
 
@@ -6,15 +7,27 @@ import ScreenCaptureKit
 // Build ReelCore first, then set PRODUCTS to the build products directory containing
 // ReelCore.swiftmodule and ReelCore.o. Run from the repository root:
 // swiftc -parse-as-library -I "$PRODUCTS" "$PRODUCTS/ReelCore.o" \
-//   Sources/Reel/Log.swift Sources/Reel/Capture/ScreenCapture.swift \
+//   Sources/Reel/Log.swift Sources/Reel/Capture/ScreenCapture.swift Sources/Reel/WindowActivation.swift \
 //   Sources/Reel/UI/WindowPicker.swift scripts/tests/WindowPickerSmoke.swift -o /tmp/reel-window-picker-smoke
 // /tmp/reel-window-picker-smoke
 // Add --desktop-hit-test-only to run without the other-Space fixture.
 // Add --show-picker to inspect the production picker with a generated, non-private fixture.
+// Add --window-activation-only to test exact activation during capture of a generated window.
 @main @MainActor
 struct WindowPickerSmoke {
     static func main() {
         let app = NSApplication.shared
+        if CommandLine.arguments.contains("--activation-fixture") {
+            app.setActivationPolicy(.regular)
+            let selected = activationFixture(title: "Reel test blue target", color: NSColor(srgbRed: 0.1, green: 0.4, blue: 0.9, alpha: 1))
+            let sibling = activationFixture(title: "Reel test red sibling", color: .systemRed)
+            selected.orderFrontRegardless()
+            sibling.orderFrontRegardless()
+            print(selected.windowNumber)
+            fflush(stdout)
+            withExtendedLifetime([selected, sibling]) { app.run() }
+            return
+        }
         if CommandLine.arguments.contains("--accessory-fixture") {
             app.setActivationPolicy(.accessory)
             let window = NSWindow(contentRect: NSRect(x: 160, y: 160, width: 480, height: 300),
@@ -40,6 +53,17 @@ struct WindowPickerSmoke {
         app.run()
     }
 
+    static func activationFixture(title: String, color: NSColor) -> NSWindow {
+        let screen = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
+        let window = NSWindow(contentRect: NSRect(x: screen.midX - 360, y: screen.minY + 24, width: 720, height: 420),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = title
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
+        window.backgroundColor = color
+        return window
+    }
+
     static func floatingFixture(frame: NSRect, ignoresMouseEvents: Bool) -> NSWindow {
         let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.level = .floating
@@ -52,6 +76,10 @@ struct WindowPickerSmoke {
     }
 
     static func run() async throws {
+        if CommandLine.arguments.contains("--window-activation-only") {
+            try await checkWindowActivation()
+            return
+        }
         if CommandLine.arguments.contains("--desktop-hit-test-only") {
             try await checkAccessoryWindow()
             return
@@ -96,6 +124,73 @@ struct WindowPickerSmoke {
         try await checkFrameTimeout()
         try await checkResizedWindowCapture()
         print("Window picker smoke passed: \(offScreen.count) off-screen windows discovered and selectable; exclusions preserved.")
+    }
+
+    static func checkWindowActivation() async throws {
+        let fixture = Process()
+        fixture.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        fixture.arguments = ["--activation-fixture"]
+        fixture.standardOutput = FileHandle.nullDevice
+        try fixture.run()
+        defer { if fixture.isRunning { fixture.terminate() } }
+        let foreground = activationFixture(title: "Reel test foreground", color: .gray)
+        foreground.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+        defer { foreground.close() }
+
+        let pid = fixture.processIdentifier
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            let content = try await ScreenCapture.shareableContent()
+            let items = WindowPicker.candidates(content).filter { $0.window.owningApplication?.processID == pid }
+            if let target = items.first(where: { $0.title == "Reel test blue target" }),
+               let sibling = items.first(where: { $0.title == "Reel test red sibling" }) {
+                guard target.window.frame == sibling.window.frame else {
+                    throw Failure(message: "Focus fixture windows must overlap exactly (\(target.window.frame) and \(sibling.window.frame)).")
+                }
+                guard let frontBefore = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                      frontBefore != pid else {
+                    NSApp.activate()
+                    try await Task.sleep(for: .milliseconds(100))
+                    continue
+                }
+                let cancelled = await WindowActivation.activate(target.window, stillRecording: { false })
+                guard cancelled == .cancelled else { throw Failure(message: "Inactive recording attempted window focus.") }
+                if AXIsProcessTrusted() {
+                    let capture = ScreenCapture()
+                    try await capture.start(target: .window(target.window), size: target.window.frame.size,
+                                            fps: 10, showsCursor: false, showClicks: false, systemAudio: false)
+                    let result = await WindowActivation.activate(target.window, stillRecording: { true })
+                    let focused = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid &&
+                        focusedWindowTitle(ownerPID: pid) == target.title
+                    await capture.stop()
+                    guard result == .activated, focused else {
+                        throw Failure(message: "The exact selected window did not become frontmost (\(result)).")
+                    }
+                    print("Exact window focus during capture passed with an overlapping sibling.")
+                } else {
+                    let result = await WindowActivation.activate(target.window, stillRecording: { true })
+                    guard result == .accessibilityRequired,
+                          NSWorkspace.shared.frontmostApplication?.processIdentifier == frontBefore else {
+                        throw Failure(message: "Missing Accessibility permission silently changed focus or failed to report it (\(result)).")
+                    }
+                    print("Accessibility fallback passed with foreground unchanged.")
+                }
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw Failure(message: "Generated window focus fixtures were not discoverable.")
+    }
+
+    static func focusedWindowTitle(ownerPID: pid_t) -> String? {
+        let application = AXUIElementCreateApplication(ownerPID)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+        var title: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(focused as! AXUIElement, kAXTitleAttribute as CFString, &title) == .success else { return nil }
+        return title as? String
     }
 
     static func checkAccessoryWindow() async throws {

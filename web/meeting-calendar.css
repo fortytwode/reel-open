@@ -17,6 +17,8 @@
 #meeting-calendar-panel .mc-connect, #meeting-calendar-panel .mc-settings { margin-top: 12px; }
 #meeting-calendar-panel .mc-primary { font-weight: 600; }
 #meeting-calendar-panel .mc-connected { margin: 0; color: var(--muted, #687382); font-size: 13px; }
+#meeting-calendar-panel .mc-calendar-choices { margin: 0; padding: 12px; border: 1px solid var(--line, #dfe3e9); border-radius: 8px; }
+#meeting-calendar-panel .mc-calendar-choices .mc-check { margin: 6px 0; overflow-wrap: anywhere; }
 #meeting-calendar-panel .mc-consent-controls { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; align-items: center; gap: 8px; }
 #meeting-calendar-panel .mc-select-label { font-size: 13px; font-weight: 600; }
 #meeting-calendar-panel select { min-width: 210px; }

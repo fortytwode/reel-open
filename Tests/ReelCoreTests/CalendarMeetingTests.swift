@@ -140,33 +140,50 @@ final class CalendarMeetingTests: XCTestCase {
         XCTAssertTrue(DesktopCalendarRouting.allowsLocal(routingMeeting(teams), routing: routing))
     }
 
-    func testAllDesktopCalendarsIncludeNewlySyncedAccountsWithoutIndividualSelection() {
-        let original: Set<String> = ["apple", "google"]
-        XCTAssertEqual(CalendarSelection.identifiers(available: original, selected: [], useAll: true), original)
-        XCTAssertEqual(CalendarSelection.identifiers(available: original.union(["outlook"]), selected: [], useAll: true), original.union(["outlook"]))
-    }
+    func testFreshAndFormerAllCalendarScopesRequireSelection() {
+        withCalendarDefaults { defaults in
+            let fresh = CalendarSelection.load(from: defaults)
+            XCTAssertEqual(fresh, .unconfirmed)
+            XCTAssertEqual(fresh.identifiers(available: ["apple", "google"]), [])
 
-    func testCustomCalendarSelectionDoesNotExpandOrRetainRemovedCalendars() {
-        XCTAssertEqual(CalendarSelection.identifiers(available: ["apple", "google"], selected: ["google", "removed"], useAll: false), ["google"])
-        XCTAssertTrue(CalendarSelection.identifiers(available: ["apple"], selected: [], useAll: false).isEmpty)
-    }
-
-    func testLegacyCloudOnlyScopeRequiresRenewalBeforeAllDesktopCalendars() {
-        let migration = CalendarSelection.initialMode(stored: nil, selected: [])
-        XCTAssertTrue(migration.useAll)
-        XCTAssertTrue(migration.expandsLegacyScope)
-        let saved = CalendarSelection.initialMode(stored: true, selected: [])
-        XCTAssertTrue(saved.useAll)
-        XCTAssertFalse(saved.expandsLegacyScope)
+            defaults.set(true, forKey: "meetingCalendar.useAll")
+            defaults.set(["google"], forKey: "meetingCalendar.selectedIDs")
+            let formerlyAll = CalendarSelection.load(from: defaults)
+            XCTAssertEqual(formerlyAll, .unconfirmed)
+            XCTAssertEqual(formerlyAll.identifiers(available: ["apple", "google"]), [])
+        }
     }
 
     func testExistingCustomCalendarScopeRemainsNarrow() {
-        let legacy = CalendarSelection.initialMode(stored: nil, selected: ["google"])
-        XCTAssertFalse(legacy.useAll)
-        XCTAssertFalse(legacy.expandsLegacyScope)
-        let emptyCustom = CalendarSelection.initialMode(stored: false, selected: [])
-        XCTAssertFalse(emptyCustom.useAll)
-        XCTAssertFalse(emptyCustom.expandsLegacyScope)
+        withCalendarDefaults { defaults in
+            defaults.set(["google", "removed"], forKey: "meetingCalendar.selectedIDs")
+            for useAll in [nil, false] as [Bool?] {
+                defaults.set(useAll, forKey: "meetingCalendar.useAll")
+                let selected = CalendarSelection.load(from: defaults)
+                XCTAssertEqual(selected, .saved(["google", "removed"]))
+                XCTAssertEqual(selected.identifiers(available: ["apple", "google", "new"]), ["google"])
+            }
+        }
+    }
+
+    func testSavingCalendarSelectionAllowsExactIDsIncludingEmpty() {
+        withCalendarDefaults { defaults in
+            defaults.set(true, forKey: "meetingCalendar.useAll")
+            CalendarSelection.save(["google"], to: defaults)
+            XCTAssertEqual(CalendarSelection.load(from: defaults), .saved(["google"]))
+
+            CalendarSelection.save([], to: defaults)
+            let empty = CalendarSelection.load(from: defaults)
+            XCTAssertEqual(empty, .saved([]))
+            XCTAssertEqual(empty.identifiers(available: ["apple", "google"]), [])
+        }
+    }
+
+    private func withCalendarDefaults(_ test: (UserDefaults) -> Void) {
+        let suite = "reel.test.calendar.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        test(defaults)
     }
 
     func testSupportedProvidersAndPasscodes() {

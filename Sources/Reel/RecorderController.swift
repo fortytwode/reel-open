@@ -321,7 +321,7 @@ final class RecorderController {
 
         // Reel must own its recording windows before the capture filter is built, so that
         // ScreenCaptureKit lists the app and excludes all of them.
-        controlBar = ControlBarWindow()
+        controlBar = ControlBarWindow(showsWindow: s.mode == .window)
         if s.mode != .camera { drawingOverlay = DrawingOverlay(screen: screen, store: overlays) }
         // Countdown while the local capture devices warm up.
         let seconds = skipCountdown ? 0 : s.countdownSeconds
@@ -341,7 +341,7 @@ final class RecorderController {
         }
         do {
             try await prepare.value
-            if let window { _ = try await ScreenCapture.refreshedWindow(window) }
+            if let selected = window { window = try await ScreenCapture.refreshedWindow(selected) }
         } catch {
             await abandonPreparation(session, recording: recording)
             return bail("Couldn't start recording: \(error.localizedDescription)")
@@ -365,6 +365,14 @@ final class RecorderController {
                 }
             }
         }
+        if s.mode == .window, let window {
+            let title = window.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let appName = window.owningApplication?.applicationName
+            model.recordingWindowName = title.flatMap { $0.isEmpty ? nil : $0 }
+                ?? appName.flatMap { $0.isEmpty ? nil : $0 }
+                ?? "selected window"
+            if focusWindowOnStart { (NSApp.delegate as? AppDelegate)?.dismissWindowRecordingSetup() }
+        }
         session.begin()
         model.phase = .recording
         Sound.play(.start)
@@ -378,14 +386,8 @@ final class RecorderController {
             Task { @MainActor in
                 let stillRecording = { self.currentRecordingID == recordingID && self.model.phase == .recording }
                 let result = await WindowActivation.activate(window, stillRecording: stillRecording)
-                guard stillRecording(), !self.headless else { return }
-                switch result {
-                case .activated, .cancelled: break
-                case .accessibilityRequired:
-                    Toast.show("Allow Reel in System Settings → Privacy & Security → Accessibility to focus the recorded window.")
-                case .unavailable:
-                    Toast.show("Couldn't focus the selected window. Recording has started.")
-                }
+                guard stillRecording() else { return }
+                self.model.recordingWindowFocus = result
             }
         }
     }
@@ -599,6 +601,8 @@ final class RecorderController {
     private func teardownUI(keepBubble: Bool = false) {
         controlBar?.close()
         controlBar = nil
+        model.recordingWindowName = nil
+        model.recordingWindowFocus = nil
         clickMonitor.stop()
         overlays.updateDrawing { $0.setActive(false) }
         model.drawing = overlays.drawingState

@@ -3,7 +3,7 @@ import EventKit
 import Foundation
 import ReelCore
 
-/// Discovers meeting links in desktop calendars; all calendars are the normal setup.
+/// Lists calendar names and scans only the calendars the user has saved.
 @MainActor
 final class CalendarDiscovery: ObservableObject {
     @Published private(set) var calendars: [CalendarSource] = []
@@ -13,36 +13,39 @@ final class CalendarDiscovery: ObservableObject {
     private let store = EKEventStore()
 
     func connect() async {
-        do {
-            let granted = try await store.requestFullAccessToEvents()
-            authorizationMessage = granted ? "Desktop calendars connected." : "Calendar access was not granted. Enable it in System Settings > Privacy & Security > Calendars."
-        } catch {
-            // Provider errors can contain account details; present a fixed message.
-            authorizationMessage = "Calendar access could not be requested. Check System Settings > Privacy & Security > Calendars."
-        }
-        await refresh(selectedCalendarIDs: [])
+        _ = try? await store.requestFullAccessToEvents()
     }
 
-    func refresh(selectedCalendarIDs: Set<String>, useAllCalendars: Bool = true) async {
+    func refresh() {
         guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else {
             calendars = []; meetings = []
             let status = EKEventStore.authorizationStatus(for: .event)
             accessNeedsSettings = status == .denied || status == .restricted || status == .writeOnly
             authorizationMessage = accessNeedsSettings
                 ? "Calendar access is blocked. Allow Reel in System Settings → Privacy & Security → Calendars."
-                : "Connect calendars once to let Reel find your Google, Apple and other desktop calendar meetings."
+                : "Allow calendar access to see the calendars available on this Mac."
             return
         }
         accessNeedsSettings = false
         let available = store.calendars(for: .event)
         calendars = available.map {
-            CalendarSource(id: $0.calendarIdentifier, title: $0.title, accountName: $0.source.title)
-        }.sorted { ($0.accountName, $0.title, $0.id) < ($1.accountName, $1.title, $1.id) }
-        let ids = CalendarSelection.identifiers(available: Set(available.map(\.calendarIdentifier)),
-                                                selected: selectedCalendarIDs, useAll: useAllCalendars)
+            CalendarSource(id: $0.calendarIdentifier, title: $0.title, accountName: $0.source.title,
+                           accountID: $0.source.sourceIdentifier)
+        }
+        let selection = CalendarSelection.load(from: OrganizationState.defaults)
+        let ids = selection.identifiers(available: Set(available.map(\.calendarIdentifier)))
         let selected = available.filter { ids.contains($0.calendarIdentifier) }
         guard !selected.isEmpty else {
-            meetings = []; authorizationMessage = useAllCalendars ? "No desktop calendars are available. Add your account in Apple Calendar, then refresh." : "Choose calendars to discover meetings."
+            meetings = []
+            if selection == .saved([]) {
+                authorizationMessage = "Apple Calendar is skipped."
+            } else if available.isEmpty {
+                authorizationMessage = "No calendars are available. Add an account in Apple Calendar, then refresh."
+            } else if selection == .unconfirmed {
+                authorizationMessage = "Choose which calendars Reel can read, then save your selection."
+            } else {
+                authorizationMessage = "None of your saved calendars are available."
+            }
             return
         }
         let now = Date()
@@ -62,7 +65,7 @@ final class CalendarDiscovery: ObservableObject {
                 occurrenceStart: event.occurrenceDate)
             return candidate.meeting(now: now, horizonEnd: horizon)
         }.sorted { ($0.start, $0.id) < ($1.start, $1.id) }
-        authorizationMessage = useAllCalendars ? "Using all calendars on this Mac for the next seven days." : "Using your selected calendars for the next seven days."
+        authorizationMessage = "Showing the next seven days from your saved calendars."
     }
 
     private static func email(_ url: URL) -> String? {

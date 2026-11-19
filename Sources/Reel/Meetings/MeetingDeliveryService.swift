@@ -19,6 +19,13 @@ enum MeetingDeliveryService {
     private struct Response: Decodable {
         let verified: Bool; let email_status: String
     }
+    private struct Rejection: Decodable { let code: String }
+
+    struct CalendarSelectionRequired: LocalizedError {
+        var errorDescription: String? {
+            "Select the invitation’s calendar in Meeting Calendars → Manage Google Calendar, then retry notes delivery."
+        }
+    }
     /// Review the source in the immutable outbound body, not a newer local transcript.
     static func reviewSavedEnvelope(_ recording: Recording) async throws -> Data {
         guard var meeting = recording.meeting, let body = meeting.deliveryEnvelope else { throw CancellationError() }
@@ -88,7 +95,11 @@ enum MeetingDeliveryService {
         let (data, response) = try await session.data(for: request)
         try Task.checkCancellation()
         guard stillCurrent(), await CloudAuth.shared.current?.userID == owner else { throw CancellationError() }
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 403, (try? JSONDecoder().decode(Rejection.self, from: data))?.code == "calendar_selection_required" {
+            throw CalendarSelectionRequired()
+        }
+        guard (200..<300).contains(status) else {
             throw CloudError.message("Delivery could not be confirmed. Reel will retry and reconcile the existing page and email.")
         }
         return data
