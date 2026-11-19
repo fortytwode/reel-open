@@ -80,10 +80,12 @@ final class ShareLinksTests: XCTestCase {
         XCTAssertEqual(config.notetakerURL?.absoluteString, "https://record.northwind.example/notetaker")
         config.webBase = URL(string: "https://tools.northwind.example")
         XCTAssertEqual(config.notetakerURL?.absoluteString, "https://tools.northwind.example/notetaker")
+        XCTAssertEqual(config.browserTabRecorderURL?.absoluteString, "https://tools.northwind.example/record?source=tab")
         config.webBase = URL(string: "http://localhost:5000")
         XCTAssertEqual(config.notetakerURL?.absoluteString, "http://localhost:5000/notetaker")
         config.webBase = URL(string: "https://someone@tools.northwind.example")
         XCTAssertNil(config.notetakerURL)
+        XCTAssertNil(config.browserTabRecorderURL)
     }
 
     func testObjectPathAndContentTypes() {

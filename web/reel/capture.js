@@ -9,16 +9,18 @@ export function captureSupported() {
 }
 
 /** Screen, window or tab chosen in the browser's picker. */
-export async function pickDisplay(settings) {
+export async function pickDisplay(settings, { tabOnly = false } = {}) {
   const wantsSystem = C.usesSystem(settings.audio);
   const [w, h] = C.QUALITY.p2160;
+  const video = { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: settings.fps, max: settings.fps }, cursor: "always" };
+  if (tabOnly) video.displaySurface = "browser";
   return navigator.mediaDevices.getDisplayMedia({
-    video: { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: settings.fps, max: settings.fps }, cursor: "always" },
+    video,
     audio: wantsSystem ? { suppressLocalAudioPlayback: false, echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false,
-    systemAudio: wantsSystem ? "include" : "exclude",
+    systemAudio: wantsSystem && !tabOnly ? "include" : "exclude",
     selfBrowserSurface: "exclude",
-    surfaceSwitching: "include",
-    monitorTypeSurfaces: "include",
+    surfaceSwitching: tabOnly ? "exclude" : "include",
+    monitorTypeSurfaces: tabOnly ? "exclude" : "include",
   });
 }
 

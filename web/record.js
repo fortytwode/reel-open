@@ -13,19 +13,24 @@ import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
 import { Library, Publisher, APP } from "./reel/publisher.js?v=20261119-owner2";
-import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261025-audio1";
+import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261119-tab1";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
 import { createCameraEffect, effectsSupported, preloadEffects } from "./reel/effects.js";
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const query = new URLSearchParams(location.search);
+const tabEntry = query.get("source") === "tab";
+const isMeeting = () => $("recording-kind").value === "meeting";
+const isTabCapture = () => tabEntry && !isMeeting();
 
 // ---------------------------------------------------------------- settings (localStorage, ReelSettings subset)
 
 const SETTINGS_KEY = organizationStorageKey("reel-settings");
 let settings = C.decodeSettings((() => { try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)); } catch { return null; } })());
 function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} }
+function captureMode() { return isTabCapture() ? "screen" : settings.mode; }
 
 // ---------------------------------------------------------------- UI helpers
 
@@ -163,14 +168,15 @@ function releaseDevices() {
 
 async function start({ reuse = false } = {}) {
   if (R.phase !== "idle") return;
-  const meetingMode = $("recording-kind").value === "meeting";
+  const meetingMode = isMeeting();
+  const tabOnly = isTabCapture();
   let meetingDetails = null;
   const captureOwnerUID = user?.uid;
   if (meetingMode) {
     try { meetingDetails = C.parseMeetingDetails($("meeting-attendees").value); }
     catch (e) { toast(e.message, true); return; }
   }
-  const s = meetingMode ? C.meetingSettings(settings) : { ...settings };
+  const s = meetingMode ? C.meetingSettings(settings) : { ...settings, mode: captureMode() };
   const meetingTitle = $("meeting-title").value.trim();
   setPhase("preparing");
   const bail = (msg) => {
@@ -178,27 +184,39 @@ async function start({ reuse = false } = {}) {
     releaseDevices();
     setPhase("idle");
   };
-  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
-  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  const persist = () => navigator.storage?.persist?.().catch(() => {});
+  if (!tabOnly) {
+    if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+    persist();
+  }
   let camTrack = null;
+  const prepareCameraAndBubble = async () => {
+    camTrack = await cameraTrackFor(s);
+    // PiP may need a fresh gesture once the browser's sharing picker closes.
+    if (!pipSupported() || s.mode === "camera" || (tabOnly && !navigator.userActivation?.isActive)) return;
+    try {
+      R.bubble = await openBubble({
+        stream: camTrack ? new MediaStream([camTrack]) : null, size: C.BUBBLE_DIAMETER[s.bubbleSize],
+        handlers: {
+          onPause: () => pauseResume(), onStop: (nav) => stop(nav), onCancel: () => cancel(),
+          onKey: (e, nav) => onShortcut(e, nav), onClose: () => onBubbleClosed(),
+        },
+      });
+    } catch (e) { console.warn("Bubble window unavailable", e); R.bubble = null; }
+  };
   try {
     if (!reuse) {
-      // Bubble window first: opening it needs the click's user activation.
-      camTrack = await cameraTrackFor(s);
-      if (pipSupported() && s.mode !== "camera") {
-        try {
-          R.bubble = await openBubble({
-            stream: camTrack ? new MediaStream([camTrack]) : null, size: C.BUBBLE_DIAMETER[s.bubbleSize],
-            handlers: {
-              onPause: () => pauseResume(), onStop: (nav) => stop(nav), onCancel: () => cancel(),
-              onKey: (e, nav) => onShortcut(e, nav), onClose: () => onBubbleClosed(),
-            },
-          });
-        } catch (e) { console.warn("Bubble window unavailable", e); R.bubble = null; }
-      }
+      if (!tabOnly) await prepareCameraAndBubble();
       if (s.mode !== "camera") {
-        try { R.display = await pickDisplay(s); }
+        try { R.display = await pickDisplay(s, { tabOnly }); }
         catch (e) { return bail(e && e.name === "NotAllowedError" ? null : "Couldn't start screen capture: " + e.message); }
+      }
+      if (tabOnly) {
+        if (R.display?.getVideoTracks()[0]?.getSettings().displaySurface !== "browser") {
+          return bail("Choose a browser tab in the share picker to record it.");
+        }
+        persist();
+        await prepareCameraAndBubble();
       }
       if (meetingMode && !R.display?.getAudioTracks().length) return bail("Computer sound was not shared. Choose the meeting tab with tab audio, or your screen with system audio, then try again.");
       if (C.usesMic(s.audio)) {
@@ -469,8 +487,9 @@ function bindSettings() {
   refreshForm();
 }
 function refreshForm() {
-  const camOn = settings.mode === "camera" || settings.cameraEnabled;
-  $("camera").disabled = !camOn; $("background").disabled = !camOn || !effectsSupported(); $("bubble").disabled = settings.mode === "camera" || !settings.cameraEnabled;
+  const mode = captureMode();
+  const camOn = mode === "camera" || settings.cameraEnabled;
+  $("camera").disabled = !camOn; $("background").disabled = !camOn || !effectsSupported(); $("bubble").disabled = mode === "camera" || !settings.cameraEnabled;
   $("bg-image-row").hidden = settings.cameraBackground !== "image";
   $("mic").disabled = !C.usesMic(settings.audio);
   $("copy-on-stop").disabled = $("upload-mp4").disabled = !settings.autoUpload;
@@ -977,7 +996,7 @@ async function openTrim(r) {
 }
 
 // Preview owns separate short-lived streams; never keep them during capture.
-const preview = createPreview({ video: $("preview"), meter: $("mic-meter"), button: $("preview-toggle"), status: $("preview-status"), getSettings: () => settings, onDevices: fillDevices });
+const preview = createPreview({ video: $("preview"), meter: $("mic-meter"), button: $("preview-toggle"), status: $("preview-status"), getSettings: () => ({ ...settings, mode: captureMode() }), onDevices: fillDevices });
 for (const id of ["mode", "camera", "mic", "audio", "camera-on"]) $(id).addEventListener("change", () => preview.stop());
 window.addEventListener("pagehide", () => preview.stop());
 document.addEventListener("visibilitychange", () => { if (document.hidden) preview.stop(); });
@@ -1002,30 +1021,36 @@ async function boot() {
   resumeMeetingDelivery();
   for (const r of library.list().slice(0, 20)) publisher.refreshViews(r).catch(() => {});
 }
-$("recording-kind").addEventListener("change", () => {
-  preview.stop();
-  const meeting = $("recording-kind").value === "meeting";
+function updateRecordingKind() {
+  const meeting = isMeeting();
+  const tab = isTabCapture();
   $("ordinary-settings").hidden = meeting;
   $("meeting-setup").hidden = !meeting;
-  $("recording-heading").textContent = meeting ? "Record a meeting" : "New recording";
-  $("start").textContent = meeting ? "Start meeting recording" : "Start recording";
+  $("mode-setting").hidden = tab;
+  $("recording-intro").hidden = tab;
+  $("tab-intro").hidden = !tab;
+  $("recording-heading").textContent = meeting ? "Record a meeting" : tab ? "Record a browser tab" : "New recording";
+  $("start").textContent = meeting ? "Start meeting recording" : tab ? "Choose a tab" : "Start recording";
   $("last").hidden = meeting || !$("last-link").textContent;
   if (meeting) loadDeliveryInvites();
+}
+$("recording-kind").addEventListener("change", () => {
+  preview.stop();
+  updateRecordingKind();
+  refreshForm();
 });
 window.addEventListener("beforeunload", (e) => {
   if (R.phase === "recording" || R.phase === "paused" || R.phase === "finishing" || publisher.uploads.size || transcriptionJobs.size) { e.preventDefault(); e.returnValue = ""; }
 });
-if (new URLSearchParams(location.search).get("mode") === "meeting") {
-  $("recording-kind").value = "meeting";
-  $("recording-kind").dispatchEvent(new Event("change"));
-}
+if (query.get("mode") === "meeting") $("recording-kind").value = "meeting";
+updateRecordingKind();
 boot();
 console.info(APP, EMU ? "(emulators)" : "");
 
 let meetingCalendar;
 function openMeetingEntry() {
   const fragmentRequest = /(?:^#|&)(?:meeting-request|calendar-meeting)=/.test(location.hash);
-  if (!fragmentRequest && new URLSearchParams(location.search).get("mode") !== "meeting") return;
+  if (!fragmentRequest && query.get("mode") !== "meeting") return;
   if (meetingCalendar) return;
   $("recording-kind-label").hidden = false;
   meetingCalendar = mountMeetingCalendar({

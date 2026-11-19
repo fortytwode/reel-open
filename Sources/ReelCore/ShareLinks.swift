@@ -39,13 +39,16 @@ public struct CloudConfig: Decodable, Equatable, Sendable {
     public var isConfigured: Bool { !projectID.isEmpty && !apiKey.isEmpty && !allowedEmailDomain.isEmpty }
 
     /// Older app bundles may use the same host for recordings and web tools.
-    public var notetakerURL: URL? {
+    public var notetakerURL: URL? { webPage("/notetaker") }
+    public var browserTabRecorderURL: URL? { webPage("/record", query: [URLQueryItem(name: "source", value: "tab")]) }
+
+    private func webPage(_ path: String, query: [URLQueryItem]? = nil) -> URL? {
         let base = webBase ?? viewerBase
         guard isConfigured, var page = URLComponents(url: base, resolvingAgainstBaseURL: false),
               let host = page.host, page.user == nil, page.password == nil,
               page.scheme == "https" || (page.scheme == "http" && ["localhost", "127.0.0.1", "[::1]"].contains(host)) else { return nil }
-        page.path = "/notetaker"
-        page.query = nil
+        page.path = path
+        page.queryItems = query
         page.fragment = nil
         return page.url
     }

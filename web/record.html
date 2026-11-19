@@ -39,7 +39,8 @@
       <div class="rec-head">
         <h1 id="recording-heading">New recording</h1>
         <label id="recording-kind-label" hidden>Recording type <select id="recording-kind"><option value="recording">Screen recording</option><option value="meeting">Meeting</option></select></label>
-        <p class="muted small">After you press Start, pick what to share: your entire screen, a window or a browser tab. Tick <b>Also share system audio</b> (screen) or <b>Also share tab audio</b> (tab) to include sound from your computer.</p>
+        <p id="recording-intro" class="muted small">After you press Start, pick what to share: your entire screen, a window or a browser tab. Tick <b>Also share system audio</b> (screen) or <b>Also share tab audio</b> (tab) to include sound from your computer.</p>
+        <p id="tab-intro" class="muted small" hidden>To include sound from the tab, choose a system audio option below and tick <b>Also share tab audio</b> in the browser picker.</p>
       </div>
       <section id="meeting-setup" hidden>
         <label>Calendar invitation <select id="meeting-calendar-invite"><option value="">Manual meeting — private Calls and recap to you</option></select></label>
@@ -57,7 +58,7 @@
         <div class="preview-controls"><button id="preview-toggle" type="button">Check camera &amp; microphone</button><meter id="mic-meter" min="0" max="1" value="0" aria-label="Microphone level"></meter><span id="preview-status" role="status">Check your devices before recording. Camera backgrounds apply during recording.</span></div>
       </div>
       <div class="grid">
-        <label>Record
+        <label id="mode-setting">Record
           <select id="mode">
             <option value="screen">Screen, window or tab</option>
             <option value="camera">Camera only</option>
@@ -222,6 +223,6 @@
   <div id="toast" class="toast" role="status" hidden></div>
   <footer class="foot muted small"><a href="/notetaker" class="muted">Open Reel Notetaker</a></footer>
   <script type="module" src="/reel/install.js?v=20261119-products1"></script>
-  <script type="module" src="/record.js?v=20261119-products1"></script>
+  <script type="module" src="/record.js?v=20261119-tab1"></script>
 </body>
 </html>

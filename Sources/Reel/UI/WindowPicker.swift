@@ -8,8 +8,14 @@ import SwiftUI
 @MainActor
 enum WindowPicker {
     private static var cancelActiveSelection: (() -> Void)?
+    private static var browseActiveSelection: (() -> Void)?
 
     static func cancelSelection() { cancelActiveSelection?() }
+    static func browseWindows() -> Bool {
+        guard let browseActiveSelection else { return false }
+        browseActiveSelection()
+        return true
+    }
 
     struct Item: Identifiable {
         let id: CGWindowID
@@ -47,7 +53,10 @@ enum WindowPicker {
     }
 
     static func desktopItem(at point: NSPoint, below overlayWindowNumber: Int,
-                            items: [CGWindowID: Item]) -> (item: Item, frame: NSRect)? {
+                            items: [CGWindowID: Item], excluding toolbar: NSWindow? = nil) -> (item: Item, frame: NSRect)? {
+        // The toolbar sits above the dimmer, so a search below the dimmer skips it.
+        // Use the live frame so moved or resized controls never expose a target through the toolbar.
+        if let toolbar, toolbar.isVisible, toolbar.frame.contains(point) { return nil }
         // AppKit uses actual mouse hit-testing, so a click-through panel or a
         // transparent part of another window cannot hide the window underneath.
         let number = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: overlayWindowNumber)
@@ -67,74 +76,105 @@ enum WindowPicker {
         case selected(SCWindow), browse, cancelled
     }
 
-    static func pickOnDesktop(items: [Item]) async -> SCWindow? {
+    static func pickOnDesktop(items: [Item], keepingAbove toolbar: NSWindow? = nil) async -> SCWindow? {
         let visible = items.filter { $0.window.isOnScreen }
-        guard cancelActiveSelection == nil else { return nil }
+        guard cancelActiveSelection == nil, !Task.isCancelled else { return nil }
         guard !visible.isEmpty, !NSScreen.screens.isEmpty else { return await pick(items: items) }
-        let choice: DesktopChoice = await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
+            // Keep both picker layers below native menus, including the toolbar's options menu.
+            let overlayLevel = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
+            let originalToolbarLevel = toolbar?.level
             var panels: [NSPanel] = []
+            var keyMonitor: Any?
             var finished = false
             let finish: (DesktopChoice) -> Void = { choice in
                 guard !finished else { return }
                 finished = true
                 cancelActiveSelection = nil
+                browseActiveSelection = nil
+                if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+                keyMonitor = nil
                 panels.forEach { $0.orderOut(nil) }
                 panels.removeAll()
-                continuation.resume(returning: choice)
+                if let originalToolbarLevel { toolbar?.level = originalToolbarLevel }
+                switch choice {
+                case .selected(let window): continuation.resume(returning: window)
+                case .cancelled: continuation.resume(returning: nil)
+                case .browse: presentList(items: items) { continuation.resume(returning: $0) }
+                }
             }
             cancelActiveSelection = { finish(.cancelled) }
+            browseActiveSelection = { finish(.browse) }
+            if let toolbar {
+                toolbar.level = NSWindow.Level(rawValue: overlayLevel.rawValue + 1)
+                keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    guard event.window === toolbar else { return event }
+                    if event.keyCode == 53 {
+                        finish(.cancelled)
+                        return nil
+                    }
+                    if [36, 76].contains(event.keyCode),
+                       let panel = panels.first(where: { $0.frame.contains(NSEvent.mouseLocation) }),
+                       let picker = panel.contentView as? DesktopPickerView,
+                       picker.selectWindowUnderPointer() { return nil }
+                    return event
+                }
+            }
             for screen in NSScreen.screens {
                 let panel = WindowSelectionPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
                                                  backing: .buffered, defer: false)
                 panel.appearance = NSAppearance(named: .darkAqua)
                 panel.isOpaque = false
                 panel.backgroundColor = .clear
-                panel.level = .screenSaver
+                panel.level = overlayLevel
                 panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
                 panel.hidesOnDeactivate = false
+                panel.becomesKeyOnlyIfNeeded = toolbar != nil
                 panel.acceptsMouseMovedEvents = true
-                panel.contentView = DesktopPickerView(screen: screen, items: visible,
+                panel.contentView = DesktopPickerView(screen: screen, items: visible, toolbar: toolbar,
                     select: { finish(.selected($0)) }, browse: { finish(.browse) }, cancel: { finish(.cancelled) })
                 panel.setFrame(screen.frame, display: false)
                 panels.append(panel)
                 panel.orderFrontRegardless()
             }
             let keyPanel = panels.first { $0.frame.contains(NSEvent.mouseLocation) } ?? panels.first
-            keyPanel?.makeKey()
-            keyPanel?.makeFirstResponder(keyPanel?.contentView)
+            if toolbar == nil {
+                keyPanel?.makeKey()
+                keyPanel?.makeFirstResponder(keyPanel?.contentView)
+            }
             (keyPanel?.contentView as? DesktopPickerView)?.refreshTarget()
-        }
-        switch choice {
-        case .selected(let window): return window
-        case .browse: return Task.isCancelled ? nil : await pick(items: items)
-        case .cancelled: return nil
         }
     }
 
     static func pick(items: [Item]) async -> SCWindow? {
-        guard !items.isEmpty, cancelActiveSelection == nil else { return nil }
-        return await withCheckedContinuation { (c: CheckedContinuation<SCWindow?, Never>) in
-            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 500), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            panel.title = "Choose a window to record"
-            panel.isReleasedWhenClosed = false
-            panel.level = .floating
-            var finished = false
-            let finish: (SCWindow?) -> Void = { w in
-                guard !finished else { return }
-                finished = true
-                cancelActiveSelection = nil
-                panel.close()
-                c.resume(returning: w)
-            }
-            cancelActiveSelection = { finish(nil) }
-            panel.contentView = NSHostingView(rootView: PickerView(items: items, choose: finish))
-            let delegate = PanelCloseDelegate { finish(nil) }
-            panel.delegate = delegate
-            objc_setAssociatedObject(panel, "delegate", delegate, .OBJC_ASSOCIATION_RETAIN)
-            panel.center()
-            NSApp.activate(ignoringOtherApps: true)
-            panel.makeKeyAndOrderFront(nil)
+        guard !items.isEmpty, cancelActiveSelection == nil, !Task.isCancelled else { return nil }
+        return await withCheckedContinuation { continuation in
+            presentList(items: items) { continuation.resume(returning: $0) }
         }
+    }
+
+    private static func presentList(items: [Item], choose: @escaping (SCWindow?) -> Void) {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 500), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        panel.title = "Choose a window to record"
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating
+        var finished = false
+        let finish: (SCWindow?) -> Void = { [weak panel] window in
+            guard !finished else { return }
+            finished = true
+            cancelActiveSelection = nil
+            panel?.delegate = nil
+            panel?.close()
+            choose(window)
+        }
+        cancelActiveSelection = { [panel] in panel.close() }
+        panel.contentView = NSHostingView(rootView: PickerView(items: items, choose: finish))
+        let delegate = PanelCloseDelegate { finish(nil) }
+        panel.delegate = delegate
+        objc_setAssociatedObject(panel, "delegate", delegate, .OBJC_ASSOCIATION_RETAIN)
+        panel.center()
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
     }
 
     private struct PickerView: View {
@@ -251,18 +291,21 @@ private final class WindowSelectionPanel: NSPanel {
 @MainActor
 private final class DesktopPickerView: NSView {
     private let screen: NSScreen
+    private weak var toolbar: NSWindow?
     private let items: [CGWindowID: WindowPicker.Item]
     private let select: (SCWindow) -> Void
     private let browse: () -> Void
     private let cancel: () -> Void
     private let selectButton = NSButton(title: "Select window", target: nil, action: nil)
+    private let controls = NSStackView()
     private var target: (item: WindowPicker.Item, frame: NSRect)?
     private var tracking: NSTrackingArea?
     private var lastHoverCheck = 0.0
 
-    init(screen: NSScreen, items: [WindowPicker.Item], select: @escaping (SCWindow) -> Void,
+    init(screen: NSScreen, items: [WindowPicker.Item], toolbar: NSWindow?, select: @escaping (SCWindow) -> Void,
          browse: @escaping () -> Void, cancel: @escaping () -> Void) {
         self.screen = screen
+        self.toolbar = toolbar
         self.items = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         self.select = select
         self.browse = browse
@@ -277,10 +320,8 @@ private final class DesktopPickerView: NSView {
         selectButton.isHidden = true
         addSubview(selectButton)
 
-        let controls = NSStackView(views: [
-            NSButton(title: "Browse windows…", target: self, action: #selector(showList)),
-            NSButton(title: "Cancel", target: self, action: #selector(cancelSelection))
-        ])
+        controls.addArrangedSubview(NSButton(title: "Browse windows…", target: self, action: #selector(showList)))
+        controls.addArrangedSubview(NSButton(title: "Cancel", target: self, action: #selector(cancelSelection)))
         controls.translatesAutoresizingMaskIntoConstraints = false
         controls.spacing = 8
         addSubview(controls)
@@ -288,6 +329,11 @@ private final class DesktopPickerView: NSView {
             controls.centerXAnchor.constraint(equalTo: centerXAnchor),
             controls.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -30)
         ])
+        if let toolbar {
+            NotificationCenter.default.addObserver(self, selector: #selector(updateControls),
+                name: NSWindow.didChangeScreenNotification, object: toolbar)
+            updateControls()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -304,42 +350,52 @@ private final class DesktopPickerView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        if let window, !window.isKeyWindow {
+        if toolbar == nil, let window, !window.isKeyWindow {
             window.makeKey()
             window.makeFirstResponder(self)
         }
         refreshTarget()
     }
     override func mouseMoved(with event: NSEvent) {
-        guard event.timestamp - lastHoverCheck >= 1 / 60 else { return }
+        guard let window, event.timestamp - lastHoverCheck >= 1 / 60 else { return }
         lastHoverCheck = event.timestamp
-        refreshTarget()
+        refreshTarget(at: window.convertPoint(toScreen: event.locationInWindow))
     }
     override func mouseExited(with event: NSEvent) { showTarget(nil) }
     override func mouseDown(with event: NSEvent) {
         guard let window else { return }
-        refreshTarget(at: window.convertPoint(toScreen: event.locationInWindow))
-        confirmTarget()
+        _ = selectWindow(at: window.convertPoint(toScreen: event.locationInWindow))
     }
     override func cancelOperation(_ sender: Any?) { cancel() }
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 53: cancel()
-        case 36, 76:
-            refreshTarget()
-            confirmTarget()
+        case 36, 76: _ = selectWindowUnderPointer()
         default: super.keyDown(with: event)
         }
     }
 
+    func selectWindowUnderPointer() -> Bool {
+        selectWindow(at: NSEvent.mouseLocation)
+    }
+
+    private func selectWindow(at point: NSPoint) -> Bool {
+        refreshTarget(at: point)
+        guard let target else { return false }
+        select(target.item.window)
+        return true
+    }
+
     @objc private func showList() { browse() }
     @objc private func cancelSelection() { cancel() }
-    @objc private func confirmTarget() { if let target { select(target.item.window) } }
+    @objc private func confirmTarget() { _ = selectWindowUnderPointer() }
+    @objc private func updateControls(_ notification: Notification? = nil) {
+        controls.isHidden = toolbar?.screen?.frame == screen.frame
+    }
 
     func refreshTarget(at point: NSPoint = NSEvent.mouseLocation) {
-        guard let window else { return }
-        guard screen.frame.contains(point),
-              let hit = WindowPicker.desktopItem(at: point, below: window.windowNumber, items: items) else {
+        guard let window, screen.frame.contains(point),
+              let hit = WindowPicker.desktopItem(at: point, below: window.windowNumber, items: items, excluding: toolbar) else {
             showTarget(nil)
             return
         }
