@@ -2,7 +2,7 @@ import AppKit
 import EventKit
 import ReelCore
 
-// Compile this file WITH the real MeetingSetupModel.swift; the local names below
+// Compile this file with MeetingSetupModel.swift and CalendarDiscovery.swift. The local names below
 // replace only its effectful dependencies. Run scripts/test-meeting-setup.sh.
 // No TCC requests, calendar queries, Keychain access, launches or recordings occur.
 
@@ -25,9 +25,48 @@ import ReelCore
 }
 
 // Module-local shadows leave the actual EventKit and Accessibility permissions alone.
-@MainActor enum EKEventStore {
+@MainActor final class EKEventStore {
+    struct Source {
+        let title: String
+        let sourceIdentifier: String
+    }
+    struct Calendar {
+        let calendarIdentifier: String
+        let title: String
+        let source: Source
+    }
     static var authorization: EKAuthorizationStatus = .fullAccess
+    static var accessRequests = 0
+    static var predicates: [[String]] = []
+    static var queries: [[String]] = []
+    static let fixtureCalendars = [
+        Calendar(calendarIdentifier: "calendar-a", title: "Fixture A",
+                 source: Source(title: "Fixture", sourceIdentifier: "account-a")),
+        Calendar(calendarIdentifier: "calendar-b", title: "Fixture B",
+                 source: Source(title: "Fixture", sourceIdentifier: "account-a")),
+    ]
+    static var available = fixtureCalendars
+
     static func authorizationStatus(for type: EKEntityType) -> EKAuthorizationStatus { authorization }
+
+    func requestFullAccessToEvents() async throws -> Bool {
+        Self.accessRequests += 1
+        Self.authorization = .fullAccess
+        return true
+    }
+
+    func calendars(for type: EKEntityType) -> [Calendar] { Self.available }
+
+    func predicateForEvents(withStart start: Date, end: Date, calendars: [Calendar]) -> [String] {
+        let ids = calendars.map(\.calendarIdentifier)
+        Self.predicates.append(ids)
+        return ids
+    }
+
+    func events(matching predicate: [String]) -> [EKEvent] {
+        Self.queries.append(predicate)
+        return []
+    }
 }
 @MainActor var accessibilityGranted = true
 @MainActor func AXIsProcessTrusted() -> Bool { accessibilityGranted }
@@ -49,14 +88,6 @@ actor CloudAuth {
     var accountGeneration: UInt64 = 0
 }
 
-@MainActor final class CalendarDiscovery {
-    var calendars = [CalendarSource(id: "calendar-a", title: "Fixture A", accountName: "Fixture"),
-                     CalendarSource(id: "calendar-b", title: "Fixture B", accountName: "Fixture")]
-    var meetings: [CalendarMeeting] = []
-    func connect() async { fatalError("Smoke tests must not request calendar access") }
-    func refresh(selectedCalendarIDs: Set<String>, useAllCalendars: Bool = true) async {}
-}
-
 @MainActor enum ScreenCapture {
     enum Denied: Error { case fixture }
     static var gate = Suspension()
@@ -72,7 +103,6 @@ actor CloudAuth {
     struct Commit {
         let owner: String
         let ids: Set<String>
-        let all: Bool
         let included: Set<String>
         let consent: Bool
     }
@@ -83,7 +113,7 @@ actor CloudAuth {
     var setupWillEnableJoining = true
     var hasStandingConsentForCurrentScope: Bool {
         let defaults = OrganizationState.defaults
-        return standingConsent && defaults.object(forKey: "meetingCalendar.useAll") is Bool &&
+        return standingConsent && CalendarSelection.load(from: defaults).savedIDs != nil &&
             defaults.string(forKey: "meetingCalendar.standingConsentOwner") == "owner-a"
     }
     var acceptsCommit = true
@@ -91,10 +121,10 @@ actor CloudAuth {
     func refresh() async { await gate.pauseIfHeld() }
     // Deliberately permissive: a stale/cancelled model must never reach this boundary.
     func completeSetup(expectedOwner: String, expectedGeneration: UInt64,
-                       selectedCalendarIDs: Set<String>, useAllCalendars: Bool,
+                       selectedCalendarIDs: Set<String>,
                        includedCalendarIDs: Set<String>, consentConfirmed: Bool) -> Bool {
         commits.append(Commit(owner: expectedOwner, ids: selectedCalendarIDs,
-                              all: useAllCalendars, included: includedCalendarIDs, consent: consentConfirmed))
+                              included: includedCalendarIDs, consent: consentConfirmed))
         if acceptsCommit { autoJoin = setupWillEnableJoining }
         return acceptsCommit
     }
@@ -115,6 +145,8 @@ actor CloudAuth {
             try require(NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil,
                         "Fixture requires installed Chrome (nothing will launch)")
             try await observationDoesNotConsent()
+            try await unconfirmedCalendarScopeDoesNotCountAsSelected()
+            try await savedCalendarScopeIsTheOnlyScopeQueried()
             try await initialConsentOwnership()
             try await alreadyEnabledSetup()
             try await validCommitAndGuards()
@@ -153,6 +185,10 @@ actor CloudAuth {
         AppModel.shared.phase = .idle
         AppModel.shared.accountGeneration = 0
         EKEventStore.authorization = .fullAccess
+        EKEventStore.accessRequests = 0
+        EKEventStore.predicates = []
+        EKEventStore.queries = []
+        EKEventStore.available = EKEventStore.fixtureCalendars
         accessibilityGranted = true
         ScreenCapture.allowed = true
         ScreenCapture.gate = Suspension()
@@ -183,6 +219,58 @@ actor CloudAuth {
                     "Observing granted permissions granted consent/enabled joining")
         try require(ScreenCapture.gate.entered == 0, "Observation requested screen capture access")
         passed("observation does not grant consent or request capture")
+    }
+
+    static func unconfirmedCalendarScopeDoesNotCountAsSelected() async throws {
+        for previousAll in [false, true] {
+            let model = await fresh()
+            if previousAll {
+                setScope(["calendar-a"], all: true)
+            } else {
+                defaults["meetingCalendar.useAll"] = "legacy missing Bool"
+                defaults["meetingCalendar.selectedIDs"] = [String]()
+                applyDefaults()
+            }
+            EKEventStore.authorization = .notDetermined
+            model.connectCalendars()
+            try await settled(model)
+            model.refreshCalendars()
+            try await settled(model)
+            try require(model.calendars.count == 2 && model.selectedCalendarCount == 0,
+                        "Discovery counted available calendars before an explicit selection")
+            try require(EKEventStore.accessRequests == 1 && EKEventStore.predicates.isEmpty && EKEventStore.queries.isEmpty,
+                        "Connecting or refreshing queried events before an explicit selection")
+            model.checkScreenRecording()
+            try await settled(model)
+            try require(model.screenCaptureVerified && model.readiness.blockers == [.calendarSelection],
+                        "An unsaved calendar scope incorrectly blocked the recording permission check or passed setup readiness")
+            model.participantConsent = true
+            model.complete()
+            try await settled(model)
+            try require(joining.commits.isEmpty, "Consent committed without an explicit calendar selection")
+        }
+        passed("fresh and former all-calendar setup remain unselected and recording access can be checked")
+    }
+
+    static func savedCalendarScopeIsTheOnlyScopeQueried() async throws {
+        let model = await fresh()
+        model.refreshCalendars()
+        try await settled(model)
+        EKEventStore.available.append(.init(calendarIdentifier: "calendar-new", title: "New calendar",
+                                           source: .init(title: "Other account", sourceIdentifier: "account-b")))
+        model.refreshCalendars()
+        try await settled(model)
+        try require(model.calendars.count == 3 && model.selectedCalendarCount == 1,
+                    "A newly discovered calendar was selected automatically")
+        try require(EKEventStore.predicates == [["calendar-a"], ["calendar-a"]] &&
+                    EKEventStore.queries == EKEventStore.predicates,
+                    "An event query included calendars outside the saved selection")
+        setScope([], all: false)
+        model.refreshCalendars()
+        try await settled(model)
+        try require(model.selectedCalendarCount == 0 && EKEventStore.predicates.count == 2 && EKEventStore.queries.count == 2,
+                    "Refreshing an explicitly empty selection queried calendar events")
+        passed("event predicates contain only saved IDs and an empty save makes no query")
     }
 
     static func initialConsentOwnership() async throws {
@@ -240,7 +328,7 @@ actor CloudAuth {
         try await settled(model)
         try require(model.completed && model.enabled && joining.commits.count == 1, "Valid enable did not commit exactly once")
         let commit = joining.commits[0]
-        try require(commit.owner == "owner-a" && commit.ids == ["calendar-a"] && commit.included == ["calendar-a"] && !commit.all && commit.consent,
+        try require(commit.owner == "owner-a" && commit.ids == ["calendar-a"] && commit.included == ["calendar-a"] && commit.consent,
                     "Enable committed a different owner, scope or consent")
         passed("valid explicit consent commits once; unchecked/busy enable is blocked")
 

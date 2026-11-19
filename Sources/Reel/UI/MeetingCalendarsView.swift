@@ -7,10 +7,6 @@ import SwiftUI
 struct MeetingCalendarsView: View {
     @ObservedObject var model: AppModel
     @StateObject private var discovery = CalendarDiscovery()
-    @State private var selectedCalendarIDs: Set<String> = Set(OrganizationState.defaults.stringArray(forKey: Self.selectionKey) ?? [])
-    @State private var useAllCalendars = CalendarSelection.initialMode(
-        stored: OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool,
-        selected: Set(OrganizationState.defaults.stringArray(forKey: "meetingCalendar.selectedIDs") ?? [])).useAll
     @State private var preparedMeetingTitle: String?
     @ObservedObject private var joining = MeetingJoinCoordinator.shared
     @State private var localLink = ""
@@ -18,8 +14,6 @@ struct MeetingCalendarsView: View {
     @State private var updatingCalendars = false
     @State private var lastCalendarUpdate: Date?
     @State private var calendarActionMessage: String?
-
-    private static let selectionKey = "meetingCalendar.selectedIDs"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -112,30 +106,7 @@ struct MeetingCalendarsView: View {
                             .disabled(updatingCalendars)
                     }
                     if hasDesktopCalendarAccess {
-                        Text("\(discovery.calendars.count) calendars found on this Mac")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Toggle("Use all calendars on this Mac", isOn: $useAllCalendars)
-                            .onChange(of: useAllCalendars) { _, value in
-                                joining.invalidateStandingConsent()
-                                OrganizationState.defaults.set(value, forKey: "meetingCalendar.useAll")
-                                Task { await refresh(); await joining.refresh() }
-                            }
-                        if !useAllCalendars && !discovery.calendars.isEmpty {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(discovery.calendars) { calendar in
-                                        Toggle(isOn: selectionBinding(for: calendar.id)) {
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(calendar.title)
-                                                Text(calendar.accountName).font(.caption).foregroundStyle(.secondary)
-                                            }
-                                        }
-                                        .toggleStyle(.checkbox)
-                                    }
-                                }
-                            }
-                            .frame(maxHeight: 145)
-                        }
+                        DesktopCalendarPicker(calendars: discovery.calendars)
                     }
                 }
             }
@@ -176,8 +147,9 @@ struct MeetingCalendarsView: View {
             await joining.refresh()
         }
         .onChange(of: joining.selectedID) { _, _ in manualConsent = false }
+        .onChange(of: joining.desktopCalendarSelection) { _, _ in discovery.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await refresh() }
+            discovery.refresh()
         }
     }
 
@@ -195,15 +167,6 @@ struct MeetingCalendarsView: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(.vertical, 3)
-    }
-
-    private func selectionBinding(for id: String) -> Binding<Bool> {
-        Binding(get: { selectedCalendarIDs.contains(id) }, set: { selected in
-            joining.invalidateStandingConsent()
-            if selected { selectedCalendarIDs.insert(id) } else { selectedCalendarIDs.remove(id) }
-            OrganizationState.defaults.set(Array(selectedCalendarIDs), forKey: Self.selectionKey)
-            Task { await refresh(); await joining.refresh() }
-        })
     }
 
     private var hasDesktopCalendarAccess: Bool {
@@ -238,11 +201,16 @@ struct MeetingCalendarsView: View {
 
     private func openCloudCalendar() {
         calendarActionMessage = nil
-        let page = CloudConfig.default.viewerBase.appendingPathComponent("record")
-        guard var components = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return }
-        components.fragment = "meeting-calendar-panel"
-        if let url = components.url, NSWorkspace.shared.open(url) { return }
+        if let url = Self.cloudCalendarURL, NSWorkspace.shared.open(url) { return }
         calendarActionMessage = "The Reel website could not be opened."
+    }
+
+    static var cloudCalendarURL: URL? {
+        guard CloudConfig.default.isConfigured else { return nil }
+        let page = CloudConfig.default.viewerBase.appendingPathComponent("record")
+        guard var components = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return nil }
+        components.fragment = "meeting-calendar-panel"
+        return components.url
     }
 
     @MainActor
@@ -252,24 +220,19 @@ struct MeetingCalendarsView: View {
         defer { updatingCalendars = false }
         calendarActionMessage = nil
         if requestAccess { await discovery.connect() }
-        await refresh()
+        discovery.refresh()
         await joining.refresh()
         lastCalendarUpdate = Date()
     }
 
     @MainActor
-    private func refresh() async {
-        await discovery.refresh(selectedCalendarIDs: selectedCalendarIDs, useAllCalendars: useAllCalendars)
-    }
-
-    @MainActor
     private func refreshPeriodically() async {
-        await refresh()
+        discovery.refresh()
         while !Task.isCancelled {
             do { try await Task.sleep(nanoseconds: 60_000_000_000) }
             catch { return }
             guard !Task.isCancelled else { return }
-            await refresh()
+            discovery.refresh()
         }
     }
 
@@ -289,5 +252,56 @@ struct MeetingCalendarsView: View {
         case .zoom: "Zoom"
         case .teams: "Microsoft Teams"
         }
+    }
+}
+
+struct DesktopCalendarPicker: View {
+    let calendars: [CalendarSource]
+    @ObservedObject private var joining = MeetingJoinCoordinator.shared
+    @State private var draft: Set<String> = []
+
+    var body: some View {
+        let groups = Dictionary(grouping: calendars) { $0.accountID ?? $0.accountName }
+        let accountIDs = groups.keys.sorted {
+            (groups[$0]?.first?.accountName ?? "", $0) < (groups[$1]?.first?.accountName ?? "", $1)
+        }
+        let availableDraft = draft.intersection(calendars.map(\.id))
+        VStack(alignment: .leading, spacing: 8) {
+            if !calendars.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(accountIDs, id: \.self) { accountID in
+                            if let group = groups[accountID], let account = group.first {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(account.accountName).font(.subheadline.weight(.semibold))
+                                        .accessibilityAddTraits(.isHeader)
+                                    ForEach(group.sorted { ($0.title, $0.id) < ($1.title, $1.id) }) { calendar in
+                                        Toggle(calendar.title, isOn: selectionBinding(for: calendar.id))
+                                            .toggleStyle(.checkbox)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 145)
+            }
+            HStack {
+                Button("Save selection") { joining.saveDesktopCalendarSelection(availableDraft) }
+                    .disabled(joining.desktopCalendarSelection == .saved(availableDraft))
+                Text("Save with no calendars checked to skip Apple Calendar.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .onChange(of: joining.desktopCalendarSelection, initial: true) { _, selection in
+            draft = selection.savedIDs ?? []
+        }
+    }
+
+    private func selectionBinding(for id: String) -> Binding<Bool> {
+        Binding(get: { draft.contains(id) }, set: { selected in
+            if selected { draft.insert(id) } else { draft.remove(id) }
+        })
     }
 }

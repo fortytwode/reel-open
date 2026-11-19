@@ -4,20 +4,37 @@ public struct CalendarSource: Codable, Equatable, Sendable, Identifiable {
     public var id: String
     public var title: String
     public var accountName: String
-    public init(id: String, title: String, accountName: String) {
-        self.id = id; self.title = title; self.accountName = accountName
+    public var accountID: String?
+    public init(id: String, title: String, accountName: String, accountID: String? = nil) {
+        self.id = id; self.title = title; self.accountName = accountName; self.accountID = accountID
     }
 }
 
-/// No individual selection is required when scanning all desktop calendars.
-public enum CalendarSelection {
-    public static func initialMode(stored: Bool?, selected: Set<String>) -> (useAll: Bool, expandsLegacyScope: Bool) {
-        let useAll = stored ?? selected.isEmpty
-        return (useAll, stored == nil && useAll)
+public enum CalendarSelection: Equatable, Sendable {
+    case unconfirmed
+    case saved(Set<String>)
+
+    public static func load(from defaults: UserDefaults) -> Self {
+        let selected = Set(defaults.stringArray(forKey: "meetingCalendar.selectedIDs") ?? [])
+        let useAll = defaults.object(forKey: "meetingCalendar.useAll") as? Bool
+        // Previous releases retained custom IDs when users switched to all calendars.
+        // Only an active custom selection carries forward, including an explicitly empty one.
+        if useAll == true || (useAll == nil && selected.isEmpty) { return .unconfirmed }
+        return .saved(selected)
     }
 
-    public static func identifiers(available: Set<String>, selected: Set<String>, useAll: Bool) -> Set<String> {
-        useAll ? available : available.intersection(selected)
+    public static func save(_ selected: Set<String>, to defaults: UserDefaults) {
+        defaults.set(selected.sorted(), forKey: "meetingCalendar.selectedIDs")
+        defaults.set(false, forKey: "meetingCalendar.useAll")
+    }
+
+    public var savedIDs: Set<String>? {
+        if case let .saved(ids) = self { return ids }
+        return nil
+    }
+
+    public func identifiers(available: Set<String>) -> Set<String> {
+        available.intersection(savedIDs ?? [])
     }
 }
 

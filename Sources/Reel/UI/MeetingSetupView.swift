@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MeetingSetupView: View {
     @ObservedObject var setup: MeetingSetupModel
+    @ObservedObject private var joining = MeetingJoinCoordinator.shared
     let onFinish: () -> Void
     let onLater: () -> Void
     let onManageCalendars: () -> Void
@@ -18,7 +19,7 @@ struct MeetingSetupView: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Join in Chrome on this Mac").font(.title2.weight(.semibold))
-                Text("Use Chrome on this Mac for eligible calendar meetings. The Reel notetaker joins supported Google Meet and Teams calls even when your Mac is closed.")
+                Text("Set up Chrome to join eligible meetings on this Mac. You can record your screen without connecting a calendar.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -122,33 +123,41 @@ struct MeetingSetupView: View {
 
     private var calendars: some View {
         let detail = setup.calendarAccessAllowed
-            ? "\(setup.selectedCalendarCount) of \(setup.calendarCount) calendars included · \(setup.meetingCount) meetings in the next 7 days"
-            : "Allow full calendar access so Reel can find Google Meet, Zoom and Teams links."
+            ? "Reel reads events only from the calendars you select and save."
+            : "Allow calendar access to see the calendars available on this Mac. You can then choose which ones Reel can read."
         return VStack(alignment: .leading, spacing: 12) {
             setupCard("Apple Calendar", icon: "calendar", detail: detail, state: .requirement(setup.calendarAccessAllowed && setup.selectedCalendarCount > 0)) {
-                if setup.calendarAccessAllowed && setup.selectedCalendarCount == 0 {
-                    Text("Choose an available calendar or add an account in Apple Calendar.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }
                 HStack {
                     if setup.calendarNeedsSettings {
                         Button("Open calendar permissions") { setup.openSettings("Privacy_Calendars") }
                     } else if !setup.calendarAccessAllowed {
                         Button("Allow calendar access") { setup.connectCalendars() }.disabled(setup.busy)
-                    } else {
-                        Button("Choose calendars…", action: onManageCalendars)
                     }
                     Button("Open Apple Calendar") { setup.openCalendar() }
                     if setup.calendarAccessAllowed {
                         Button("Refresh") { setup.refreshCalendars() }.disabled(setup.busy)
                     }
                 }
+                if setup.calendarAccessAllowed {
+                    if setup.calendars.isEmpty {
+                        Text("No calendars are available. Add an account in Apple Calendar, then refresh.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else if setup.selectedCalendarCount > 0 {
+                        Text("\(setup.selectedCalendarCount) calendars selected · \(setup.meetingCount) meetings in the next 7 days")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    DesktopCalendarPicker(calendars: setup.calendars)
+                        .disabled(setup.busy)
+                }
             }
             setupCard("Reel-connected Google Calendar", icon: "cloud",
-                      detail: "Calendars connected on the Reel website are included separately. Manage that connection on the website.") {
-                EmptyView()
+                      detail: "The Reel notetaker can join eligible Google Meet and Teams calls from your connected Google Calendar even when this Mac is closed. Manage it separately on the Reel website.") {
+                if let url = MeetingCalendarsView.cloudCalendarURL {
+                    Link("Manage Google Calendar…", destination: url)
+                }
             }
         }
+        .onChange(of: joining.desktopCalendarSelection) { _, _ in setup.refreshCalendars() }
     }
 
     private var screenRecording: some View {

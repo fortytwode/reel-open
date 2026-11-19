@@ -11,7 +11,7 @@ final class MeetingSetupModel: ObservableObject {
     @Published var participantConsent = false
     @Published private(set) var calendarAccessAllowed = false
     @Published private(set) var calendarNeedsSettings = false
-    @Published private(set) var calendarCount = 0
+    @Published private(set) var calendars: [CalendarSource] = []
     @Published private(set) var selectedCalendarCount = 0
     @Published private(set) var meetingCount = 0
     @Published private(set) var screenCaptureVerified = false
@@ -23,10 +23,6 @@ final class MeetingSetupModel: ObservableObject {
     @Published private(set) var completed = false
     var willEnableJoining: Bool { joining.setupWillEnableJoining }
 
-    private struct Scope: Equatable {
-        let ids: Set<String>
-        let useAll: Bool
-    }
     private let discovery = CalendarDiscovery()
     private let joining = MeetingJoinCoordinator.shared
     private var pendingAction: Task<Void, Never>?
@@ -34,7 +30,7 @@ final class MeetingSetupModel: ObservableObject {
     private var active = true
     private var observedOwner: String?
     private var observedGeneration: UInt64?
-    private var observedScope: Scope?
+    private var observedScope: CalendarSelection?
     private var observedCalendarIDs: Set<String>?
 
     init() {}
@@ -124,6 +120,7 @@ final class MeetingSetupModel: ObservableObject {
                 self.status = "A setup requirement changed. Check the steps above before completing setup."
                 return
             }
+            guard let selected = scope.savedIDs else { return }
             await self.joining.refresh()
             let currentOwner = await self.currentOwner()
             guard self.isCurrent(token), self.participantConsent,
@@ -151,7 +148,7 @@ final class MeetingSetupModel: ObservableObject {
                   AppModel.shared.accountGeneration == accountGeneration,
                   AppModel.shared.phase == .idle else { return }
             guard self.joining.completeSetup(expectedOwner: owner, expectedGeneration: accountGeneration,
-                selectedCalendarIDs: scope.ids, useAllCalendars: scope.useAll,
+                selectedCalendarIDs: selected,
                 includedCalendarIDs: includedCalendarIDs, consentConfirmed: self.participantConsent) else {
                 self.status = "Calendar refresh or account state changed. Wait a moment, then try Complete setup again."
                 return
@@ -183,12 +180,8 @@ final class MeetingSetupModel: ObservableObject {
         await CloudAuth.shared.current?.userID ?? "local:\(getuid())"
     }
 
-    private func currentScope() -> Scope {
-        let ids = Set(OrganizationState.defaults.stringArray(forKey: "meetingCalendar.selectedIDs") ?? [])
-        let all = CalendarSelection.initialMode(
-            stored: OrganizationState.defaults.object(forKey: "meetingCalendar.useAll") as? Bool,
-            selected: ids).useAll
-        return Scope(ids: ids, useAll: all)
+    private func currentScope() -> CalendarSelection {
+        CalendarSelection.load(from: OrganizationState.defaults)
     }
 
     private func refreshObservedState() async {
@@ -209,12 +202,9 @@ final class MeetingSetupModel: ObservableObject {
         calendarNeedsSettings = authorization == .denied || authorization == .restricted || authorization == .writeOnly
         accessibilityAllowed = AXIsProcessTrusted()
         chromeAvailable = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil
-        await discovery.refresh(selectedCalendarIDs: scope.ids, useAllCalendars: scope.useAll)
-        guard active, !Task.isCancelled, observedOwner == owner, currentScope() == scope,
-              AppModel.shared.accountGeneration == accountGeneration else { return }
-        calendarCount = discovery.calendars.count
-        let included = CalendarSelection.identifiers(available: Set(discovery.calendars.map(\.id)),
-            selected: scope.ids, useAll: scope.useAll)
+        discovery.refresh()
+        calendars = discovery.calendars
+        let included = scope.identifiers(available: Set(calendars.map(\.id)))
         if let observedCalendarIDs, observedCalendarIDs != included { resetForScopeChange() }
         observedCalendarIDs = included
         selectedCalendarCount = included.count
@@ -232,10 +222,12 @@ final class MeetingSetupModel: ObservableObject {
     }
 
     private func resetForScopeChange() {
+        if participantConsent || enabled || completed {
+            status = "Your account or calendar selection changed. Review and confirm consent again."
+        }
         participantConsent = false
         enabled = false
         completed = false
-        status = "Your account or calendar selection changed. Review and confirm consent again."
     }
 
     private func verifyScreenRecording() async -> Bool {

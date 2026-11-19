@@ -101,7 +101,7 @@ info = {
     "NSScreenCaptureUsageDescription": "Reel records the screen or window you choose and shares it when you stop.",
     "NSCameraUsageDescription": "Reel shows your camera in a bubble and records it with your screen.",
     "NSMicrophoneUsageDescription": "Reel records your voice with your screen recordings.",
-    "NSCalendarsFullAccessUsageDescription": "Reel finds meeting links in your desktop calendars. It does not edit your calendar.",
+    "NSCalendarsFullAccessUsageDescription": "Choose which calendars Reel reads for meeting links. Screen recording works without calendar access.",
     "NSSpeechRecognitionUsageDescription": "Reel transcribes recordings on this Mac (older macOS versions only).",
     "CFBundleURLTypes": [{"CFBundleURLName": "Reel", "CFBundleURLSchemes": ["reel"]}],
     "SUEnableAutomaticChecks": bool(feed), "SUAllowsAutomaticUpdates": bool(feed),
