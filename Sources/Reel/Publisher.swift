@@ -15,6 +15,8 @@ final class Publisher {
     private var transcriptions: [String: Task<Void, Never>] = [:]
     private var deliveries: [String: Task<Void, Never>] = [:]
     private var deleting = Set<String>()
+    private var accessUpdates = Set<String>()
+    private var titleUpdates: [String: Task<Void, Never>] = [:]
     private var liveStarts: [String: Task<SegmentUploader?, Never>] = [:]
     private var liveFinish: [String: Task<Bool, Never>] = [:]
     /// Seconds from "stop" to the final playlist + ready meta being uploaded, per recording id.
@@ -90,6 +92,7 @@ final class Publisher {
         let id = recording.id
         guard recording.allowsAutomaticCloudDelivery, !deleting.contains(id) else { return Task { false } }
         let task = Task { @MainActor () -> Bool in
+            defer { self.liveFinish[id] = nil }
             do {
                 try await uploader.finish(log: log)
                 guard !Task.isCancelled, !self.deleting.contains(id), var r = self.model.recording(id: id) else { return false }
@@ -393,13 +396,19 @@ final class Publisher {
     /// again to retry.
     @discardableResult
     func publish(_ recording: Recording, copyLink: Bool, meetingConsent: MeetingShareConsent? = nil) -> Task<Void, Never> {
+        guard !accessUpdates.contains(recording.id) else { return Task {} }
+        return startPublish(recording, copyLink: copyLink, meetingConsent: meetingConsent)
+    }
+
+    private func startPublish(_ recording: Recording, copyLink: Bool, meetingConsent: MeetingShareConsent?) -> Task<Void, Never> {
         let current = model.recording(id: recording.id) ?? recording
         guard !deleting.contains(recording.id), current.permitsPublishing(allowMeetingShare: meetingConsent != nil) else { return Task {} }
         if let t = uploads[recording.id] { return t }
         let id = recording.id
         let task = Task { @MainActor in
             defer { self.uploads[id] = nil; self.model.uploadProgress[id] = nil }
-            if let live = self.liveFinish[id] { _ = await live.value; self.liveFinish[id] = nil }
+            _ = await self.liveFinish[id]?.value
+            await self.titleUpdates[id]?.value
             guard var r = self.model.recording(id: id), r.permitsPublishing(allowMeetingShare: meetingConsent != nil) else { return }
             let cloud: CloudSession
             do { cloud = try await CloudAuth.shared.validSession() } catch {
@@ -590,8 +599,18 @@ final class Publisher {
     /// location (re-uploads it there, deletes the old copy, migrates comments); an expiry-only
     /// change patches the metadata of every object (the rules enforce it).
     func updateAccess(_ recording: Recording, password: PasswordChange, expiresAt: Date?) async throws {
-        if let t = uploads[recording.id] { await t.value }
-        guard var r = model.recording(id: recording.id) else { return }
+        let id = recording.id
+        _ = await liveFinish[id]?.value
+        await uploads[id]?.value
+        await titleUpdates[id]?.value
+        // An older writer must finish before we replace the open metadata or remove open files.
+        guard var r = model.recording(id: id), r.discardRequested != true, !deleting.contains(id),
+              r.captureState == .complete || r.captureState == .recovered,
+              liveStarts[id] == nil, liveFinish[id] == nil, uploads[id] == nil, titleUpdates[id] == nil,
+              accessUpdates.insert(id).inserted else {
+            throw CloudError.message("Wait for this recording to finish saving and try again.")
+        }
+        defer { accessUpdates.remove(id) }
         let oldAccess = r.access
         var newAccess = r.access
         newAccess.expiresAt = expiresAt
@@ -642,7 +661,7 @@ final class Publisher {
             // Hide the old open copy first: the stub replaces the open meta.json right away.
             try await uploadMeta(r, status: "processing", client: client, owner: owner(cloud))
         }
-        await publish(r, copyLink: false, meetingConsent: meetingConsent).value
+        await startPublish(r, copyLink: false, meetingConsent: meetingConsent).value
         guard let after = model.recording(id: r.id), after.upload == .uploaded else {
             throw CloudError.message("Couldn't upload the recording with its new settings; the old link was left as it was.")
         }
@@ -700,7 +719,12 @@ final class Publisher {
 
     @discardableResult
     func rename(_ recording: Recording, to newTitle: String) -> Task<Void, Never> {
-        guard var r = model.recording(id: recording.id), let title = Recording.cleanTitle(newTitle), title != r.title else { return Task {} }
+        let id = recording.id
+        guard !deleting.contains(id), !accessUpdates.contains(id), titleUpdates[id] == nil else {
+            Toast.show("Wait for this recording’s changes to save and try again.", isError: true)
+            return Task {}
+        }
+        guard var r = model.recording(id: id), let title = Recording.cleanTitle(newTitle), title != r.title else { return Task {} }
         r.title = title
         r.titleIsCustom = true
         model.update(r)
@@ -710,7 +734,8 @@ final class Publisher {
             try? writeTranscript(t, for: r)
         }
         guard r.upload == .uploaded else { return Task {} }
-        return Task { @MainActor in
+        let task = Task { @MainActor in
+            defer { self.titleUpdates[id] = nil }
             do {
                 let cloud = try await CloudAuth.shared.validSession()
                 try self.requirePublisher(r, cloud: cloud)
@@ -722,11 +747,17 @@ final class Publisher {
                 Toast.show("Renamed locally; web title not updated: \(error.localizedDescription)", isError: true)
             }
         }
+        titleUpdates[id] = task
+        return task
     }
 
     /// Deletes the remote copy (if any: both locations, all segments, the comments room) and
     /// moves the local folder to the Trash.
     func delete(_ recording: Recording) async {
+        guard !accessUpdates.contains(recording.id) else {
+            Toast.show("Wait for this recording’s sharing settings to save and try again.", isError: true)
+            return
+        }
         guard deleting.insert(recording.id).inserted else { return }
         defer { deleting.remove(recording.id) }
         transcriptions[recording.id]?.cancel()
@@ -738,6 +769,7 @@ final class Publisher {
         await cancelLiveStart(for: recording.id)
         _ = await live?.value
         _ = await upload?.value
+        await titleUpdates[recording.id]?.value
         liveFinish[recording.id] = nil
         let r = model.recording(id: recording.id) ?? recording
         if r.upload.mayHaveRemote || r.playback.hls || r.playback.mp4 {

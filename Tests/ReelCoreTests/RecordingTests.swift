@@ -115,4 +115,15 @@ final class RecordingTests: XCTestCase {
         XCTAssertEqual(CaptureMode.allCases.count, 4)
         XCTAssertEqual(CaptureMode.area.label, "Area")
     }
+
+    func testOnlyPlayableOpenRecordingsAdvertiseLinkPreviews() {
+        var r = sample()
+        r.playback = PlaybackState(hls: true, mp4: false)
+        XCTAssertEqual(RemoteMeta(recording: r, status: "ready", ownerName: nil, app: "Reel").linkPreviewAllowed, true)
+        XCTAssertNil(RemoteMeta(recording: r, status: "processing", ownerName: nil, app: "Reel").linkPreviewAllowed)
+        r.access.expiresAt = date
+        XCTAssertNil(RemoteMeta(recording: r, status: "ready", ownerName: nil, app: "Reel").linkPreviewAllowed)
+        r.access = ShareAccess(location: .keyed("0123456789abcdef0123456789abcdef"), passwordSalt: "salt", expiresAt: nil)
+        XCTAssertNil(RemoteMeta(recording: r, status: "ready", ownerName: nil, app: "Reel").linkPreviewAllowed)
+    }
 }

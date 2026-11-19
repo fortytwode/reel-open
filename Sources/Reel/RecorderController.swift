@@ -427,12 +427,18 @@ final class RecorderController {
                 upload?.cancel()
                 Task { await Publisher.shared.cancelLiveStart(for: recording.id) }
                 noteSaveFailure(recording, error: error)
+                if !headless && !recording.isMeeting {
+                    (NSApp.delegate as? AppDelegate)?.showFinishedScreenClip(id: recording.id)
+                }
                 finished?(nil)
                 return
             }
             await releaseCapture(slowStop)
             stopToReady[recording.id] = Date().timeIntervalSince(stoppedAt)
             Log.app.info("Recorder ready \(self.stopToReady[recording.id] ?? 0, format: .fixed(precision: 3)) s after stop")
+            if !headless && !recording.isMeeting {
+                (NSApp.delegate as? AppDelegate)?.showFinishedScreenClip(id: recording.id)
+            }
             await finishRecording(recording, result: result, upload: upload, stoppedAt: stoppedAt,
                                   autoUpload: autoUpload, copyLink: copyLink, finished: finished)
         }

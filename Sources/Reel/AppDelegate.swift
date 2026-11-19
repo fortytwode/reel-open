@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     private var statusItem: NSStatusItem!
     private let statusMenu = NSMenu()
     private var popover: NSPopover?
+    private var desktopRecorder: NSPanel?
+    private var finishedClip: NSPanel?
     private var libraryWindow: NSWindow?
     private var workspaceWindow: NSWindow?
     private var settingsWindow: NSWindow?
@@ -38,7 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         model.$phase.sink { [weak self] phase in
             if phase != .idle {
                 DispatchQueue.main.async {
+                    guard self?.model.phase != .idle else { return }
                     self?.popover?.performClose(nil)
+                    self?.desktopRecorder?.close()
                     if phase == .preparing {
                         self?.libraryWindow?.orderOut(nil)
                         self?.settingsWindow?.orderOut(nil)
@@ -200,8 +204,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     }
 
     private func togglePanel() {
+        if let desktopRecorder, desktopRecorder.isVisible { desktopRecorder.close(); return }
         if let popover, popover.isShown { popover.performClose(nil); return }
-        presentRecorderPanel()
+        if model.meetingMode { presentRecorderPanel() } else { showScreenRecordingPanel() }
     }
 
     func showScreenRecordingPanel() {
@@ -211,7 +216,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         model.meetingAttendees = ""
         model.meetingCalendarOccurrenceID = nil
         model.meetingCalendarReference = nil
-        presentRecorderPanel()
+        popover?.performClose(nil)
+        if let desktopRecorder, desktopRecorder.isVisible {
+            desktopRecorder.makeKeyAndOrderFront(nil)
+            return
+        }
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 224),
+                            styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
+        panel.title = "Reel Recorder"
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.delegate = self
+        panel.contentView = NSHostingView(rootView: RecorderPanel(model: model, desktop: true,
+            start: { [weak panel] window, area in
+                panel?.close()
+                RecorderController.shared.start(window: window, area: area)
+            },
+            signIn: { [weak self, weak panel] in panel?.close(); self?.signIn() },
+            copyLastLink: { [weak self] in self?.copyLastLink() }))
+        panel.contentView?.layoutSubtreeIfNeeded()
+        if let size = panel.contentView?.fittingSize, size.height > 0 {
+            panel.setContentSize(NSSize(width: 620, height: size.height))
+        }
+        desktopRecorder = panel
+        placeRecorderPanel(panel)
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func placeRecorderPanel(_ panel: NSPanel, alignRight: Bool = false) {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
+        let available = screen.visibleFrame
+        let x = alignRight ? available.maxX - panel.frame.width - 20 : available.midX - panel.frame.width / 2
+        var frame = panel.frame
+        frame.origin = NSPoint(x: max(x, available.minX + 12), y: available.minY + 24)
+        if !alignRight, let finishedClip, frame.intersects(finishedClip.frame) {
+            frame.origin.y = min(finishedClip.frame.maxY + 12, available.maxY - frame.height)
+        }
+        panel.setFrameOrigin(frame.origin)
+    }
+
+    func showFinishedScreenClip(id: String) {
+        guard cliRecordTest == nil, let clip = model.recording(id: id), !clip.isMeeting else { return }
+        finishedClip?.close()
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 386, height: 206),
+                            styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
+        panel.title = "Reel Recording"
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.delegate = self
+        panel.contentView = NSHostingView(rootView: FinishedClipView(model: model, id: id) { [weak self] in
+            self?.showScreenRecordingPanel()
+        })
+        panel.contentView?.layoutSubtreeIfNeeded()
+        if let size = panel.contentView?.fittingSize, size.height > 0 {
+            panel.setContentSize(NSSize(width: 386, height: max(206, size.height)))
+        }
+        finishedClip = panel
+        placeRecorderPanel(panel, alignRight: true)
+        panel.orderFrontRegardless()
     }
 
     private func presentRecorderPanel() {
@@ -221,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         p.delegate = self
         p.contentViewController = NSHostingController(rootView: RecorderPanel(
             model: model,
-            start: { [weak self] in self?.popover?.performClose(nil); RecorderController.shared.start() },
+            start: { [weak self] _, _ in self?.popover?.performClose(nil); RecorderController.shared.start() },
             signIn: { [weak self] in self?.popover?.performClose(nil); self?.signIn() },
             copyLastLink: { [weak self] in self?.popover?.performClose(nil); self?.copyLastLink() }))
         popover = p
@@ -386,7 +453,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         return i
     }
 
-    @objc private func startRecording() { RecorderController.shared.start() }
+    @objc private func startRecording() {
+        if !model.meetingMode {
+            showScreenRecordingPanel()
+        } else {
+            RecorderController.shared.start()
+        }
+    }
+
+    func handleRecordShortcut() {
+        if model.phase == .idle, !model.meetingMode,
+           model.settings.mode == .window || model.settings.mode == .area {
+            showScreenRecordingPanel()
+        } else {
+            RecorderController.shared.toggle()
+        }
+    }
     @objc private func stopRecording() { RecorderController.shared.stop() }
     @objc private func pauseResume() { RecorderController.shared.pauseResume() }
     @objc private func restartRecording() { RecorderController.shared.restart() }
@@ -426,6 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
 
     @objc func showMeetingWorkspace() {
         popover?.performClose(nil)
+        desktopRecorder?.close()
         if workspaceWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 780),
                                   styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
@@ -504,6 +587,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     }
 
     func windowWillClose(_ notification: Notification) {
+        if let closed = notification.object as? NSWindow, closed === desktopRecorder {
+            WindowPicker.cancelSelection()
+            AreaSelector.cancelSelection()
+            desktopRecorder = nil
+        }
+        if let closed = notification.object as? NSWindow, closed === finishedClip { finishedClip = nil }
         if let window = notification.object as? NSWindow, window === meetingSetupWindow {
             meetingSetupModel?.cancelPendingActions()
         }

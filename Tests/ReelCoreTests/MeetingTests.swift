@@ -204,13 +204,15 @@ final class MeetingTests: XCTestCase {
     }
 
     func testPrivateAttendeesAndCalendarIdentityAreNotPublicMetadata() throws {
-        let recording = sample(meeting: MeetingDetails(attendees: ["private@example.test"], calendarOccurrenceID: "secret-calendar-occurrence"))
+        var recording = sample(meeting: MeetingDetails(attendees: ["private@example.test"], calendarOccurrenceID: "secret-calendar-occurrence"))
+        recording.playback = PlaybackState(hls: true, mp4: false)
         let meta = RemoteMeta(recording: recording, status: "ready", ownerName: "Owner", app: "Reel")
         let data = try ReelJSON.encoder.encode(meta)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertNil(object["meeting"])
         XCTAssertNil(object["attendees"])
         XCTAssertNil(object["calendarOccurrenceID"])
+        XCTAssertNil(object["linkPreviewAllowed"])
         let raw = String(decoding: data, as: UTF8.self)
         XCTAssertFalse(raw.contains("private@example.test"))
         XCTAssertFalse(raw.contains("secret-calendar-occurrence"))
