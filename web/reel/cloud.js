@@ -2,7 +2,7 @@
 // StorageClient, FirestoreClient and SegmentUploader (Sources/Reel/Cloud). Same retries, same
 // "check existence before PATCH/DELETE" rule (the Storage rules answer 403, not 404, for a
 // missing object), same live segment pump.
-import * as C from "./core.js?v=20261105-parity2";
+import * as C from "./core.js?v=20261119-owner2";
 
 export class CloudError extends Error {
   constructor(message, permanent = false) { super(message); this.permanent = permanent; }
@@ -38,9 +38,9 @@ export async function concurrently(items, width, body) {
 }
 
 export class StorageClient {
-  constructor(session, cfg = C.CLOUD) { this.session = session; this.cfg = cfg; }
+  constructor(session, cfg = C.CLOUD, recordingNonce = null) { Object.assign(this, { session, cfg, recordingNonce }); }
   async requests() {
-    return new C.StorageRequests({ auth: { firebase: await this.session.getIdToken() }, ownerUID: this.session.uid, cfg: this.cfg });
+    return new C.StorageRequests({ auth: { firebase: await this.session.getIdToken() }, ownerUID: this.session.uid, recordingNonce: this.recordingNonce, cfg: this.cfg });
   }
 
   /** Small object (meta, playlist, segment, thumbnail) in one multipart request, with retries. */
@@ -70,6 +70,7 @@ export class StorageClient {
       const chunk = new Uint8Array(await blob.slice(a, b).arrayBuffer());
       const isFinal = i === ranges.length - 1;
       for (let attempt = 1; ; attempt++) {
+        this.session.assertCurrent?.();
         try {
           const r = await check(await send(C.StorageRequests.resumableChunk(sessionURL, a, chunk, isFinal), { timeout: 300000 }), `chunk ${i + 1}/${ranges.length}`);
           const status = r.headers.get("X-Goog-Upload-Status") || "";
@@ -136,8 +137,8 @@ export class FirestoreClient {
   }
 
   /** Creates the room if missing; otherwise updates its expiry. */
-  async ensureRoom(roomID, createdAt, expiresAt, views = 0) {
-    const { res, json } = await this.call((await this.requests()).createRoom(roomID, this.session.uid, createdAt, views, expiresAt));
+  async ensureRoom(roomID, createdAt, expiresAt, views = 0, recordingNonce = null) {
+    const { res, json } = await this.call((await this.requests()).createRoom(roomID, this.session.uid, createdAt, views, expiresAt, recordingNonce));
     if (res.ok) return;
     if (res.status === 409) return this.setExpiry(roomID, expiresAt);
     throw new CloudError(`Couldn't create the comments room (HTTP ${res.status}) ${JSON.stringify(json).slice(0, 200)}`);
@@ -166,12 +167,12 @@ export class FirestoreClient {
     return out;
   }
   /** Views, reactions and comments move to the new room (password changed); the old one is deleted. */
-  async migrate(oldRoom, newRoom, createdAt, expiresAt) {
+  async migrate(oldRoom, newRoom, createdAt, expiresAt, recordingNonce = null) {
     const source = await this.call((await this.requests()).getRoom(oldRoom)).catch(() => null);
     const fields = source?.res.ok ? C.documentFields(source.json) : null;
     const views = fields ? (Number.isInteger(fields.views) ? fields.views : 0) : null;
     const title = fields?.ownerUid === this.session.uid && typeof fields.titleOverride === "string" && fields.titleOverride.trim() && fields.titleOverride.length <= 500 ? fields.titleOverride : null;
-    await this.ensureRoom(newRoom, createdAt, expiresAt, views ?? 0);
+    await this.ensureRoom(newRoom, createdAt, expiresAt, views ?? 0, recordingNonce);
     if (views == null) return;
     const rq = await this.requests();
     if (title) {

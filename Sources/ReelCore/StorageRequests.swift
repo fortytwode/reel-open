@@ -20,9 +20,11 @@ public struct StorageRequests: Sendable {
         public var expiresAt: Date?
         /// e.g. `attachment; filename="Demo.mp4"` so the viewer's Download button saves the file.
         public var contentDisposition: String?
-        public init(expiresAt: Date? = nil, contentDisposition: String? = nil) {
+        public var recordingNonce: String?
+        public init(expiresAt: Date? = nil, contentDisposition: String? = nil, recordingNonce: String? = nil) {
             self.expiresAt = expiresAt
             self.contentDisposition = contentDisposition
+            self.recordingNonce = recordingNonce
         }
         public static let none = ObjectOptions()
     }
@@ -55,6 +57,7 @@ public struct StorageRequests: Sendable {
 
     func customMetadata(_ options: ObjectOptions) -> [String: String] {
         var m = ["ownerUid": ownerUID]
+        m["recordingNonce"] = options.recordingNonce
         if let e = options.expiresAt { m["expiresAt"] = Self.expiryString(e) }
         return m
     }
@@ -127,7 +130,7 @@ public struct StorageRequests: Sendable {
     /// Changes an existing object's custom metadata (expiry) without re-uploading it. The
     /// owner UID is always sent so the rules' `ownerUid` checks keep passing; `expiresAt: nil`
     /// removes the expiry.
-    public func updateMetadata(shareID: String, file: RemoteFile, location: RemoteLocation = .open, expiresAt: Date?) -> URLRequest {
+    public func updateMetadata(shareID: String, file: RemoteFile, location: RemoteLocation = .open, expiresAt: Date?, recordingNonce: String? = nil) -> URLRequest {
         let path = ShareLinks.objectPath(shareID: shareID, file: file, location: location)
         var request = URLRequest(url: URL(string: "\(base)/\(ShareLinks.encodedObjectName(path))")!)
         request.httpMethod = "PATCH"
@@ -136,7 +139,9 @@ public struct StorageRequests: Sendable {
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
         // JSON null deletes a custom metadata key.
         let expires: Any = expiresAt.map { Self.expiryString($0) as Any } ?? NSNull()
-        let body: [String: Any] = ["metadata": ["ownerUid": ownerUID, "expiresAt": expires]]
+        var metadata: [String: Any] = ["ownerUid": ownerUID, "expiresAt": expires]
+        metadata["recordingNonce"] = recordingNonce
+        let body = ["metadata": metadata]
         request.httpBody = try! JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         return request
     }

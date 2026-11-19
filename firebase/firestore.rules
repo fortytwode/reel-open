@@ -36,6 +36,19 @@ service cloud.firestore {
     }
     function validRoom(room) { return room.matches('^[a-z0-9]{16,40}(-[a-f0-9]{32})?$'); }
 
+    // A new public or keyed link belongs to the UID that generated its base ID.
+    // The nonce is public. Only the authenticated UID participates in authorization.
+    function matchesRecordingOwner(id, nonce) {
+      return nonce is string && nonce.matches('^[0-9a-f]{32}$')
+        && id == 'r2' + hashing.sha256('reel-owner-v2:' + request.auth.uid + ':' + nonce)
+          .toHexString().lower()[0:38];
+    }
+    function validRoomBinding(room, data) {
+      return room.matches('^r2[0-9a-f]{38}(-[0-9a-f]{32})?$')
+        ? matchesRecordingOwner(room[0:40], data.recordingNonce)
+        : !('recordingNonce' in data);
+    }
+
     // The library is private to its owner, including listing. Public viewers still use
     // the existing direct share link and cannot discover anyone's recordings here.
     match /users/{uid}/recordings/{shareID} {
@@ -90,7 +103,8 @@ service cloud.firestore {
       allow get: if notExpired(resource.data) || isOwnerOf(resource.data);
       allow list: if false;
       allow create: if validRoom(room) && isReelUser()
-        && request.resource.data.keys().hasOnly(['ownerUid', 'createdAt', 'views', 'expiresAt', 'titleOverride'])
+        && request.resource.data.keys().hasOnly(['ownerUid', 'createdAt', 'views', 'expiresAt', 'titleOverride', 'recordingNonce'])
+        && validRoomBinding(room, request.resource.data)
         && validTitleOverride(request.resource.data)
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.views is int && request.resource.data.views >= 0
@@ -99,7 +113,8 @@ service cloud.firestore {
       // The owner may change expiry; anyone may add exactly one view while the room is open.
       allow update: if (isOwnerOf(resource.data)
           && request.resource.data.ownerUid == resource.data.ownerUid
-          && request.resource.data.keys().hasOnly(['ownerUid', 'createdAt', 'views', 'expiresAt', 'titleOverride'])
+          && request.resource.data.keys().hasOnly(['ownerUid', 'createdAt', 'views', 'expiresAt', 'titleOverride', 'recordingNonce'])
+          && validRoomBinding(room, request.resource.data)
           && validTitleOverride(request.resource.data)
           && request.resource.data.views is int
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['titleOverride']) || notExpired(resource.data)))

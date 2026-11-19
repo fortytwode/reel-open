@@ -39,26 +39,35 @@ service firebase.storage {
         || !('expiresAt' in resource.metadata)
         || request.time.toMillis() < int(resource.metadata.expiresAt);
     }
-    function validReelWrite() {
+    // A new public or keyed link belongs to the UID that generated its base ID.
+    // The nonce is public. Only the authenticated UID participates in authorization.
+    function matchesRecordingOwner(id, nonce) {
+      return nonce is string && nonce.matches('^[0-9a-f]{32}$')
+        && id == 'r2' + hashing.sha256('reel-owner-v2:' + request.auth.uid + ':' + nonce)
+          .toHexString().lower()[0:38];
+    }
+    function validReelWrite(id) {
       return isReelUser()
         && request.resource.size < 5 * 1024 * 1024 * 1024
         && request.resource.metadata.ownerUid == request.auth.uid
+        && (!id.matches('^r2[0-9a-f]{38}$')
+            || matchesRecordingOwner(id, request.resource.metadata.recordingNonce))
         && (!('expiresAt' in request.resource.metadata)
             || request.resource.metadata.expiresAt.matches('^[0-9]{1,15}$'));
     }
     match /reel/v/{videoId}/{file} {
       allow get: if isReelID(videoId) && isReelFile(file) && (notExpired() || isReelOwner());
       allow list: if false;
-      allow create: if (resource == null || isReelOwner()) && isReelID(videoId) && isReelFile(file) && validReelWrite();
-      allow update: if isReelID(videoId) && isReelFile(file) && isReelOwner() && validReelWrite();
+      allow create: if (resource == null || isReelOwner()) && isReelID(videoId) && isReelFile(file) && validReelWrite(videoId);
+      allow update: if isReelID(videoId) && isReelFile(file) && isReelOwner() && validReelWrite(videoId);
       allow delete: if isReelOwner();
     }
     match /reel/v/{videoId}/k/{key}/{file} {
       allow get: if isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file)
         && (notExpired() || isReelOwner());
       allow list: if false;
-      allow create: if (resource == null || isReelOwner()) && isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file) && validReelWrite();
-      allow update: if isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file) && isReelOwner() && validReelWrite();
+      allow create: if (resource == null || isReelOwner()) && isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file) && validReelWrite(videoId);
+      allow update: if isReelID(videoId) && key.matches('^[a-f0-9]{32}$') && isReelFile(file) && isReelOwner() && validReelWrite(videoId);
       allow delete: if isReelOwner();
     }
   }

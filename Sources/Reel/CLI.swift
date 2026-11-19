@@ -151,7 +151,7 @@ enum CLI {
             return withRecording(v[0]) { r in
                 await Publisher.shared.rename(r, to: v[1]).value
                 let after = AppModel.shared.recording(id: r.id) ?? r
-                printJSON(["title": after.title, "shareURL": after.shareURL().absoluteString])
+                printJSON(["title": after.title, "shareURL": after.hasPublishableShareID ? (after.shareURL().absoluteString as Any) : NSNull()])
                 return 0
             }
         }
@@ -224,7 +224,7 @@ enum CLI {
                 }
                 await Publisher.shared.publish(r, copyLink: false).value
                 let after = AppModel.shared.recording(id: r.id) ?? r
-                printJSON(["upload": after.upload.label, "shareURL": after.shareURL().absoluteString])
+                printJSON(["upload": after.upload.label, "shareURL": after.hasPublishableShareID ? (after.shareURL().absoluteString as Any) : NSNull()])
                 return after.upload == .uploaded ? 0 : 1
             }
         }
@@ -261,16 +261,20 @@ enum CLI {
         var out: [String: Any] = [
             "id": r.id, "shareID": r.shareID, "title": r.title, "folder": lib.folder(for: r).path, "video": lib.videoURL(for: r).path,
             "durationSeconds": r.durationSeconds, "size": "\(r.width)x\(r.height)", "mode": r.mode.rawValue,
-            "upload": r.upload.label, "captureState": r.captureState.rawValue, "shareURL": r.shareURL().absoluteString,
+            "upload": r.upload.label, "captureState": r.captureState.rawValue,
             "playback": ["hls": r.playback.hls, "mp4": r.playback.mp4], "transcriptStatus": r.transcriptStatus.rawValue,
-            "protected": r.access.isProtected, "room": r.room,
+            "protected": r.access.isProtected,
         ]
-        out["location"] = r.location.prefix(shareID: r.shareID)
-        out["metaURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .meta, location: r.location).absoluteString
-        out["stubURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .meta).absoluteString
-        out["playlistURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .playlist, location: r.location).absoluteString
-        out["videoURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .video, location: r.location).absoluteString
-        out["transcriptURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .transcriptJSON, location: r.location).absoluteString
+        if r.hasPublishableShareID {
+            out["shareURL"] = r.shareURL().absoluteString
+            out["room"] = r.room
+            out["location"] = r.location.prefix(shareID: r.shareID)
+            out["metaURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .meta, location: r.location).absoluteString
+            out["stubURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .meta).absoluteString
+            out["playlistURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .playlist, location: r.location).absoluteString
+            out["videoURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .video, location: r.location).absoluteString
+            out["transcriptURL"] = ShareLinks.downloadURL(shareID: r.shareID, file: .transcriptJSON, location: r.location).absoluteString
+        }
         if let e = r.access.expiresAt { out["expiresAt"] = ISO8601DateFormatter().string(from: e) }
         if let t = r.trim { out["trim"] = ["start": t.start, "end": t.end]; out["trimmedUploaded"] = r.trimmedUploaded }
         if let s = r.summary { out["summary"] = s }

@@ -21,6 +21,39 @@ final class StorageRequestsTests: XCTestCase {
         XCTAssertTrue(body.contains("BYTES"))
     }
 
+    func testPublisherNonceInMultipartResumableAndExpiryRequests() throws {
+        let nonce = "00112233445566778899aabbccddeeff"
+        let shareID = try XCTUnwrap(ShareLinks.ownerBoundShareID(ownerUID: "uid-1", recordingNonce: nonce))
+        let options = StorageRequests.ObjectOptions(recordingNonce: nonce)
+        let keyed = RemoteLocation.keyed(nonce)
+        let multipart = sut.multipartUpload(shareID: shareID, file: .initSegment, data: Data([1]), options: options)
+        let multipartText = String(decoding: try XCTUnwrap(multipart.httpBody), as: UTF8.self)
+        XCTAssertTrue(multipartText.contains("\"recordingNonce\":\"\(nonce)\""))
+        let resumable = sut.resumableStart(shareID: shareID, file: .video, location: keyed, totalBytes: 100, options: options)
+        let update = sut.updateMetadata(shareID: shareID, file: .video, location: keyed, expiresAt: nil, recordingNonce: nonce)
+        for request in [resumable, update] {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let metadata = try XCTUnwrap(object["metadata"] as? [String: Any])
+            XCTAssertEqual(metadata["recordingNonce"] as? String, nonce)
+            XCTAssertEqual(metadata["ownerUid"] as? String, "uid-1")
+        }
+        XCTAssertTrue(update.url?.absoluteString.contains("%2Fk%2F\(nonce)%2F") == true)
+    }
+
+    func testPublisherNonceInNewRoomsOnly() throws {
+        let nonce = "00112233445566778899aabbccddeeff"
+        let shareID = try XCTUnwrap(ShareLinks.ownerBoundShareID(ownerUID: "uid-1", recordingNonce: nonce))
+        let firestore = FirestoreRequests(config: testOrganization, idToken: "tok")
+        for room in [shareID, shareID + "-" + nonce] {
+            let create = firestore.createRoom(room, ownerUID: "uid-1", createdAt: Date(), expiresAt: nil, recordingNonce: nonce)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(create.httpBody)) as? [String: Any])
+            XCTAssertEqual(FirestoreRequests.fields(of: object)["recordingNonce"], .string(nonce))
+        }
+        let legacy = firestore.createRoom(id, ownerUID: "uid-1", createdAt: Date(), expiresAt: nil)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(legacy.httpBody)) as? [String: Any])
+        XCTAssertNil(FirestoreRequests.fields(of: object)["recordingNonce"])
+    }
+
     func testBearerAuth() {
         let s = StorageRequests(config: testOrganization, auth: .bearer(accessToken: "abc"), ownerUID: "u")
         XCTAssertEqual(s.delete(shareID: id, file: .meta).value(forHTTPHeaderField: "Authorization"), "Bearer abc")

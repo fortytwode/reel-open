@@ -15,8 +15,8 @@ struct FirestoreClient {
     }
 
     /// Creates the room if missing; otherwise updates its expiry.
-    func ensureRoom(_ room: String, createdAt: Date, expiresAt: Date?, views: Int = 0) async throws {
-        let (data, code) = try await send(requests.createRoom(room, ownerUID: ownerUID, createdAt: createdAt, views: views, expiresAt: expiresAt))
+    func ensureRoom(_ room: String, createdAt: Date, expiresAt: Date?, views: Int = 0, recordingNonce: String?) async throws {
+        let (data, code) = try await send(requests.createRoom(room, ownerUID: ownerUID, createdAt: createdAt, views: views, expiresAt: expiresAt, recordingNonce: recordingNonce))
         if (200..<300).contains(code) { return }
         if code == 409 { return try await setExpiry(room, expiresAt: expiresAt) }
         throw CloudError.message("Couldn't create the comments room (HTTP \(code)) \(String(data: data.prefix(200), encoding: .utf8) ?? "")")
@@ -84,7 +84,7 @@ struct FirestoreClient {
 
     /// Copies views, reactions and comments to another room (password changed) and deletes the
     /// old room, so its comments aren't readable by people who only knew the old link/password.
-    func migrate(from old: String, to new: String, createdAt: Date, expiresAt: Date?) async throws {
+    func migrate(from old: String, to new: String, createdAt: Date, expiresAt: Date?, recordingNonce: String?) async throws {
         let response = try? await send(requests.getRoom(old))
         var fields: [String: FirestoreRequests.Value]?
         if let (data, code) = response, (200..<300).contains(code),
@@ -97,7 +97,7 @@ struct FirestoreClient {
            !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, value.utf16.count <= 500 {
             title = value
         }
-        try await ensureRoom(new, createdAt: createdAt, expiresAt: expiresAt, views: views ?? 0)
+        try await ensureRoom(new, createdAt: createdAt, expiresAt: expiresAt, views: views ?? 0, recordingNonce: recordingNonce)
         guard views != nil else { return }
         if let title {
             let (_, titleCode) = try await send(requests.setRoomTitle(new, title: title))

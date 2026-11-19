@@ -76,7 +76,29 @@ final class AppModel: ObservableObject {
     func reloadLibrary() { recordings = library.load() }
 
     func update(_ r: Recording) {
-        do { try library.save(r) } catch { Log.app.error("Save recording failed: \(error.localizedDescription, privacy: .public)") }
+        do { try saveRecording(r) } catch {
+            Log.app.error("Save recording failed: \(error.localizedDescription, privacy: .public)")
+            lastError = error.localizedDescription
+            reloadLibrary()
+        }
+    }
+
+    func insertRecording(_ r: Recording) throws {
+        updateRecordingList(try library.insert(r))
+    }
+
+    func saveRecording(_ r: Recording) throws {
+        updateRecordingList(try library.save(r))
+    }
+
+    /// Bind the current manifest, including the persisted meeting owner, before any share write.
+    func bindForPublication(_ r: Recording, ownerUID: String, meetingConsentUID: String?) throws -> Recording {
+        let bound = try library.bindForPublication(r, ownerUID: ownerUID, meetingConsentUID: meetingConsentUID)
+        updateRecordingList(bound)
+        return bound
+    }
+
+    private func updateRecordingList(_ r: Recording) {
         if let i = recordings.firstIndex(where: { $0.id == r.id }) { recordings[i] = r } else { recordings.insert(r, at: 0) }
     }
 

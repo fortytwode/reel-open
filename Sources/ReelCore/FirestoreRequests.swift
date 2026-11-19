@@ -79,9 +79,10 @@ public struct FirestoreRequests: Sendable {
         return r
     }
 
-    public func createRoom(_ room: String, ownerUID: String, createdAt: Date, views: Int = 0, expiresAt: Date?) -> URLRequest {
-        let fields: [String: Value] = ["ownerUid": .string(ownerUID), "createdAt": .timestamp(createdAt), "views": .int(views),
+    public func createRoom(_ room: String, ownerUID: String, createdAt: Date, views: Int = 0, expiresAt: Date?, recordingNonce: String? = nil) -> URLRequest {
+        var fields: [String: Value] = ["ownerUid": .string(ownerUID), "createdAt": .timestamp(createdAt), "views": .int(views),
                                        "expiresAt": expiresAt.map(Value.timestamp) ?? .null]
+        fields["recordingNonce"] = recordingNonce.map(Value.string)
         return request("\(documentsBase)/videos?documentId=\(room)", method: "POST", body: Self.body(fields))
     }
 

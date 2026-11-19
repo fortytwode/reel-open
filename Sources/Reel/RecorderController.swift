@@ -165,7 +165,7 @@ final class RecorderController {
 
     private func startFlow(preselected: SCWindow?, focusWindowOnStart: Bool, authorization: (() -> Bool)?) async {
         let s = model.effectiveSettings()
-        let captureOwnerUserID = model.account?.userID
+        let captureOwnerUserID = await CloudAuth.shared.current?.userID
         func bail(_ message: String?) {
             if let message { Toast.show(message, isError: true); model.lastError = message }
             model.phase = .idle
@@ -276,15 +276,20 @@ final class RecorderController {
         let shareID = ShareLinks.newShareID()
         var recording = Recording(shareID: shareID, title: Recording.defaultTitle(for: now), createdAt: now, durationSeconds: 0,
                                   width: 0, height: 0, mode: s.mode, folderName: Recording.folderName(for: now, shareID: shareID),
-                                  upload: s.autoUpload ? .pending : .localOnly)
+                                  upload: s.autoUpload ? .pending : .localOnly, recordingNonce: ShareLinks.newRecordingNonce())
+        if let captureOwnerUserID { recording.bindToPublisher(captureOwnerUserID) }
         recording.meeting = meeting
         if meeting != nil {
             recording.title = Recording.cleanTitle(requestedTitle) ?? MeetingDetails.defaultTitle(for: now)
             recording.titleIsCustom = Recording.cleanTitle(requestedTitle) != nil
         }
         recording.captureState = .recording
-        let folder: URL
-        do { folder = try model.library.ensureFolder(for: recording) } catch { return bail("Can't create \(model.library.root.path): \(error.localizedDescription)") }
+        do {
+            try model.insertRecording(recording)
+        } catch {
+            return bail("Cannot create the recording: \(error.localizedDescription)")
+        }
+        let folder = model.library.folder(for: recording)
         overlays = OverlayStore()
         model.drawing = DrawingState()
         let request = RecordingRequest(mode: s.mode, display: display, window: window, area: area, content: content,
@@ -328,7 +333,11 @@ final class RecorderController {
             self.drawingOverlay?.close()
             self.drawingOverlay = nil
             if liveUploader != nil, let r = self.model.recording(id: recording.id) { await Publisher.shared.delete(r) }
-            else { try? FileManager.default.removeItem(at: folder) }
+            else {
+                do { try self.model.library.delete(recording, recoverable: false) }
+                catch { self.model.lastError = error.localizedDescription }
+                self.model.reloadLibrary()
+            }
         }
         do { try await prepare.value } catch {
             await cleanup()
@@ -480,7 +489,8 @@ final class RecorderController {
         let r = model.recording(id: recording.id) ?? recording
         if r.upload.mayHaveRemote { await Publisher.shared.delete(r) }
         else {
-            try? FileManager.default.removeItem(at: model.library.folder(for: r))
+            do { try model.library.delete(r, recoverable: false) }
+            catch { model.lastError = error.localizedDescription }
             model.reloadLibrary()
         }
     }

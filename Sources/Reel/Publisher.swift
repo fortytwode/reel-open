@@ -3,7 +3,7 @@ import ReelCore
 
 /// Everything remote: live segment upload while recording, the follow-up uploads (MP4,
 /// thumbnail, transcript, AI summary, trimmed copy), share settings (password, expiry), view
-/// counts, rename and delete. The share ID is allocated when recording starts, and segments
+/// counts, rename and delete. The share ID binds to the publisher before the first upload, and segments
 /// stream up during capture, so the link is copied the moment recording stops and plays
 /// within seconds (Loom: StartNewRecordingSession up front + live part uploads).
 @MainActor
@@ -45,7 +45,11 @@ final class Publisher {
     /// writer feeds; nil when live upload is off or the user isn't signed in.
     func beginLive(_ r: Recording) async -> SegmentUploader? {
         guard r.allowsAutomaticCloudDelivery, model.settings.autoUpload, model.settings.liveUpload, let cloud = try? await CloudAuth.shared.validSession() else { return nil }
-        var r = r
+        var r = model.recording(id: r.id) ?? r
+        do { try prepareForPublication(&r, cloud: cloud) } catch {
+            Log.cloud.error("Live upload disabled: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
         r.upload = .uploading
         model.update(r)
         let client = StorageClient(session: cloud)
@@ -57,8 +61,8 @@ final class Publisher {
             model.update(r)
             return nil
         }
-        Task { try? await FirestoreClient(cloud: cloud).ensureRoom(r.room, createdAt: r.createdAt, expiresAt: r.access.expiresAt) }
-        return SegmentUploader(shareID: r.shareID, directory: segmentsDirectory(r), location: r.location, expiresAt: r.access.expiresAt)
+        Task { try? await FirestoreClient(cloud: cloud).ensureRoom(r.room, createdAt: r.createdAt, expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce) }
+        return SegmentUploader(shareID: r.shareID, ownerUID: cloud.userID, directory: segmentsDirectory(r), location: r.location, expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
     }
 
     /// Called right after capture stops: uploads the last segments and the final playlist and
@@ -75,6 +79,7 @@ final class Publisher {
                 r.durationSeconds = max(r.durationSeconds, log.totalDuration)
                 self.model.update(r)
                 let cloud = try await CloudAuth.shared.validSession()
+                try self.requirePublisher(r, cloud: cloud)
                 try await self.uploadMeta(r, status: "ready", client: StorageClient(session: cloud), owner: self.owner(cloud))
                 try await FirestoreClient(cloud: cloud).upsertLibraryEntry(r)
                 let elapsed = Date().timeIntervalSince(stoppedAt)
@@ -121,10 +126,13 @@ final class Publisher {
                         current.meeting?.deliveryError = nil
                     }
                     current.meeting?.summaryReviewPassed = nil
-                } catch { Toast.show("Sign in to Reel to transcribe this meeting with OpenAI.", isError: true); return }
+                    current.transcriptStatus = .pending
+                    try model.saveRecording(current)
+                } catch { Toast.show(error.localizedDescription, isError: true); return }
+            } else {
+                current.transcriptStatus = .pending
+                model.update(current)
             }
-            current.transcriptStatus = .pending
-            model.update(current)
             _ = transcribe(current)
         }
     }
@@ -284,7 +292,7 @@ final class Publisher {
                       r.meeting?.ownerUserID == nil || r.meeting?.ownerUserID == account.userID else { return }
                 r.meeting?.ownerUserID = account.userID
                 r.meeting?.deliveryStatus = .pending; r.meeting?.deliveryRetryAt = nil
-                model.update(r)
+                try model.saveRecording(r)
                 await deliverMeeting(r).value
             } catch { Toast.show(error.localizedDescription, isError: true) }
         }
@@ -347,21 +355,34 @@ final class Publisher {
 
     // MARK: Publish (idempotent)
 
+    struct MeetingShareConsent {
+        let ownerUID: String
+        let accountGeneration: UInt64
+    }
+
+    func meetingShareConsent() -> MeetingShareConsent? {
+        model.account.map { MeetingShareConsent(ownerUID: $0.userID, accountGeneration: model.accountGeneration) }
+    }
+
     /// Uploads whatever is missing at the recording's location: finishes the HLS copy (open
     /// recordings), the MP4, thumbnail, transcript, trimmed copy, room and meta. Safe to call
     /// again to retry.
     @discardableResult
-    func publish(_ recording: Recording, copyLink: Bool, allowMeetingShare: Bool = false) -> Task<Void, Never> {
+    func publish(_ recording: Recording, copyLink: Bool, meetingConsent: MeetingShareConsent? = nil) -> Task<Void, Never> {
         let current = model.recording(id: recording.id) ?? recording
-        guard current.permitsPublishing(allowMeetingShare: allowMeetingShare) else { return Task {} }
+        guard current.permitsPublishing(allowMeetingShare: meetingConsent != nil) else { return Task {} }
         if let t = uploads[recording.id] { return t }
         let id = recording.id
         let task = Task { @MainActor in
             defer { self.uploads[id] = nil; self.model.uploadProgress[id] = nil }
             if let live = self.liveFinish[id] { _ = await live.value; self.liveFinish[id] = nil }
-            guard var r = self.model.recording(id: id), r.permitsPublishing(allowMeetingShare: allowMeetingShare) else { return }
+            guard var r = self.model.recording(id: id), r.permitsPublishing(allowMeetingShare: meetingConsent != nil) else { return }
             let cloud: CloudSession
             do { cloud = try await CloudAuth.shared.validSession() } catch {
+                if r.isMeeting {
+                    Toast.show(error.localizedDescription, isError: true)
+                    return
+                }
                 r.upload = .localOnly
                 self.model.update(r)
                 if copyLink {
@@ -370,15 +391,35 @@ final class Publisher {
                 }
                 return
             }
-            r.upload = .uploading
-            self.model.update(r)
+            guard let current = self.model.recording(id: id), current.permitsPublishing(allowMeetingShare: meetingConsent != nil) else { return }
+            r = current
+            do {
+                if r.isMeeting {
+                    guard let meetingConsent, meetingConsent.ownerUID == cloud.userID,
+                          await CloudAuth.shared.current?.userID == cloud.userID,
+                          self.model.account?.userID == cloud.userID,
+                          self.model.accountGeneration == meetingConsent.accountGeneration else {
+                        throw LibraryStore.IdentityError.meetingShareConsentRequired
+                    }
+                }
+                try self.prepareForPublication(&r, cloud: cloud, meetingConsentUID: meetingConsent?.ownerUID)
+                r.upload = .uploading
+                try self.model.saveRecording(r)
+            } catch {
+                Toast.show(error.localizedDescription, isError: true)
+                return
+            }
             self.model.uploadProgress[id] = 0
             do {
-                try await self.sync(id: id, cloud: cloud, copyLink: copyLink)
+                try await self.sync(r, cloud: cloud, copyLink: copyLink)
                 r = self.model.recording(id: id) ?? r
                 r.upload = .uploaded
                 self.model.update(r)
-                if copyLink && r.isMeeting { self.copyLinkToClipboard(r, openPage: true) }
+                if r.isMeeting {
+                    let sharedMeeting = r
+                    Task { _ = await MeetingPortalIndex.publish(sharedMeeting) }
+                    if copyLink { self.copyLinkToClipboard(r, openPage: true) }
+                }
                 if copyLink && !r.playback.hls { Notifier.post(title: "Video ready", body: r.title, url: r.shareURL()) }
             } catch {
                 Log.cloud.error("Upload failed: \(error.localizedDescription, privacy: .public)")
@@ -392,22 +433,35 @@ final class Publisher {
         return task
     }
 
-    private func sync(id: String, cloud: CloudSession, copyLink: Bool) async throws {
-        guard var r = model.recording(id: id) else { return }
+    private func prepareForPublication(_ recording: inout Recording, cloud: CloudSession, meetingConsentUID: String? = nil) throws {
+        recording = try model.bindForPublication(recording, ownerUID: cloud.userID, meetingConsentUID: meetingConsentUID)
+    }
+
+    private func requirePublisher(_ recording: Recording, cloud: CloudSession) throws {
+        guard recording.matchesPublisher(cloud.userID),
+              recording.meeting?.ownerUserID == nil || recording.meeting?.ownerUserID == cloud.userID else {
+            throw CloudError.permanent("Sign in with the account that owns this recording to update its web share.")
+        }
+    }
+
+    private func sync(_ recording: Recording, cloud: CloudSession, copyLink: Bool) async throws {
+        let id = recording.id
+        var r = recording
+        try requirePublisher(r, cloud: cloud)
         let client = StorageClient(session: cloud)
         let owner = owner(cloud)
         let loc = r.location
-        let opts = StorageRequests.ObjectOptions(expiresAt: r.access.expiresAt)
+        let opts = StorageRequests.ObjectOptions(expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
         let playable = r.playback.hls || r.playback.mp4
         try await uploadMeta(r, status: playable ? "ready" : "processing", client: client, owner: owner)
         if copyLink { copyLinkToClipboard(r, uploading: !playable, openPage: true) }
-        try? await FirestoreClient(cloud: cloud).ensureRoom(r.room, createdAt: r.createdAt, expiresAt: r.access.expiresAt)
+        try? await FirestoreClient(cloud: cloud).ensureRoom(r.room, createdAt: r.createdAt, expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
 
         // HLS copy (open recordings only; protected ones are served as MP4).
         let segDir = segmentsDirectory(r)
         if !loc.isKeyed, let log = SegmentUploader.combinedLog(directory: segDir), log.hasInit, !log.segments.isEmpty,
            !(log.uploadedFinalPlaylist && log.allUploaded && log.uploadedLocation == loc) {
-            let uploader = SegmentUploader(shareID: r.shareID, directory: segDir, location: loc, expiresAt: r.access.expiresAt)
+            let uploader = SegmentUploader(shareID: r.shareID, ownerUID: cloud.userID, directory: segDir, location: loc, expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
             try await uploader.finish(log: log)
             r = model.recording(id: id) ?? r
             r.playback.hls = true
@@ -451,7 +505,8 @@ final class Publisher {
         try await PostProcessor.exportTrimmed(video: library.videoURL(for: r), trim: trim, to: out)
         try await client.upload(fileURL: out, shareID: r.shareID, file: .trimmed, location: r.location,
                                 options: .init(expiresAt: r.access.expiresAt,
-                                               contentDisposition: StorageRequests.attachmentDisposition(title: r.title))) { _ in }
+                                               contentDisposition: StorageRequests.attachmentDisposition(title: r.title),
+                                               recordingNonce: r.recordingNonce)) { _ in }
         r = model.recording(id: id) ?? r
         if r.trim == trim { r.trimmedUploaded = true }
         model.update(r)
@@ -459,8 +514,14 @@ final class Publisher {
 
     private func uploadTranscript(_ r: Recording, client: StorageClient) async throws {
         guard r.transcriptStatus == .ready else { return }
-        let opts = StorageRequests.ObjectOptions(expiresAt: r.access.expiresAt)
-        if let json = try? Data(contentsOf: library.transcriptJSONURL(for: r)) {
+        let opts = StorageRequests.ObjectOptions(expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
+        if var json = try? Data(contentsOf: library.transcriptJSONURL(for: r)) {
+            // A transcript produced while signed out may still contain the provisional ID.
+            if r.recordingNonce != nil {
+                var transcript = try ReelJSON.decoder.decode(Transcript.self, from: json)
+                transcript.id = r.shareID
+                json = try transcript.encoded()
+            }
             try await client.upload(data: json, shareID: r.shareID, file: .transcriptJSON, location: r.location, options: opts)
         }
         if let txt = try? Data(contentsOf: library.transcriptTextURL(for: r)) {
@@ -470,7 +531,7 @@ final class Publisher {
 
     /// meta.json at the recording's location, plus the locked stub for protected recordings.
     func uploadMeta(_ r: Recording, status: String, client: StorageClient, owner: String?) async throws {
-        let opts = StorageRequests.ObjectOptions(expiresAt: r.access.expiresAt)
+        let opts = StorageRequests.ObjectOptions(expiresAt: r.access.expiresAt, recordingNonce: r.recordingNonce)
         let meta = (try? ReelJSON.encoder.encode(RemoteMeta(recording: r, status: status, ownerName: owner, app: Self.appVersion))) ?? Data()
         try await client.upload(data: meta, shareID: r.shareID, file: .meta, location: r.location, options: opts)
         if r.location.isKeyed, let salt = r.access.passwordSalt {
@@ -482,7 +543,7 @@ final class Publisher {
     private func owner(_ cloud: CloudSession) -> String? { cloud.displayName ?? cloud.email }
 
     func copyLinkToClipboard(_ r: Recording, uploading: Bool = false, openPage: Bool = false) {
-        guard !r.isMeeting || r.upload == .uploaded else { return }
+        guard r.hasPublishableShareID, !r.isMeeting || r.upload == .uploaded else { return }
         let url = r.shareURL().absoluteString
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url, forType: .string)
@@ -526,17 +587,20 @@ final class Publisher {
             return
         }
         let cloud = try await CloudAuth.shared.validSession()
+        let meetingConsent = r.isMeeting ? MeetingShareConsent(ownerUID: cloud.userID, accountGeneration: model.accountGeneration) : nil
+        if r.isMeeting { try prepareForPublication(&r, cloud: cloud, meetingConsentUID: meetingConsent?.ownerUID) }
+        try requirePublisher(r, cloud: cloud)
         let client = StorageClient(session: cloud)
         if newAccess.location == oldAccess.location {
             // Expiry only.
             r.access = newAccess
             model.update(r)
             let files = remoteFiles(r, at: r.location)
-            let shareID = r.shareID, location = r.location
+            let shareID = r.shareID, location = r.location, recordingNonce = r.recordingNonce
             try await StorageClient.concurrently(files, width: 8) { f in
-                try await client.setExpiry(expiresAt, shareID: shareID, file: f, location: location)
+                try await client.setExpiry(expiresAt, shareID: shareID, file: f, location: location, recordingNonce: recordingNonce)
             }
-            if r.location.isKeyed { try await client.setExpiry(expiresAt, shareID: r.shareID, file: .meta, location: .open) }
+            if r.location.isKeyed { try await client.setExpiry(expiresAt, shareID: r.shareID, file: .meta, location: .open, recordingNonce: recordingNonce) }
             try await FirestoreClient(cloud: cloud).setExpiry(r.room, expiresAt: expiresAt)
             try await uploadMeta(r, status: "ready", client: client, owner: owner(cloud))
             try await FirestoreClient(cloud: cloud).upsertLibraryEntry(r)
@@ -554,7 +618,7 @@ final class Publisher {
             // Hide the old open copy first: the stub replaces the open meta.json right away.
             try await uploadMeta(r, status: "processing", client: client, owner: owner(cloud))
         }
-        await publish(r, copyLink: false, allowMeetingShare: r.isMeeting).value
+        await publish(r, copyLink: false, meetingConsent: meetingConsent).value
         guard let after = model.recording(id: r.id), after.upload == .uploaded else {
             throw CloudError.message("Couldn't upload the recording with its new settings; the old link was left as it was.")
         }
@@ -565,7 +629,7 @@ final class Publisher {
             // The segments were deleted with the old copy; forget their upload progress.
             try? FileManager.default.removeItem(at: segmentsDirectory(r).appendingPathComponent(SegmentUploader.progressFile))
         }
-        try? await FirestoreClient(cloud: cloud).migrate(from: oldRoom, to: after.room, createdAt: r.createdAt, expiresAt: expiresAt)
+        try? await FirestoreClient(cloud: cloud).migrate(from: oldRoom, to: after.room, createdAt: r.createdAt, expiresAt: expiresAt, recordingNonce: after.recordingNonce)
     }
 
     /// Every object a recording may have at `location` (segments only exist for open ones).
@@ -625,6 +689,7 @@ final class Publisher {
         return Task { @MainActor in
             do {
                 let cloud = try await CloudAuth.shared.validSession()
+                try self.requirePublisher(r, cloud: cloud)
                 let client = StorageClient(session: cloud)
                 try await self.uploadMeta(r, status: "ready", client: client, owner: self.owner(cloud))
                 try await self.uploadTranscript(r, client: client)
@@ -647,6 +712,7 @@ final class Publisher {
         if r.upload.mayHaveRemote || r.playback.hls || r.playback.mp4 {
             do {
                 let cloud = try await CloudAuth.shared.validSession()
+                try self.requirePublisher(r, cloud: cloud)
                 let client = StorageClient(session: cloud)
                 if r.location.isKeyed { try await client.delete(shareID: r.shareID, files: remoteFiles(r, at: r.location), location: r.location) }
                 try await client.delete(shareID: r.shareID, files: remoteFiles(r, at: .open), location: .open)

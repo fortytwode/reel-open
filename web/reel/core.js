@@ -141,6 +141,19 @@ function cryptoRandomInt(n) {
   for (;;) { globalThis.crypto.getRandomValues(b); if (b[0] < limit) return b[0] % n; }
 }
 
+export function newRecordingNonce() {
+  return hex(globalThis.crypto.getRandomValues(new Uint8Array(16)));
+}
+
+export async function ownerShareID(uid, recordingNonce) {
+  if (!uid || typeof recordingNonce !== "string" || !/^[a-f0-9]{32}$/.test(recordingNonce)) {
+    throw new Error("Invalid recording owner binding.");
+  }
+  const input = new TextEncoder().encode(`reel-owner-v2:${uid}:${recordingNonce}`);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", input);
+  return "r2" + hex(new Uint8Array(digest)).slice(0, 38);
+}
+
 export function isValidShareID(id) {
   return typeof id === "string" && id.length >= 16 && id.length <= 40 && /^[a-z0-9]+$/.test(id);
 }
@@ -299,6 +312,24 @@ export function uploadStateLabel(u) {
 }
 export function mayHaveRemote(u) { return u === "uploaded" || u === "uploading" || (typeof u === "object" && u && u.failed != null); }
 
+/** Carry persisted publisher and private meeting ownership across a stale local update. */
+export function preserveRecordingBinding(recording, previous) {
+  if (previous?.recordingNonce && previous.recordingOwnerUID) {
+    recording.recordingNonce = previous.recordingNonce;
+    recording.recordingOwnerUID = previous.recordingOwnerUID;
+    recording.shareID = previous.shareID;
+  }
+  if (isMeeting(previous)) {
+    recording.meeting ??= decodeMeeting(previous.meeting);
+    if (previous.meeting?.ownerUID) {
+      recording.meeting.ownerUID = previous.meeting.ownerUID;
+    } else if (previous.recordingOwnerUID && recording.meeting.ownerUID !== previous.recordingOwnerUID) {
+      delete recording.meeting.ownerUID;
+    }
+  }
+  return recording;
+}
+
 /** recording.json exactly as Swift's Codable Recording writes it (enums with associated values included). */
 export function recordingToJSON(r) {
   const upload = typeof r.upload === "object" ? { failed: { _0: r.upload.failed } } : { [r.upload]: {} };
@@ -314,6 +345,10 @@ export function recordingToJSON(r) {
     access, trim: r.trim ?? undefined, trimmedUploaded: r.trimmedUploaded, summary: r.summary ?? undefined,
     chapters: r.chapters ?? undefined, summaryEngine: r.summaryEngine ?? undefined, viewCount: r.viewCount ?? undefined,
   };
+  if (r.recordingNonce) {
+    json.recordingNonce = r.recordingNonce;
+    if (r.recordingOwnerUID) json.recordingOwnerUID = r.recordingOwnerUID;
+  }
   if (isMeeting(r)) {
     json.meeting = decodeMeeting(r.meeting);
   }
@@ -323,6 +358,10 @@ export function recordingToJSON(r) {
 /** Tolerant decoding (like Recording.init(from:)): missing/unknown fields fall back to defaults. */
 export function recordingFromJSON(j) {
   const r = newRecording({ id: j.id, shareID: j.shareID, title: j.title, createdAt: parseISO(j.createdAt) || new Date(0), mode: j.mode || "screen" });
+  if (j.recordingNonce) {
+    r.recordingNonce = j.recordingNonce;
+    if (j.recordingOwnerUID) r.recordingOwnerUID = j.recordingOwnerUID;
+  }
   if (Object.prototype.hasOwnProperty.call(j, "meeting")) r.meeting = decodeMeeting(j.meeting);
   r.folderName = j.folderName;
   r.durationSeconds = typeof j.durationSeconds === "number" ? j.durationSeconds : 0;
@@ -399,12 +438,13 @@ export function attachmentDisposition(title, ext = "mp4") {
 /** Builds Firebase Storage REST requests (the protocol the Firebase JS SDK uses). */
 export class StorageRequests {
   /** auth: {firebase: idToken} | {bearer: accessToken} */
-  constructor({ auth, ownerUID, cfg = CLOUD }) { this.auth = auth; this.ownerUID = ownerUID; this.cfg = cfg; }
+  constructor({ auth, ownerUID, recordingNonce, cfg = CLOUD }) { Object.assign(this, { auth, ownerUID, recordingNonce, cfg }); }
   get authHeader() { return this.auth.bearer ? "Bearer " + this.auth.bearer : "Firebase " + this.auth.firebase; }
   get base() { return `${this.cfg.storageOrigin}/v0/b/${this.cfg.bucket}/o`; }
 
   customMetadata({ expiresAt = null } = {}) {
     const m = { ownerUid: this.ownerUID };
+    if (this.recordingNonce) m.recordingNonce = this.recordingNonce;
     if (expiresAt) m.expiresAt = expiryString(expiresAt);
     return m;
   }
@@ -453,7 +493,7 @@ export class StorageRequests {
     return {
       method: "PATCH", url: `${this.base}/${encodedObjectName(path)}`,
       headers: { "Authorization": this.authHeader, "Content-Type": "application/json; charset=utf-8" },
-      body: sortedJSON({ metadata: { ownerUid: this.ownerUID, expiresAt: expiresAt ? expiryString(expiresAt) : null } }),
+      body: sortedJSON({ metadata: { ...this.customMetadata({ expiresAt }), expiresAt: expiresAt ? expiryString(expiresAt) : null } }),
     };
   }
   getMetadata(shareID, file, key = null) {
@@ -520,8 +560,9 @@ export class FirestoreRequests {
     return { method, url, headers, body };
   }
   static body(fields) { return sortedJSON({ fields }); }
-  createRoom(roomID, ownerUID, createdAt, views = 0, expiresAt = null) {
+  createRoom(roomID, ownerUID, createdAt, views = 0, expiresAt = null, recordingNonce = null) {
     const fields = { ownerUid: FV.string(ownerUID), createdAt: FV.timestamp(createdAt), views: FV.int(views), expiresAt: expiresAt ? FV.timestamp(expiresAt) : FV.null() };
+    if (recordingNonce) fields.recordingNonce = FV.string(recordingNonce);
     return this.request(`${this.documentsBase}/videos?documentId=${roomID}`, "POST", FirestoreRequests.body(fields));
   }
   setRoomExpiry(roomID, expiresAt) {

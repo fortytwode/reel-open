@@ -8,6 +8,7 @@ import ReelCore
 /// recovery, retry from the Library) from the progress saved in `segments/upload.json`.
 actor SegmentUploader {
     let shareID: String
+    private let ownerUID: String
     let directory: URL
     private(set) var location: RemoteLocation
     private var options: StorageRequests.ObjectOptions
@@ -24,11 +25,12 @@ actor SegmentUploader {
 
     static let progressFile = "upload.json"
 
-    init(shareID: String, directory: URL, location: RemoteLocation, expiresAt: Date?) {
+    init(shareID: String, ownerUID: String, directory: URL, location: RemoteLocation, expiresAt: Date?, recordingNonce: String?) {
         self.shareID = shareID
+        self.ownerUID = ownerUID
         self.directory = directory
         self.location = location
-        self.options = .init(expiresAt: expiresAt)
+        self.options = .init(expiresAt: expiresAt, recordingNonce: recordingNonce)
         var p = Self.loadProgress(directory: directory) ?? SegmentLog()
         if p.uploadedLocation != location { p.resetUploads(to: location) }
         self.progress = p
@@ -112,9 +114,17 @@ actor SegmentUploader {
         }
     }
 
+    private static func publisherSession(ownerUID: String) async throws -> CloudSession {
+        let cloud = try await CloudAuth.shared.validSession()
+        guard cloud.userID == ownerUID else {
+            throw CloudError.permanent("Your account changed. Sign in with the recording's publisher to continue uploading.")
+        }
+        return cloud
+    }
+
     private func uploadFile(_ file: RemoteFile) async throws {
         let data = try Data(contentsOf: directory.appendingPathComponent(file.rawValue), options: .mappedIfSafe)
-        let cloud = try await CloudAuth.shared.validSession()
+        let cloud = try await Self.publisherSession(ownerUID: ownerUID)
         try await StorageClient(session: cloud).upload(data: data, shareID: shareID, file: file, location: location, options: options)
         bytesSent += data.count
     }
@@ -128,7 +138,7 @@ actor SegmentUploader {
         let text = HLSPlaylist.make(segments: listed, ended: ended) {
             ShareLinks.downloadURL(shareID: shareID, file: $0, location: location).absoluteString
         }
-        let cloud = try await CloudAuth.shared.validSession()
+        let cloud = try await Self.publisherSession(ownerUID: ownerUID)
         try await StorageClient(session: cloud).upload(data: Data(text.utf8), shareID: shareID, file: .playlist, location: location, options: options)
     }
 
@@ -145,11 +155,11 @@ actor SegmentUploader {
             persist()
         }
         let pending = log.segments.filter { !progress.uploaded.contains($0.index) }
-        let shareID = shareID, location = location, options = options, dir = directory
+        let shareID = shareID, ownerUID = ownerUID, location = location, options = options, dir = directory
         // Catch up in parallel when the live upload fell behind (or after a crash).
         try await StorageClient.concurrently(pending, width: 4) { s in
             let data = try Data(contentsOf: dir.appendingPathComponent(s.file.rawValue), options: .mappedIfSafe)
-            let cloud = try await CloudAuth.shared.validSession()
+            let cloud = try await Self.publisherSession(ownerUID: ownerUID)
             try await StorageClient(session: cloud).upload(data: data, shareID: shareID, file: s.file, location: location, options: options)
         }
         for s in pending { progress.uploaded.insert(s.index) }

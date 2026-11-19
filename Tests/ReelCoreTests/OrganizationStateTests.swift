@@ -17,7 +17,7 @@ final class OrganizationStateTests: XCTestCase {
         let configs = [config, otherProject, otherDomain, unconfigured]
         let libraries = configs.map { LibraryStore(root: OrganizationState(config: $0).directory(under: movies)) }
         let legacy = LibraryStore(root: movies.appendingPathComponent("Reel"))
-        try legacy.save(recording("legacy", meetingOwner: owner))
+        try legacy.insert(recording("legacy", meetingOwner: owner))
         XCTAssertEqual(Set(libraries.map(\.root)).count, libraries.count)
 
         for (index, library) in libraries.enumerated() {
@@ -26,7 +26,7 @@ final class OrganizationStateTests: XCTestCase {
             var local = recording("local-\(index)")
             local.upload = .localOnly
             let meeting = recording("meeting-\(index)", meetingOwner: owner)
-            for recording in [pending, local, meeting] { try library.save(recording) }
+            for recording in [pending, local, meeting] { try library.insert(recording) }
 
             let reopened = LibraryStore(root: OrganizationState(config: configs[index]).directory(under: movies))
             let entries = reopened.load()

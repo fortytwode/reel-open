@@ -3,9 +3,9 @@
 // starts and segments stream up during capture, so the link is copied the moment recording stops
 // and plays within seconds. Then video.mp4 (assembled locally from the segments), the thumbnail
 // and meta are uploaded in the background. Same remote layout as the Mac app.
-import * as C from "./core.js?v=20261110-delivery1";
-import * as store from "./store.js?v=20261118-orgstate1";
-import { StorageClient, FirestoreClient, SegmentUploader, CloudError, concurrently } from "./cloud.js?v=20261105-parity2";
+import * as C from "./core.js?v=20261119-owner2";
+import * as store from "./store.js?v=20261119-owner2";
+import { StorageClient, FirestoreClient, SegmentUploader, CloudError, concurrently } from "./cloud.js?v=20261119-owner2";
 import { remux, parseInit, fragmentDuration } from "./fmp4.js";
 
 export const APP_VERSION = "1.2.9";
@@ -23,10 +23,28 @@ export class Library extends EventTarget {
     else this.items.delete(id);
     this.changed(); return this.get(id);
   }
-  async update(r, extra) { this.items.set(r.id, structuredClone(r)); await store.saveRecording(r, extra); this.changed(); }
+  async update(r, extra) {
+    const next = C.preserveRecordingBinding(structuredClone(r), this.items.get(r.id));
+    this.items.set(r.id, next);
+    const saved = await store.saveRecording(next, extra);
+    const current = this.items.get(r.id);
+    if (current) C.preserveRecordingBinding(current, saved);
+    this.changed();
+  }
+  async bind(r, uid, meetingShareUID = null, assertCurrent = null) {
+    const saved = await store.bindRecording(r.id, r.recordingNonce, uid, meetingShareUID, assertCurrent);
+    const current = this.items.get(r.id);
+    if (!current) throw new Error("This recording is no longer available.");
+    C.preserveRecordingBinding(current, saved);
+    this.changed();
+    return this.get(r.id);
+  }
   async updateExisting(r, extra) {
-    if (!this.items.has(r.id) || !await store.updateExistingRecording(r, extra) || !this.items.has(r.id)) return false;
-    this.items.set(r.id, structuredClone(r)); this.changed(); return true;
+    if (!this.items.has(r.id)) return false;
+    const saved = await store.updateExistingRecording(r, extra);
+    if (!saved || !this.items.has(r.id)) return false;
+    this.items.set(r.id, C.preserveRecordingBinding(structuredClone(r), saved));
+    this.changed(); return true;
   }
   async remove(id) { this.items.delete(id); await store.deleteRecording(id); this.changed(); }
   setProgress(id, p) { if (p == null) this.progress.delete(id); else this.progress.set(id, p); this.changed(); }
@@ -45,9 +63,29 @@ export class Publisher {
     this.uploads = new Map(); this.liveFinish = new Map(); this.stopToPlayable = new Map();
   }
   owner(s) { return s.displayName || s.email; }
-  storage(s) { return new StorageClient(s, this.cfg); }
+  storage(s, r) {
+    if (!s || (r.recordingNonce && r.recordingOwnerUID !== s.uid) || (r.meeting?.ownerUID && r.meeting.ownerUID !== s.uid)) {
+      throw new Error("Sign in with this recording's original account to share it.");
+    }
+    return new StorageClient(s, this.cfg, r.recordingNonce);
+  }
   firestore(s) { return new FirestoreClient(s, this.cfg); }
   async session() { return this.auth.session(); }
+
+  meetingSession(session, expectedOwnerUID, consentIsCurrent) {
+    const isCurrent = () => Boolean(expectedOwnerUID && session?.uid === expectedOwnerUID &&
+      session.isCurrent?.() !== false && consentIsCurrent?.() !== false);
+    const assertCurrent = () => {
+      if (!isCurrent()) throw new CloudError("The account changed. Confirm sharing again.", true);
+    };
+    assertCurrent();
+    return { ...session, isCurrent, assertCurrent, async getIdToken() {
+      assertCurrent();
+      const token = await session.getIdToken();
+      assertCurrent();
+      return token;
+    } };
+  }
 
   async syncCloudLibrary() {
     const eligible = this.library.list().filter((r) => C.automaticCloudAllowed(r) && r.upload === "uploaded");
@@ -56,7 +94,10 @@ export class Publisher {
     if (!s) return;
     try {
       const client = this.firestore(s);
-      for (const r of eligible) if (await client.ownsRoom(C.recordingRoom(r))) await client.upsertLibraryEntry(r);
+      for (const r of eligible) {
+        if (r.recordingNonce && r.recordingOwnerUID !== s.uid) continue;
+        if (await client.ownsRoom(C.recordingRoom(r))) await client.upsertLibraryEntry(r);
+      }
     } catch (e) { this.ui.toast("Online library sync failed. Reload the recorder to retry. " + e.message, true); }
   }
 
@@ -68,20 +109,20 @@ export class Publisher {
     const st = this.settings();
     if (!st.autoUpload || !st.liveUpload) return null;
     const s = await this.session();
-    if (!s) return null;
+    if (!s || (r.recordingNonce && r.recordingOwnerUID !== s.uid)) return null;
     r.upload = "uploading";
     await this.library.update(r);
     try {
-      await this.uploadMeta(r, "recording", this.storage(s), this.owner(s));
+      await this.uploadMeta(r, "recording", this.storage(s, r), this.owner(s));
     } catch (e) {
       console.warn("Live upload disabled:", e.message);
       r.upload = "pending"; await this.library.update(r);
       return null;
     }
-    this.firestore(s).ensureRoom(C.recordingRoom(r), r.createdAt, r.access.expiresAt).catch(() => {});
+    this.firestore(s).ensureRoom(C.recordingRoom(r), r.createdAt, r.access.expiresAt, 0, r.recordingNonce).catch(() => {});
     const row = await store.getRow(r.id);
     return new SegmentUploader({
-      storage: this.storage(s), shareID: r.shareID, key: r.access.key, expiresAt: r.access.expiresAt, cfg: this.cfg,
+      storage: this.storage(s, r), shareID: r.shareID, key: r.access.key, expiresAt: r.access.expiresAt, cfg: this.cfg,
       files: (f) => store.getBytes(r.id, f), progress: row && row.progress, persist: (p) => store.updateRow(r.id, { progress: p }),
     });
   }
@@ -99,7 +140,7 @@ export class Publisher {
         r.durationSeconds = Math.max(r.durationSeconds, Math.round(C.SegmentLog.totalDuration(log) * 1000) / 1000);
         await this.library.update(r);
         const s = await this.session();
-        await this.uploadMeta({ ...r, transcriptStatus: "pending" }, "ready", this.storage(s), this.owner(s));
+        await this.uploadMeta({ ...r, transcriptStatus: "pending" }, "ready", this.storage(s, r), this.owner(s));
         await this.firestore(s).upsertLibraryEntry(r);
         this.stopToPlayable.set(id, (Date.now() - stoppedAt) / 1000);
         this.ui.notify("Video ready", r.title, C.shareURL(r, this.cfg));
@@ -171,12 +212,12 @@ export class Publisher {
 
   // ---------------------------------------------------------------- publish (idempotent)
 
-  publish(recording, { copyLink = false, allowMeetingShare = false, expectedOwnerUID = null } = {}) {
+  publish(recording, { copyLink = false, allowMeetingShare = false, expectedOwnerUID = null, consentIsCurrent = null } = {}) {
     const id = recording.id;
     // A previously reserved access migration must finish before deletion; all
     // other new publication stops once deletion owns this recording.
     if (this.deletions.has(id) && !this.accessChanges.has(id)) return Promise.resolve(false);
-    if (C.isMeeting(recording) && allowMeetingShare !== true) return Promise.resolve(false);
+    if (C.isMeeting(recording) && (!allowMeetingShare || !expectedOwnerUID || consentIsCurrent?.() === false)) return Promise.resolve(false);
     if (this.uploads.has(id)) return this.uploads.get(id);
     const task = (async () => {
       try {
@@ -184,20 +225,36 @@ export class Publisher {
         if (live) { await live; this.liveFinish.delete(id); }
         let r = this.library.get(id);
         if (!r) return;
-        const s = await this.session();
+        let s = await this.session();
         if (expectedOwnerUID && s?.uid !== expectedOwnerUID) return false;
         if (!s) {
-          r.upload = "localOnly"; await this.library.update(r);
+          if (!r.recordingNonce || !r.recordingOwnerUID) {
+            r.upload = "localOnly"; await this.library.update(r);
+          }
           if (copyLink) this.ui.toast("Saved locally · sign in to share");
           return;
+        }
+        const meetingShare = C.isMeeting(r);
+        try {
+          if (meetingShare) {
+            if (!allowMeetingShare) return false;
+            s = this.meetingSession(s, expectedOwnerUID, consentIsCurrent);
+          }
+          if (r.recordingNonce || meetingShare) {
+            r = await this.library.bind(r, s.uid, meetingShare ? expectedOwnerUID : null, s.assertCurrent);
+          }
+          s.assertCurrent?.();
+        } catch (e) {
+          this.ui.toast(e.message, true);
+          return false;
         }
         r.upload = "uploading"; await this.library.update(r);
         this.library.setProgress(id, 0);
         try {
-          const meetingShare = C.isMeeting(r) && allowMeetingShare === true;
-          await this.sync(id, s, meetingShare ? false : copyLink, allowMeetingShare === true);
+          s.assertCurrent?.();
+          await this.sync(id, s, meetingShare ? false : copyLink, meetingShare);
           r = this.library.get(id); r.upload = "uploaded"; await this.library.update(r);
-          if (meetingShare && copyLink) this.ui.copy(C.shareURL(r, this.cfg));
+          if (meetingShare && copyLink && s.isCurrent()) this.ui.copy(C.shareURL(r, this.cfg));
         } catch (e) {
           console.error("Upload failed", e);
           r = this.library.get(id); r.upload = { failed: e.message }; await this.library.update(r);
@@ -214,14 +271,17 @@ export class Publisher {
 
   async sync(id, s, copyLink, allowMeetingShare = false) {
     let r = this.library.get(id);
-    if (C.isMeeting(r) && allowMeetingShare !== true) return;
-    const storage = this.storage(s), owner = this.owner(s), key = r.access.key;
+    if (C.isMeeting(r)) {
+      if (!allowMeetingShare || !s.assertCurrent) throw new Error("Confirm sharing as the meeting owner.");
+      s.assertCurrent();
+    }
+    const storage = this.storage(s, r), owner = this.owner(s), key = r.access.key;
     const options = { expiresAt: r.access.expiresAt };
     const playable = r.playback.hls || r.playback.mp4;
     // Keep transcript polling active until this pass uploads its final transcript files.
     await this.uploadMeta({ ...r, transcriptStatus: "pending" }, allowMeetingShare ? "processing" : (playable ? "ready" : "processing"), storage, owner);
     if (copyLink && !playable && !allowMeetingShare) this.ui.copy(C.shareURL(r, this.cfg));
-    await this.firestore(s).ensureRoom(C.recordingRoom(r), r.createdAt, r.access.expiresAt).catch(() => {});
+    await this.firestore(s).ensureRoom(C.recordingRoom(r), r.createdAt, r.access.expiresAt, 0, r.recordingNonce).catch(() => {});
 
     // HLS copy (open recordings only; protected ones are served as MP4).
     const row = (await store.getRow(id)) || {};
@@ -328,17 +388,17 @@ export class Publisher {
   // ---------------------------------------------------------------- share settings
 
   /** password: {keep:true} | {set: "pw"} | {remove: true}. */
-  async updateAccess(recording, password, expiresAt) {
+  async updateAccess(recording, password, expiresAt, consent = {}) {
     const id = recording.id;
     if (this.deletions.has(id)) throw new Error("This recording is being deleted.");
     const previous = this.accessChanges.get(id);
-    const task = Promise.resolve(previous).catch(() => {}).then(() => this.applyAccess(recording, password, expiresAt));
+    const task = Promise.resolve(previous).catch(() => {}).then(() => this.applyAccess(recording, password, expiresAt, consent));
     this.accessChanges.set(id, task);
     try { return await task; }
     finally { if (this.accessChanges.get(id) === task) this.accessChanges.delete(id); }
   }
 
-  async applyAccess(recording, password, expiresAt) {
+  async applyAccess(recording, password, expiresAt, { expectedOwnerUID = null, consentIsCurrent = null } = {}) {
     if (this.uploads.has(recording.id)) await this.uploads.get(recording.id);
     let r = this.library.get(recording.id);
     const old = { ...r.access };
@@ -352,13 +412,19 @@ export class Publisher {
       next.key = key; next.passwordSalt = salt;
     }
     if (!C.mayHaveRemote(r.upload)) { r.access = next; await this.library.update(r); return; }
-    const s = await this.session();
+    let s = await this.session();
     if (!s) throw new Error("Sign in to change sharing settings.");
-    const storage = this.storage(s);
+    if (C.isMeeting(r)) {
+      s = this.meetingSession(s, expectedOwnerUID, consentIsCurrent);
+      r = await this.library.bind(r, s.uid, expectedOwnerUID, s.assertCurrent);
+      s.assertCurrent();
+    }
+    const storage = this.storage(s, r);
     if (next.key === old.key) {
       // Expiry only: patch every object's metadata; the rules enforce it.
       r.access = next; await this.library.update(r);
       const files = await this.remoteFiles(r, r.access.key);
+      s.assertCurrent?.();
       await concurrently(files, 8, (f) => storage.setExpiry(expiresAt, r.shareID, f, r.access.key));
       if (r.access.key) await storage.setExpiry(expiresAt, r.shareID, C.File.meta, null);
       await this.firestore(s).setExpiry(C.recordingRoom(r), expiresAt);
@@ -371,14 +437,17 @@ export class Publisher {
     const oldFiles = await this.remoteFiles(r, old.key);
     r.access = next; r.playback = { hls: false, mp4: false }; r.trimmedUploaded = false; r.upload = "pending";
     await this.library.update(r);
+    s.assertCurrent?.();
     if (next.key) await this.uploadMeta(r, "processing", storage, this.owner(s));   // stub replaces the open meta right away
-    await this.publish(r, C.isMeeting(r) ? { allowMeetingShare: true } : {});
+    s.assertCurrent?.();
+    await this.publish(r, { allowMeetingShare: C.isMeeting(r), expectedOwnerUID: s.uid, consentIsCurrent });
     const after = this.library.get(r.id);
     if (!after || after.upload !== "uploaded") throw new Error("Couldn't upload the recording with its new settings; the old link was left as it was.");
+    s.assertCurrent?.();
     const stale = oldFiles.filter((f) => !(old.key == null && f === C.File.meta));
     await storage.delete(r.shareID, stale, old.key);
     if (old.key == null) await store.updateRow(r.id, { progress: null });   // segments deleted with the old copy
-    await this.firestore(s).migrate(oldRoom, C.recordingRoom(after), r.createdAt, expiresAt).catch(() => {});
+    await this.firestore(s).migrate(oldRoom, C.recordingRoom(after), r.createdAt, expiresAt, r.recordingNonce).catch(() => {});
   }
 
   /** Every object a recording may have at a location (segments only exist for open ones). */
@@ -421,7 +490,7 @@ export class Publisher {
     if (r.upload !== "uploaded") return;
     try {
       const s = await this.session();
-      await this.uploadMeta(r, "ready", this.storage(s), this.owner(s));
+      await this.uploadMeta(r, "ready", this.storage(s, r), this.owner(s));
       await this.firestore(s).upsertLibraryEntry(r);
     } catch (e) { this.ui.toast("Renamed locally; web title not updated: " + e.message, true); }
   }
@@ -449,7 +518,7 @@ export class Publisher {
       try {
         const s = await this.session();
         if (!s) throw new Error("sign in to delete the web copy");
-        const storage = this.storage(s);
+        const storage = this.storage(s, r);
         if (r.access.key) await storage.delete(r.shareID, await this.remoteFiles(r, r.access.key), r.access.key);
         await storage.delete(r.shareID, await this.remoteFiles(r, null), null);
         await this.firestore(s).deleteLibraryEntry(r.shareID);

@@ -18,6 +18,7 @@ struct StorageClient {
     /// Small object upload. Retries transient failures (Loom retries a part up to 10 times).
     func upload(data: Data, shareID: String, file: RemoteFile, location: RemoteLocation = .open,
                 options: StorageRequests.ObjectOptions = .none, attempts: Int = 6) async throws {
+        try requirePublisher(shareID: shareID, recordingNonce: options.recordingNonce)
         var attempt = 0
         while true {
             do {
@@ -37,6 +38,7 @@ struct StorageClient {
 
     func upload(fileURL: URL, shareID: String, file: RemoteFile, location: RemoteLocation = .open,
                 options: StorageRequests.ObjectOptions = .none, progress: @escaping @Sendable (Double) -> Void) async throws {
+        try requirePublisher(shareID: shareID, recordingNonce: options.recordingNonce)
         let total = (try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? 0
         let (_, startResponse) = try await data(for: requests.resumableStart(shareID: shareID, file: file, location: location, totalBytes: total, options: options),
                                                 what: "start \(file.rawValue)")
@@ -70,14 +72,22 @@ struct StorageClient {
     }
 
     /// Sets or clears `expiresAt` on an existing object. Missing objects are skipped.
-    func setExpiry(_ expiresAt: Date?, shareID: String, file: RemoteFile, location: RemoteLocation) async throws {
+    func setExpiry(_ expiresAt: Date?, shareID: String, file: RemoteFile, location: RemoteLocation, recordingNonce: String?) async throws {
+        try requirePublisher(shareID: shareID, recordingNonce: recordingNonce)
         // Like DELETE, a PATCH on a missing object is denied (403) by the rules, not 404.
         guard try await exists(shareID: shareID, file: file, location: location) else { return }
-        let (body, resp) = try await session.data(for: requests.updateMetadata(shareID: shareID, file: file, location: location, expiresAt: expiresAt))
+        let (body, resp) = try await session.data(for: requests.updateMetadata(shareID: shareID, file: file, location: location, expiresAt: expiresAt, recordingNonce: recordingNonce))
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 404 { return }
         guard (200..<300).contains(code) else {
             throw CloudError.message("Couldn't update \(file.rawValue) (HTTP \(code)) \(String(data: body.prefix(200), encoding: .utf8) ?? "")")
+        }
+    }
+
+    private func requirePublisher(shareID: String, recordingNonce: String?) throws {
+        guard let recordingNonce else { return }
+        guard ShareLinks.ownerBoundShareID(ownerUID: requests.ownerUID, recordingNonce: recordingNonce) == shareID else {
+            throw CloudError.permanent("Sign in with the account that owns this recording to upload it.")
         }
     }
 

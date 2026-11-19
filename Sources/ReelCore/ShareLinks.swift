@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Where recordings live remotely. Keep in sync with web/viewer.js and firebase/storage.rules.
@@ -154,6 +155,27 @@ public enum ShareLinks {
     public static func newShareID() -> String {
         var g = SystemRandomNumberGenerator()
         return newShareID(using: &g)
+    }
+
+    /// Public 128-bit nonce, used only for binding a new recording ID to its publisher.
+    public static func newRecordingNonce() -> String {
+        var generator = SystemRandomNumberGenerator()
+        return AccessKey.hex((0..<16).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+    }
+
+    public static func ownerBoundShareID(ownerUID: String, recordingNonce: String) -> String? {
+        guard !ownerUID.isEmpty, recordingNonce.utf8.count == 32,
+              recordingNonce.utf8.allSatisfy(isLowercaseHex) else { return nil }
+        let input = Data("reel-owner-v2:\(ownerUID):\(recordingNonce)".utf8)
+        return "r2" + AccessKey.hex(Array(SHA256.hash(data: input))).prefix(38)
+    }
+
+    public static func isOwnerBoundShareID(_ id: String) -> Bool {
+        id.utf8.count == 40 && id.hasPrefix("r2") && id.utf8.dropFirst(2).allSatisfy(isLowercaseHex)
+    }
+
+    private static func isLowercaseHex(_ byte: UInt8) -> Bool {
+        (48...57).contains(byte) || (97...102).contains(byte)
     }
 
     public static func isValidShareID(_ id: String) -> Bool {
