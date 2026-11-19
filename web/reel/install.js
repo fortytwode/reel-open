@@ -7,14 +7,14 @@ const standalone = window.matchMedia("(display-mode: standalone)");
 function update() {
   button.hidden = installed || standalone.matches;
   help.hidden = installed || standalone.matches;
-  button.textContent = deferredPrompt ? "Install Reel" : "Install on Windows";
+  button.textContent = "Install Recorder";
 }
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault(); deferredPrompt = event; update();
 });
 window.addEventListener("appinstalled", () => {
   installed = true; deferredPrompt = null; update();
-  message.textContent = "Reel installed. Open it from your Start menu or taskbar.";
+  message.textContent = "Reel Recorder installed.";
 });
 standalone.addEventListener("change", update);
 button.addEventListener("click", async () => {
@@ -27,7 +27,7 @@ button.addEventListener("click", async () => {
   try {
     await prompt.prompt();
     const { outcome } = await prompt.userChoice;
-    message.textContent = outcome === "accepted" ? "Installation accepted. You can open Reel from your Start menu." : "Installation cancelled. You can keep recording here or install later.";
+    message.textContent = outcome === "accepted" ? "Reel Recorder installation accepted." : "Installation cancelled. You can keep recording here or install later.";
   } catch {
     message.textContent = "Use your browser’s Install app option below, or keep recording here.";
     help.open = true;

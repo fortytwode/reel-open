@@ -36,6 +36,26 @@ final class MeetingSetupTests: XCTestCase {
         XCTAssertFalse(MeetingSetupJoining.enabledAfterCompletion(previousPreference: false))
     }
 
+    func testBackgroundMonitoringRequiresBothSavedSelectionAndAnOptIn() {
+        let name = "meeting-monitoring-test-\(UUID())"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        XCTAssertFalse(MeetingSetupJoining.shouldMonitorInBackground(defaults: defaults))
+
+        defaults.set(true, forKey: "meetingCalendar.localAutoJoin")
+        defaults.set(true, forKey: "meetingCalendar.standingConsent")
+        XCTAssertFalse(MeetingSetupJoining.shouldMonitorInBackground(defaults: defaults))
+        CalendarSelection.save(["work"], to: defaults)
+        XCTAssertTrue(MeetingSetupJoining.shouldMonitorInBackground(defaults: defaults))
+
+        defaults.set(false, forKey: "meetingCalendar.standingConsent")
+        XCTAssertFalse(MeetingSetupJoining.shouldMonitorInBackground(defaults: defaults))
+        defaults.set(true, forKey: "meetingCalendar.localReminders")
+        XCTAssertTrue(MeetingSetupJoining.shouldMonitorInBackground(defaults: defaults))
+        defaults.set(true, forKey: "meetingCalendar.useAll")
+        XCTAssertFalse(MeetingSetupJoining.shouldMonitorInBackground(defaults: defaults))
+    }
+
     func testCustomScopeWithNoAvailableSelectedCalendarsIsBlocked() {
         let readiness = MeetingSetupReadiness(calendarAccessAllowed: true, selectedCalendarCount: 0,
             screenCaptureVerified: true, accessibilityAllowed: true, chromeAvailable: true)

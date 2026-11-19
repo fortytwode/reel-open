@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import shlex
+import zipfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -96,14 +97,14 @@ def render(source, storage_fragment=None, root=ROOT):
     outputs["firebase.local.json"] = json.dumps(deployment, indent=2) + "\n"
     parts = urlsplit(client["webBase"])
     host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
-    match = f"{parts.scheme}://{host}/record*"
+    matches = [f"{parts.scheme}://{host}/{page}*" for page in ("record", "notetaker")]
     extension = ROOT / "browser-extension"
     manifest = json.loads((extension / "manifest.json").read_text(encoding="utf-8"))
     manifest["homepage_url"] = client["webBase"]
     scope = hashlib.sha256(f'{client["projectID"]}\n{client["allowedEmailDomain"]}'.encode()).hexdigest()
     manifest["version_name"] = f'{manifest["version"]} ({scope})'
-    manifest["host_permissions"].append(match)
-    manifest["content_scripts"].append({"matches": [match], "js": ["organization.js", "reel-relay.js"], "run_at": "document_idle"})
+    manifest["host_permissions"].extend(matches)
+    manifest["content_scripts"].append({"matches": matches, "js": ["organization.js", "reel-relay.js"], "run_at": "document_idle"})
     outputs[".reel/browser-extension/manifest.json"] = json.dumps(manifest, indent=2) + "\n"
     for name in ("organization.js", "parser.js", "content.js", "background.js", "reel-relay.js"):
         outputs[f".reel/browser-extension/{name}"] = (extension / name).read_text(encoding="utf-8")
@@ -112,7 +113,15 @@ def render(source, storage_fragment=None, root=ROOT):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(data, encoding="utf-8")
-    (root / ".reel/browser-extension/icon128.png").write_bytes(icon)
+    package = root / ".reel/browser-extension"
+    (package / "icon128.png").write_bytes(icon)
+    downloads = root / "web/downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    archive = downloads / f'reel-meeting-prompt-{manifest["version"]}.zip'
+    members = [Path(name).name for name in outputs if name.startswith(".reel/browser-extension/")]
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for name in sorted([*members, "icon128.png"]):
+            bundle.writestr(zipfile.ZipInfo(name), (package / name).read_bytes(), compress_type=zipfile.ZIP_DEFLATED)
 
 
 if __name__ == "__main__":

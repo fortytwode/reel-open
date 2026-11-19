@@ -92,7 +92,7 @@ if feed:
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or not key:
         raise SystemExit("Auto-updates need an HTTPS REEL_APPCAST_URL and REEL_SPARKLE_PUBLIC_KEY")
 info = {
-    "CFBundleName": "Reel", "CFBundleDisplayName": "Reel", "CFBundleIdentifier": bundle,
+    "CFBundleName": "Reel", "CFBundleDisplayName": "Reel Recorder", "CFBundleIdentifier": bundle,
     "ReelSourceRevision": revision,
     "CFBundleExecutable": "Reel", "CFBundlePackageType": "APPL", "CFBundleVersion": build,
     "CFBundleShortVersionString": version, "LSMinimumSystemVersion": "15.0", "LSUIElement": True,

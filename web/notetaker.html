@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#ffffff">
+  <title>Reel Notetaker</title>
+  <link rel="manifest" href="/notetaker.webmanifest">
+  <link rel="icon" href="/icons/notetaker-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="/icons/notetaker-192.png">
+  <link rel="stylesheet" href="/viewer.css">
+  <link rel="stylesheet" href="/meeting-calendar.css?v=20261119-choice1">
+  <link rel="stylesheet" href="/notetaker.css?v=20261119-products1">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/notetaker"><img src="/icons/notetaker-192.png" width="32" height="32" alt="">Reel Notetaker</a>
+    <div class="account">
+      <span id="user"></span>
+      <button id="sign-in" type="button" hidden>Sign in with Google</button>
+      <button id="sign-out" type="button" hidden>Sign out</button>
+    </div>
+  </header>
+  <main>
+    <h1 id="page-title">Meeting notes</h1>
+    <p id="auth-status" role="status" aria-live="polite">Loading your account…</p>
+    <div id="workspace" hidden>
+      <nav class="sections" aria-label="Notetaker">
+        <a href="#notes" id="notes-tab">Notes</a>
+        <a href="#calendar" id="calendar-tab">Calendar</a>
+      </nav>
+      <section id="notes" aria-labelledby="notes-heading">
+        <div class="section-heading">
+          <h2 id="notes-heading">Recent notes</h2>
+          <a href="/library#meetings" data-library="#meetings">View all notes</a>
+        </div>
+        <p id="notes-status" role="status" aria-live="polite"></p>
+        <div id="notes-list"></div>
+      </section>
+      <div id="meeting-calendar-panel" hidden></div>
+      <div class="meeting-tools"><a href="/record?mode=meeting" data-recorder="?mode=meeting">Record a meeting manually</a><a id="mac-helper" href="reel://meeting-setup" hidden>Set up recording on this Mac</a></div>
+    </div>
+    <footer>
+      <button id="install" type="button" hidden>Install Notetaker</button>
+      <details id="install-help"><summary>Install Reel Notetaker</summary><p>In Safari on Mac, choose File → Add to Dock. In Chrome or Edge, choose Install app from the address bar or browser menu.</p></details>
+      <span id="install-status" role="status" aria-live="polite"></span>
+    </footer>
+  </main>
+  <script type="module" src="/notetaker.js?v=20261119-products1"></script>
+</body>
+</html>

@@ -12,7 +12,7 @@
     if (!recordURL) return false;
     let url;
     try { url = new URL(value); } catch { return false; }
-    return url.origin === recordURL.origin && ['/record', '/record.html'].includes(url.pathname);
+    return url.origin === recordURL.origin && ['/record', '/record.html', '/notetaker', '/notetaker.html'].includes(url.pathname);
   }
 
   const api = { recordPage, isRecordPage };

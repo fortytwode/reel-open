@@ -85,9 +85,9 @@ class OrganizationConfigurationTests(unittest.TestCase):
                 self.assertEqual(manifest["homepage_url"], web_base)
                 scope = hashlib.sha256(f'{config["projectID"]}\n{config["allowedEmailDomain"]}'.encode()).hexdigest()
                 self.assertEqual(manifest["version_name"], f'{generic["version"]} ({scope})')
-                self.assertEqual(manifest["host_permissions"], [*generic["host_permissions"], match])
+                self.assertEqual(manifest["host_permissions"], [*generic["host_permissions"], match, match.replace("/record*", "/notetaker*")])
                 self.assertEqual(manifest["content_scripts"], [*generic["content_scripts"], {
-                    "matches": [match], "js": ["organization.js", "reel-relay.js"], "run_at": "document_idle",
+                    "matches": [match, match.replace("/record*", "/notetaker*")], "js": ["organization.js", "reel-relay.js"], "run_at": "document_idle",
                 }])
                 self.assertEqual({path.name for path in package.iterdir()}, {
                     "manifest.json", "organization.js", "parser.js", "content.js", "background.js",

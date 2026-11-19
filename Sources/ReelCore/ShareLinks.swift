@@ -8,6 +8,7 @@ public struct CloudConfig: Decodable, Equatable, Sendable {
     public var apiKey: String
     public var viewerPath: String
     public var viewerBase: URL
+    public var webBase: URL?
     public var googleClientID: String
     public var allowedEmailDomain: String
     public var notesBaseURL: URL
@@ -17,7 +18,8 @@ public struct CloudConfig: Decodable, Equatable, Sendable {
     /// Reel's own named Firestore database (comments, reactions, view counts).
     public var firestoreDatabase: String
 
-    public init(projectID: String, bucket: String, apiKey: String, viewerBase: URL, googleClientID: String, allowedEmailDomain: String, firestoreDatabase: String = "reel", viewerPath: String = "v") {
+    public init(projectID: String, bucket: String, apiKey: String, viewerBase: URL, googleClientID: String, allowedEmailDomain: String,
+                firestoreDatabase: String = "reel", viewerPath: String = "v", webBase: URL? = nil) {
         self.notesBaseURL = viewerBase.appendingPathComponent(viewerPath)
         self.meetingServiceURL = Self.disabledURL
         self.deliveryServiceURL = Self.disabledURL
@@ -26,6 +28,7 @@ public struct CloudConfig: Decodable, Equatable, Sendable {
         self.bucket = bucket
         self.apiKey = apiKey
         self.viewerBase = viewerBase
+        self.webBase = webBase
         self.viewerPath = viewerPath
         self.googleClientID = googleClientID
         self.allowedEmailDomain = allowedEmailDomain
@@ -34,6 +37,18 @@ public struct CloudConfig: Decodable, Equatable, Sendable {
 
     private static let disabledURL = URL(string: "https://unconfigured.invalid")!
     public var isConfigured: Bool { !projectID.isEmpty && !apiKey.isEmpty && !allowedEmailDomain.isEmpty }
+
+    /// Older app bundles may use the same host for recordings and web tools.
+    public var notetakerURL: URL? {
+        let base = webBase ?? viewerBase
+        guard isConfigured, var page = URLComponents(url: base, resolvingAgainstBaseURL: false),
+              let host = page.host, page.user == nil, page.password == nil,
+              page.scheme == "https" || (page.scheme == "http" && ["localhost", "127.0.0.1", "[::1]"].contains(host)) else { return nil }
+        page.path = "/notetaker"
+        page.query = nil
+        page.fragment = nil
+        return page.url
+    }
 
     public func permits(email: String) -> Bool {
         let parts = email.split(separator: "@", omittingEmptySubsequences: false)

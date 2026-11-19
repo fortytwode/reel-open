@@ -139,7 +139,7 @@
           return;
         }
         await chromeApi.tabs.create({
-          url: `${recordURL.href}#calendar-meeting=${encodeURIComponent(eventId)}`,
+          url: `${recordURL.origin}/notetaker#calendar-meeting=${encodeURIComponent(eventId)}`,
           active: true,
         });
       }

@@ -23,7 +23,7 @@ enum MeetingDeliveryService {
 
     struct CalendarSelectionRequired: LocalizedError {
         var errorDescription: String? {
-            "Select the invitation’s calendar in Meeting Calendars → Manage Google Calendar, then retry notes delivery."
+            "Select the invitation’s calendar in Reel Notetaker, then retry notes delivery."
         }
     }
     /// Review the source in the immutable outbound body, not a newer local transcript.

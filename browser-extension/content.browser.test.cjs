@@ -128,7 +128,7 @@ test('relay accepts schedule metadata only from the configured origin and record
     await page.route('https://record.northwind.example/**', route => route.fulfill({
       status: 200, contentType: 'text/html', body: '<!doctype html><title>Mock Recorder</title>',
     }));
-    for (const [route, expected] of [['/record', 1], ['/record-other', 0]]) {
+    for (const [route, expected] of [['/record', 1], ['/notetaker', 1], ['/record-other', 0], ['/notetaker-other', 0]]) {
       await page.goto(`${configuredManifest.homepage_url}${route}`);
       await page.evaluate(value => {
         window.relayed = [];

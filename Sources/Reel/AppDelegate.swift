@@ -20,11 +20,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     private var timer: Timer?
     private var meetingDeliveryTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
+    private var handledLaunchURL = false
     var cliRecordTest: CLI.RecordTest?
 
     private var model: AppModel { AppModel.shared }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let opensRecorder = RecorderLaunchBehavior.opensRecorder(
+            for: NSAppleEventManager.shared().currentAppleEvent, arguments: CommandLine.arguments)
         ReelAppearance.shared.apply()
         // New status items go leftmost, which on a crowded notched menu bar hides them behind
         // the notch. Start near the right edge (points from it); ⌘-drag moves it and macOS saves that.
@@ -62,7 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             return
         }
         Notifier.shared.setUp()
-        MeetingJoinCoordinator.shared.start()
+        if MeetingSetupJoining.shouldMonitorInBackground(defaults: OrganizationState.defaults) {
+            MeetingJoinCoordinator.shared.updateBackgroundMonitoring()
+        }
         meetingDeliveryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in
             MainActor.assumeIsolated { Publisher.shared.resumeMeetingProcessing() }
         }
@@ -70,13 +75,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         HotKeys.shared.registerMain(model.settings.shortcut)
         installMainMenu()
         Task { _ = await Recovery.run() }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.model.phase == .idle else { return }
-            let recorderIntroKey = "recorder.hasOpenedOnLaunch"
-            if !OrganizationState.defaults.bool(forKey: recorderIntroKey) {
-                OrganizationState.defaults.set(true, forKey: recorderIntroKey)
+        if opensRecorder {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.handledLaunchURL else { return }
                 self.showScreenRecordingPanel()
-            } else { self.showMeetingWorkspace() }
+            }
         }
     }
 
@@ -93,20 +96,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             case "meeting-setup": showMeetingSetup()
             case "join-meeting":
                 if let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "id" })?.value {
-                    Task { await MeetingJoinCoordinator.shared.select(id: id); self.showMeetings() }
+                    Task {
+                        await model.waitForInitialAccount()
+                        await MeetingJoinCoordinator.shared.select(id: id)
+                        showMeetings()
+                    }
                 }
             case "meeting-link":
                 if let link = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "url" })?.value {
-                    MeetingJoinCoordinator.shared.prepareLink(link); showMeetings()
+                    showMeetings()
+                    Task {
+                        await model.waitForInitialAccount()
+                        let joining = MeetingJoinCoordinator.shared
+                        await joining.refresh()
+                        joining.prepareLink(link)
+                    }
                 }
-            default: break
+            default: continue
             }
+            handledLaunchURL = true
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if flag { return true }
-        if model.isBusy { showMeetingWorkspace() } else { showScreenRecordingPanel() }
+        if cliRecordTest == nil { showScreenRecordingPanel() }
         return false
     }
 
@@ -120,8 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             bar.addItem(entry)
             return menu
         }
-        let reel = submenu("Reel")
-        reel.addItem(NSMenuItem(title: "About Reel", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        let reel = submenu("Reel Recorder")
+        reel.addItem(item("About Reel Recorder", #selector(showAbout)))
         reel.addItem(.separator())
         reel.addItem(item("New Screen Recording…", #selector(showRecorder)))
         let settings = item("Settings…", #selector(showSettings)); settings.keyEquivalent = ","
@@ -132,18 +145,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             reel.addItem(update)
         }
         reel.addItem(.separator())
-        let quit = item("Quit Reel", #selector(quit)); quit.keyEquivalent = "q"; reel.addItem(quit)
+        let quit = item("Quit Reel Recorder", #selector(quit)); quit.keyEquivalent = "q"; reel.addItem(quit)
         let file = submenu("File")
         file.addItem(item("New Screen Recording…", #selector(showRecorder)))
         file.addItem(item("Stop and Share", #selector(stopRecording)))
         file.addItem(item("Pause Recording", #selector(pauseResume)))
         file.addItem(item("Cancel Recording…", #selector(cancelRecording)))
         file.addItem(.separator())
-        let meetings = item("Meetings", #selector(showMeetingWorkspace)); meetings.keyEquivalent = "1"; file.addItem(meetings)
-        let library = item("Web Library", #selector(openWebLibrary)); library.keyEquivalent = "l"; file.addItem(library)
-        file.addItem(item("Screen Recordings…", #selector(showLibrary)))
-        file.addItem(item("Meeting Calendars…", #selector(showMeetings)))
-        file.addItem(item("Set Up Automatic Meetings…", #selector(showMeetingSetup)))
+        let library = item("Screen Recordings…", #selector(showLibrary)); library.keyEquivalent = "l"; file.addItem(library)
+        let notetaker = item("Open Reel Notetaker…", #selector(openNotetaker)); notetaker.keyEquivalent = "1"; file.addItem(notetaker)
+        file.addItem(desktopMeetingMenuItem())
         let close = NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         file.addItem(close)
         let edit = submenu("Edit")
@@ -160,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(showRecorder), #selector(showMeetingSetup): return model.phase == .idle
+        case #selector(openNotetaker): return CloudConfig.default.notetakerURL != nil
         case #selector(stopRecording): return model.phase == .recording || model.phase == .paused
         case #selector(pauseResume):
             menuItem.title = model.phase == .paused ? "Resume Recording" : "Pause Recording"
@@ -172,6 +184,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     }
 
     @objc private func showRecorder() { showScreenRecordingPanel() }
+    @objc private func showAbout() { NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Reel Recorder"]) }
+
+    @objc func openNotetaker() {
+        guard let url = CloudConfig.default.notetakerURL else { return }
+        desktopRecorder?.close()
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func openWebLibrary() {
         guard CloudConfig.default.isConfigured else { return }
         NSWorkspace.shared.open(CloudConfig.default.notesBaseURL)
@@ -222,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         model.meetingCalendarReference = nil
         popover?.performClose(nil)
         if let desktopRecorder, desktopRecorder.isVisible {
+            NSApp.activate(ignoringOtherApps: true)
             desktopRecorder.makeKeyAndOrderFront(nil)
             return
         }
@@ -359,12 +380,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             button.contentTintColor = nil
             button.title = " \(n)"
         case .finishing, .preparing:
-            button.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Reel")
+            button.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Reel Recorder")
             button.contentTintColor = .secondaryLabelColor
             button.title = ""
         case .idle:
             let uploading = !model.uploadProgress.isEmpty
-            button.image = NSImage(systemSymbolName: uploading ? "icloud.and.arrow.up" : "record.circle", accessibilityDescription: "Reel")
+            button.image = NSImage(systemSymbolName: uploading ? "icloud.and.arrow.up" : "record.circle", accessibilityDescription: "Reel Recorder")
             button.contentTintColor = nil
             button.title = ""
         }
@@ -387,7 +408,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
                 }
                 menu.addItem(.separator())
             }
-            menu.addItem(item("Meetings", #selector(showMeetingWorkspace)))
             menu.addItem(item("Stop and Share  (\(s.shortcut.display))", #selector(stopRecording)))
             menu.addItem(item(model.phase == .paused ? "Resume  (\(s.pauseShortcut.display))" : "Pause  (\(s.pauseShortcut.display))", #selector(pauseResume)))
             if s.mode != .camera {
@@ -405,12 +425,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         case .finishing:
             let message = model.captureStopSlow ? "Still stopping capture…" : "Stopping capture…"
             menu.addItem(NSMenuItem(title: message, action: nil, keyEquivalent: ""))
-            if model.captureStopSlow { menu.addItem(item("Quit Reel", #selector(quit))) }
+            if model.captureStopSlow { menu.addItem(item("Quit Reel Recorder", #selector(quit))) }
             return
         case .idle:
             break
         }
         menu.addItem(item("New Screen Recording…", #selector(showRecorder)))
+        let library = item("Screen Recordings…", #selector(showLibrary))
+        library.keyEquivalent = "l"
+        menu.addItem(library)
         menu.addItem(.separator())
         for mode in CaptureMode.allCases {
             let i = item(mode.label, #selector(selectMode(_:)))
@@ -477,13 +500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         if let last = model.recordings.first, last.upload == .uploaded {
             menu.addItem(item("Copy Last Link", #selector(copyLastLink)))
         }
-        let lib = item("Web Library", #selector(openWebLibrary))
-        lib.keyEquivalent = "l"
-        menu.addItem(lib)
-        menu.addItem(item("Meetings", #selector(showMeetingWorkspace)))
-        menu.addItem(item("Screen Recordings…", #selector(showLibrary)))
-        menu.addItem(item("Meeting Calendars…", #selector(showMeetings)))
-        menu.addItem(item("Set Up Automatic Meetings…", #selector(showMeetingSetup)))
+        if CloudConfig.default.notetakerURL != nil { menu.addItem(item("Open Reel Notetaker…", #selector(openNotetaker))) }
+        menu.addItem(desktopMeetingMenuItem())
         let settings = item("Settings…", #selector(showSettings))
         settings.keyEquivalent = ","
         menu.addItem(settings)
@@ -496,12 +514,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
             update.target = Updater.shared
             menu.addItem(update)
         }
-        let quit = item("Quit Reel", #selector(quit))
+        let quit = item("Quit Reel Recorder", #selector(quit))
         quit.keyEquivalent = "q"
         menu.addItem(quit)
     }
 
     @objc private func openWindowFocusSettings() { Permissions.openSettings("Privacy_Accessibility") }
+
+    private func desktopMeetingMenuItem() -> NSMenuItem {
+        let entry = NSMenuItem(title: "Desktop Meeting Helper", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: entry.title)
+        submenu.addItem(item("Meeting Calendars…", #selector(showMeetings)))
+        submenu.addItem(item("Set Up Automatic Meetings…", #selector(showMeetingSetup)))
+        submenu.addItem(item("Local Meeting History…", #selector(showMeetingWorkspace)))
+        entry.submenu = submenu
+        return entry
+    }
 
     private func item(_ title: String, _ action: Selector) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -560,7 +588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         if workspaceWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 780),
                                   styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-            window.title = "Reel — Meetings"
+            window.title = "Reel Recorder — Local Meeting History"
             window.minSize = NSSize(width: 1060, height: 620)
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: MeetingWorkspaceView(model: model, showRecorder: { [weak self] in
@@ -593,7 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     @objc func showMeetings() {
         if meetingsWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 800), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-            w.title = "Reel Meeting Calendars"
+            w.title = "Desktop Meeting Helper"
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: MeetingCalendarsView(model: model))
             w.center()
@@ -649,7 +677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
     @objc func showSettings() {
         if settingsWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 680), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            w.title = "Reel Settings"
+            w.title = "Reel Recorder Settings"
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: SettingsView(model: model))
             w.center()

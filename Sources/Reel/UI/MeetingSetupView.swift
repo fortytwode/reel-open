@@ -1,4 +1,5 @@
 import AppKit
+import ReelCore
 import SwiftUI
 
 struct MeetingSetupView: View {
@@ -150,9 +151,9 @@ struct MeetingSetupView: View {
                         .disabled(setup.busy)
                 }
             }
-            setupCard("Reel-connected Google Calendar", icon: "cloud",
-                      detail: "The Reel notetaker can join eligible Google Meet and Teams calls from your connected Google Calendar even when this Mac is closed. Manage it separately on the Reel website.") {
-                if let url = MeetingCalendarsView.cloudCalendarURL {
+            setupCard("Google Calendar in Reel Notetaker", icon: "cloud",
+                      detail: "Reel Notetaker can join eligible Google Meet and Teams calls from your selected Google calendars even when this Mac is closed.") {
+                if let url = CloudConfig.default.notetakerURL {
                     Link("Manage Google Calendar…", destination: url)
                 }
             }

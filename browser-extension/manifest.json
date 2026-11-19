@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Reel Meeting Prompt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Offer to send a detected meeting link to Reel.",
   "permissions": ["alarms", "notifications", "storage"],
   "host_permissions": [

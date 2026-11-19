@@ -25,7 +25,12 @@ final class MeetingJoinCoordinator: ObservableObject {
     @Published private(set) var cloudCalendarStatus = "Checking Reel notetaker meetings…"
     @Published private(set) var accessibilitySettingsURL: URL?
     @Published var reminders = OrganizationState.defaults.bool(forKey: "meetingCalendar.localReminders") {
-        didSet { OrganizationState.defaults.set(reminders, forKey: "meetingCalendar.localReminders"); Task { await refresh() } }
+        didSet {
+            OrganizationState.defaults.set(reminders, forKey: "meetingCalendar.localReminders")
+            if reminders { Notifier.shared.requestPermission() }
+            updateBackgroundMonitoring()
+            Task { await refresh() }
+        }
     }
     @Published private(set) var autoJoin = OrganizationState.defaults.bool(forKey: "meetingCalendar.localAutoJoin")
     @Published private(set) var standingConsent = OrganizationState.defaults.bool(forKey: "meetingCalendar.standingConsent")
@@ -108,6 +113,7 @@ final class MeetingJoinCoordinator: ObservableObject {
             automaticConsentRevision += 1
             joinTask?.cancel()
         }
+        updateBackgroundMonitoring()
         Task { await refresh() }
     }
 
@@ -118,6 +124,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         automaticConsentRevision += 1
         joinTask?.cancel()
         OrganizationState.defaults.set(false, forKey: "meetingCalendar.standingConsent")
+        updateBackgroundMonitoring()
     }
 
     func saveDesktopCalendarSelection(_ ids: Set<String>) {
@@ -126,6 +133,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         invalidateStandingConsent()
         CalendarSelection.save(ids, to: OrganizationState.defaults)
         desktopCalendarSelection = selection
+        updateBackgroundMonitoring()
         let excluded = meetings.filter { $0.calendarID != "manual" && $0.calendarID != "reel-cloud" && !ids.contains($0.calendarID) }
         removeReminders(Set(excluded.map(Self.reminderIdentifier)))
         Task { await refresh() }
@@ -164,7 +172,12 @@ final class MeetingJoinCoordinator: ObservableObject {
         return true
     }
 
-    func start() {
+    func updateBackgroundMonitoring() {
+        guard MeetingSetupJoining.shouldMonitorInBackground(defaults: OrganizationState.defaults) else {
+            loop?.cancel()
+            loop = nil
+            return
+        }
         guard loop == nil else { return }
         loop = Task {
             while !Task.isCancelled {

@@ -1,0 +1,39 @@
+:root {
+  --link: #176761;
+  --soft: #e4efeb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --link: #85d6c9; --soft: #233e36; }
+}
+body { margin: 0; background: var(--bg); color: var(--text); font-size: 16px; }
+.topbar {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem;
+  min-height: 4rem; padding: .75rem clamp(1rem, 5vw, 4rem);
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.brand img { border-radius: .5rem; }
+.account, .meeting-tools, .section-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 1rem; }
+.account { font-size: .875rem; color: var(--muted); }
+main { max-width: 52rem; padding: clamp(2rem, 6vw, 4.25rem) 1.25rem; margin: 0 auto; }
+h1 { font-size: clamp(2rem, 4vw, 3rem); line-height: 1.1; letter-spacing: -.045em; margin: 0 0 1rem; }
+a:not(.brand) { color: var(--link); text-underline-offset: .2em; }
+#sign-in { color: var(--panel); background: var(--text); padding: .55rem 1rem; }
+#auth-status, #notes-status { color: var(--muted); }
+#auth-status:empty, #notes-status:empty { display: none; }
+.sections { display: flex; gap: 1.4rem; border-bottom: 1px solid var(--line); }
+.sections a { padding: .65rem .05rem; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; }
+.sections a[aria-current] { color: var(--text); border-color: var(--link); font-weight: 650; }
+#notes { margin: 1.25rem 0; padding: 1.125rem 1.25rem; background: var(--panel); border: 1px solid var(--line); border-radius: .85rem; }
+.section-heading { justify-content: space-between; }
+.section-heading h2 { margin: 0; font-size: 1.125rem; }
+.section-heading a, .meeting-tools a { font-size: .875rem; }
+.note-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .3rem 1rem; padding: .85rem 0; border-top: 1px solid var(--line); }
+.note-row:first-child { margin-top: .85rem; }
+.note-row:last-child { padding-bottom: .1rem; }
+.note-row a { text-decoration: none; font-weight: 580; overflow-wrap: anywhere; }
+.note-row a:hover { text-decoration: underline; }
+.note-row time, footer { color: var(--muted); font-size: .85rem; }
+.meeting-tools { margin-top: 1.25rem; }
+footer { border-top: 1px solid var(--line); margin-top: 2.4rem; padding-top: 1rem; }
+summary { cursor: pointer; }
+footer button:not([hidden]) + details { margin-top: .75rem; }
