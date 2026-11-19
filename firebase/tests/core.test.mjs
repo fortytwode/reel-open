@@ -54,6 +54,16 @@ test("locked stub bytes match", () => {
   assert.equal(C.encodeJSON(C.lockedStub(id, "00112233445566778899aabbccddeeff", expiry, "ready")), V.lockedStub);
 });
 
+test("link previews opt in only playable standalone recordings with open non-expiring links", () => {
+  const r = recordingOpen();
+  assert.equal(C.remoteMeta(r, "ready", null, "Reel").linkPreviewAllowed, undefined);
+  r.access.expiresAt = null;
+  assert.equal(C.remoteMeta(r, "ready", null, "Reel").linkPreviewAllowed, true);
+  assert.equal(C.remoteMeta(r, "processing", null, "Reel").linkPreviewAllowed, undefined);
+  assert.equal(C.remoteMeta(recordingKeyed(), "ready", null, "Reel").linkPreviewAllowed, undefined);
+  assert.equal(C.remoteMeta({ ...r, meeting: null }, "ready", null, "Reel").linkPreviewAllowed, undefined);
+});
+
 test("recording.json bytes match and round-trip", () => {
   for (const [make, k] of [[recordingOpen, "recordingJSONOpen"], [recordingKeyed, "recordingJSONKeyed"], [recordingStarting, "recordingJSONStarting"]]) {
     const r = make();

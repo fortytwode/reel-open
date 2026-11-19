@@ -393,6 +393,8 @@ export function recordingFromJSON(j) {
 
 /** meta.json (schemaVersion 2) as a plain object with every key present (nulls explicit). */
 export function remoteMeta(r, status, ownerName, app) {
+  const linkPreviewAllowed = !isMeeting(r) && !r.access.key && !r.access.expiresAt
+    && status === "ready" && (r.playback.hls || r.playback.mp4);
   return {
     schemaVersion: 2, id: r.shareID, title: r.title, createdAt: iso8601(r.createdAt), durationSeconds: r.durationSeconds,
     width: r.width, height: r.height, status, transcriptStatus: r.transcriptStatus, hasThumbnail: r.hasThumbnail,
@@ -400,6 +402,7 @@ export function remoteMeta(r, status, ownerName, app) {
     trim: r.trim ? { end: r.trim.end, start: r.trim.start } : null, download: downloadFile(r),
     summary: r.summary ?? null, chapters: r.chapters ? r.chapters.map((c) => ({ start: c.start, title: c.title })) : null,
     expiresAt: r.access.expiresAt ? iso8601(r.access.expiresAt) : null, locked: !!r.access.key, room: recordingRoom(r),
+    ...(linkPreviewAllowed && { linkPreviewAllowed: true }),
   };
 }
 export function lockedStub(shareID, salt, expiresAt, status) {
