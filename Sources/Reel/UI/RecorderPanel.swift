@@ -92,6 +92,7 @@ struct RecorderPanel: View {
                 Button(action: runPrimaryAction) {
                     Label(primaryAction, systemImage: desktopReady ? "record.circle.fill" : "cursorarrow.rays")
                         .font(.callout.weight(.bold))
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 13)
                         .frame(height: 40)
                         .foregroundStyle(recorderInk)
@@ -152,6 +153,7 @@ struct RecorderPanel: View {
                 Button { model.settings.mode = mode } label: {
                     Label(modeTitle(mode), systemImage: modeSymbol(mode))
                         .font(.caption.weight(.semibold))
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 8)
                         .frame(height: 34)
                         .foregroundStyle(selected ? recorderAccent : Color.white.opacity(0.78))
