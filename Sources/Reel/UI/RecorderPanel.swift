@@ -220,8 +220,9 @@ struct RecorderPanel: View {
             Toggle("Record computer sound", isOn: Binding(get: { s.audio.usesSystem }, set: setSystemAudio))
             Divider()
             Button("Screen Recordings…") { (NSApp.delegate as? AppDelegate)?.showLibrary() }
-            Button("Meetings and notes") { (NSApp.delegate as? AppDelegate)?.showMeetingWorkspace() }
-            Button("Set Up Automatic Meetings…") { (NSApp.delegate as? AppDelegate)?.showMeetingSetup() }
+            if CloudConfig.default.notetakerURL != nil {
+                Button("Open Reel Notetaker…") { (NSApp.delegate as? AppDelegate)?.openNotetaker() }
+            }
             Button("Settings…") { (NSApp.delegate as? AppDelegate)?.showSettings() }
             if model.account == nil { Button("Sign in", action: signIn) }
         } label: {

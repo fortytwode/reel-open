@@ -75,6 +75,17 @@ final class ShareLinksTests: XCTestCase {
         XCTAssertEqual(ShareLinks.viewerURL(shareID: id, config: testOrganization).absoluteString, "https://record.northwind.example/v/\(id)")
     }
 
+    func testNotetakerUsesOrganizationHostingAndSupportsOlderConfigurations() {
+        var config = testOrganization
+        XCTAssertEqual(config.notetakerURL?.absoluteString, "https://record.northwind.example/notetaker")
+        config.webBase = URL(string: "https://tools.northwind.example")
+        XCTAssertEqual(config.notetakerURL?.absoluteString, "https://tools.northwind.example/notetaker")
+        config.webBase = URL(string: "http://localhost:5000")
+        XCTAssertEqual(config.notetakerURL?.absoluteString, "http://localhost:5000/notetaker")
+        config.webBase = URL(string: "https://someone@tools.northwind.example")
+        XCTAssertNil(config.notetakerURL)
+    }
+
     func testObjectPathAndContentTypes() {
         XCTAssertEqual(ShareLinks.objectPath(shareID: id, file: .video), "reel/v/\(id)/video.mp4")
         XCTAssertEqual(RemoteFile.video.contentType, "video/mp4")

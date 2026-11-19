@@ -34,7 +34,7 @@ struct MeetingCalendarsView: View {
                 Text(calendarActionMessage).font(.callout).foregroundStyle(.secondary)
             }
 
-            GroupBox("Reel notetaker") {
+            GroupBox("Reel Notetaker") {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text(joining.visibleCloudCalendarStatus).font(.callout)
@@ -201,16 +201,8 @@ struct MeetingCalendarsView: View {
 
     private func openCloudCalendar() {
         calendarActionMessage = nil
-        if let url = Self.cloudCalendarURL, NSWorkspace.shared.open(url) { return }
-        calendarActionMessage = "The Reel website could not be opened."
-    }
-
-    static var cloudCalendarURL: URL? {
-        guard CloudConfig.default.isConfigured else { return nil }
-        let page = CloudConfig.default.viewerBase.appendingPathComponent("record")
-        guard var components = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return nil }
-        components.fragment = "meeting-calendar-panel"
-        return components.url
+        if let url = CloudConfig.default.notetakerURL, NSWorkspace.shared.open(url) { return }
+        calendarActionMessage = "Reel Notetaker could not be opened."
     }
 
     @MainActor

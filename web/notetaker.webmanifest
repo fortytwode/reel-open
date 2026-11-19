@@ -1,0 +1,16 @@
+{
+  "id": "/notetaker",
+  "name": "Reel Notetaker",
+  "short_name": "Notetaker",
+  "description": "Connect your calendar and keep meeting notes and recaps.",
+  "lang": "en",
+  "start_url": "/notetaker",
+  "scope": "/notetaker",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "/icons/notetaker-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/notetaker-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

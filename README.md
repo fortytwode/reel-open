@@ -1,6 +1,11 @@
 # Reel
 
-Reel records your screen, camera and microphone on macOS and in the browser. Save a recording locally or connect a Firebase deployment to keep an authenticated library and share links. Optional meeting services add calendar discovery, recordings and participant notes.
+Reel contains two products that can be used independently.
+
+- **Reel Recorder** opens a capture toolbar on macOS or in the browser at `/record`. Record a window, screen or camera and share the video link. On the Mac, you can also save clips locally.
+- **Reel Notetaker** opens at `/notetaker`. Choose calendars, manage upcoming calls and read participant meeting notes. The web app can be added to the Mac Dock. Configured Google Meet and Teams meetings can run in the cloud while your Mac is closed. Local meeting capture remains available from the Mac companion.
+
+Both products use the same organization deployment and account. A screen recording can be shared by link under its access settings. Meeting notes use the participant access checks in the delivery service.
 
 ## Run locally
 
@@ -11,7 +16,7 @@ Reel records your screen, camera and microphone on macOS and in the browser. Sav
 open dist/Reel.app
 ```
 
-**Browser.** Open `http://localhost:8000/record.html` in Chrome or Edge after starting the local server. For camera blur and virtual backgrounds, first run `python3 scripts/fetch-web-model.py`.
+**Browser.** After starting the local server, open `http://localhost:8000/record.html` for Recorder or `http://localhost:8000/notetaker.html` for Notetaker. Calendar and recap access require a configured organization deployment. For camera blur and virtual backgrounds, first run `python3 scripts/fetch-web-model.py`.
 
 ```sh
 python3 -m http.server 8000 --bind 127.0.0.1 --directory web

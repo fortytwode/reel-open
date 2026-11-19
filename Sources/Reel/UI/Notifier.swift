@@ -8,9 +8,12 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     func setUp() {
         guard Bundle.main.bundleIdentifier != nil else { return }
-        let center = UNUserNotificationCenter.current()
-        center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+        UNUserNotificationCenter.current().delegate = self
+    }
+
+    func requestPermission() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
             Log.app.info("Notifications \(granted ? "allowed" : "not allowed")")
         }
     }

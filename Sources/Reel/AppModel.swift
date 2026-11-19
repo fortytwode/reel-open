@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     }
 
     private let settingsStore = SettingsStore()
+    private var accountRestore: Task<Void, Never>?
     let library: LibraryStore
 
     @Published var settings: ReelSettings { didSet { if persistSettings && settings != oldValue { settingsStore.save(settings) } } }
@@ -55,14 +56,17 @@ final class AppModel: ObservableObject {
         library = LibraryStore(root: LibraryStore.defaultRoot)
         try? FileManager.default.createDirectory(at: library.root, withIntermediateDirectories: true)
         reloadLibrary()
+        accountRestore = Task { self.account = await CloudAuth.shared.current }
         Task {
-            self.account = await CloudAuth.shared.current
+            await waitForInitialAccount()
             if self.account != nil {
                 await Publisher.shared.syncCloudLibrary()
                 Publisher.shared.resumeMeetingProcessing()
             }
         }
     }
+
+    func waitForInitialAccount() async { await accountRestore?.value }
 
     var isBusy: Bool { phase != .idle }
 

@@ -1,7 +1,7 @@
 {
   "id": "/record",
-  "name": "Reel",
-  "short_name": "Reel",
+  "name": "Reel Recorder",
+  "short_name": "Recorder",
   "description": "Record your screen and camera, then share one Reel link.",
   "lang": "en",
   "start_url": "/record",

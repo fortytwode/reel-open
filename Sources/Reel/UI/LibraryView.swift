@@ -39,7 +39,7 @@ struct LibraryView: View {
                     Text("Meeting videos").tag(true)
                 }.pickerStyle(.segmented).fixedSize()
                 Text(meetingVideos
-                     ? "Meeting videos saved on this Mac. Open Meetings for summaries and transcripts."
+                     ? "Meeting videos saved on this Mac. Choose a recording to open its local notes."
                      : "Record your screen or camera and share a video link.")
                     .font(.callout).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading).padding([.horizontal, .bottom], 12)

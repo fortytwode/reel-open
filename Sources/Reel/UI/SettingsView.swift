@@ -102,7 +102,9 @@ struct SettingsView: View {
                 Toggle("Also upload an MP4 for downloads", isOn: $model.settings.uploadMP4)
                 Toggle("AI title, summary and chapters (on this Mac)", isOn: $model.settings.aiSummary)
             }
-            Section("Meetings") { MeetingDeliverySettings() }
+            Section("Desktop Meeting Helper") {
+                DisclosureGroup("Local meeting delivery") { MeetingDeliverySettings() }
+            }
             Section("General") {
                 ForEach(ShortcutAction.allCases, id: \.self) { ShortcutRecorderRow(model: model, action: $0) }
                 Text("Pause, cancel and drawing shortcuts only work while recording.").font(.caption).foregroundStyle(.secondary)

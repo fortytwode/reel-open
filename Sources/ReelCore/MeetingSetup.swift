@@ -1,3 +1,5 @@
+import Foundation
+
 /// Presentation history is separate from permission readiness and recording consent.
 public enum MeetingSetupIntroduction {
     public static let currentVersion = 1
@@ -46,5 +48,12 @@ public enum MeetingSetupJoining {
     /// An absent preference is a first setup. A prior pause survives completed setup.
     public static func enabledAfterCompletion(previousPreference: Bool?) -> Bool {
         previousPreference ?? true
+    }
+
+    /// A recorder launch can resume only an explicitly chosen desktop calendar scope and automation preference.
+    public static func shouldMonitorInBackground(defaults: UserDefaults) -> Bool {
+        CalendarSelection.load(from: defaults).savedIDs != nil &&
+            (defaults.bool(forKey: "meetingCalendar.localReminders") ||
+             (defaults.bool(forKey: "meetingCalendar.localAutoJoin") && defaults.bool(forKey: "meetingCalendar.standingConsent")))
     }
 }

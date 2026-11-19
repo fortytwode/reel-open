@@ -32,3 +32,4 @@ firestore-debug.log
 /firebase.local.json
 
 /web/vendor/mediapipe/selfie_segmenter.tflite
+/web/downloads/reel-meeting-prompt-*.zip

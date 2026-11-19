@@ -52,7 +52,7 @@ test('ask mode schedules start alarm; due alert dedupes and opens only the Reel 
   assert.match(h.notifications.get(noticeId).title, /Meeting detected/);
   assert.equal(h.openedTabs.length, 0, 'alert alone never opens or approves a meeting');
   await h.manager.notificationAction(noticeId, 0);
-  assert.equal(h.openedTabs[0].url, 'https://record.northwind.example/record#calendar-meeting=event-1');
+  assert.equal(h.openedTabs[0].url, 'https://record.northwind.example/notetaker#calendar-meeting=event-1');
 });
 
 test('unconfigured and repointed extensions discard alerts and cached data from a previous deployment', async () => {
