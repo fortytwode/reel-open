@@ -6,12 +6,13 @@ import { parseMeetingURL } from './google-calendar.mjs';
 const operationStates = {
   join: new Set(['joined','cancelled','chrome_unavailable','ambiguous_window','dedicated_window_unavailable',
     'manual_required','denied','sign_in_required','awaiting_admission','timed_out','busy','invalid_join','invalid_request','duplicate_request']),
+  defaultRenderEndpoint: new Set(['endpoint_available','endpoint_unavailable','invalid_request']),
   inspect: new Set(['in_call','left','unknown','invalid_request']),
   close: new Set(['closed','already_closed','released','close_failed','close_pending','not_owned','invalid_request']),
   cancel: new Set(['cancellation_requested','not_pending','invalid_request']),
   openGoogleSignIn: new Set(['browser_opened','chrome_unavailable','browser_failed','busy','cancelled','invalid_request']),
 };
-const successfulStates = new Set(['joined','in_call','left','closed','already_closed','cancellation_requested','browser_opened']);
+const successfulStates = new Set(['joined','endpoint_available','in_call','left','closed','already_closed','cancellation_requested','browser_opened']);
 const sessionShape = /^[0-9a-f]{32}$/;
 const failure = message => new Error(message);
 
@@ -54,12 +55,16 @@ export function createNativeBridge({executable, spawn = spawnProcess, timeoutMs 
       let data;
       try { data=JSON.parse(line); } catch { return stop(failure('Native helper returned an invalid response.')); }
       const request=pending.get(data?.id);
-      const keys = data?.state === 'joined' ? ['v','id','ok','state','sessionId','hwnd','pid'] : ['v','id','ok','state'];
+      const keys = ['v','id','ok','state'];
+      if (data?.state === 'joined') keys.push('sessionId','hwnd','pid');
+      if (data?.state === 'endpoint_available') keys.push('endpointId');
       if (!request || data.v !== 1 || typeof data.ok !== 'boolean' || !operationStates[request.op]?.has(data.state)
         || data.ok !== successfulStates.has(data.state) || Object.keys(data).some(key => !keys.includes(key)))
         return stop(failure('Native helper returned an invalid response.'));
       if (data.state === 'joined' && (!data.ok || !sessionShape.test(data.sessionId ?? '')
         || !/^[1-9][0-9]{0,19}$/.test(data.hwnd ?? '') || !Number.isInteger(data.pid) || data.pid <= 0))
+        return stop(failure('Native helper returned an invalid response.'));
+      if (data.state === 'endpoint_available' && (typeof data.endpointId !== 'string' || !/^[0-9a-f]{64}$/.test(data.endpointId)))
         return stop(failure('Native helper returned an invalid response.'));
       clearTimeout(request.timer); pending.delete(data.id);
       if (data.state === 'joined') sessions.add(data.sessionId);
@@ -110,6 +115,12 @@ export function createNativeBridge({executable, spawn = spawnProcess, timeoutMs 
       return value;
     } finally { signal?.removeEventListener('abort',cancel); }
   }
+  async function defaultRenderEndpoint() {
+    const result = await request('defaultRenderEndpoint', {});
+    if (result.state === 'endpoint_available') return result.endpointId;
+    if (result.state === 'endpoint_unavailable') return null;
+    throw failure('Native helper could not read the default audio endpoint.');
+  }
   async function inspect(sessionId) {
     if (!sessions.has(sessionId)) throw failure('Meeting window is not owned by Reel.');
     return request('inspect',{sessionId});
@@ -159,5 +170,5 @@ export function createNativeBridge({executable, spawn = spawnProcess, timeoutMs 
     }
     stop(failure('Native helper stopped.'));
   }
-  return {join,inspect,close,openGoogleSignIn,dispose};
+  return {join,inspect,close,openGoogleSignIn,defaultRenderEndpoint,dispose};
 }
