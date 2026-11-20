@@ -33,7 +33,11 @@ jobs:
           $session = (Get-Process -Id $PID).SessionId
           Write-Host "Windows session: $session"
           if ($session -eq 0) { throw 'An interactive Windows session is required for desktop capture.' }
-      - run: npm --prefix desktop-windows/probe ci
+      - name: Install pinned Electron
+        working-directory: desktop-windows/probe
+        run: |
+          npm ci
+          node node_modules/electron/install.js
       - run: choco install ffmpeg --no-progress -y
       - name: Run native capture and playback tests
         shell: pwsh
