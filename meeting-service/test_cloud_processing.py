@@ -290,7 +290,7 @@ def test_stale_execution_never_processes(setup):
     saved, gen = store.load(key)
     saved['status'] = 'recording'
     store.cas(key, saved, gen)
-    with pytest.raises(ValueError, match='Completed'):
+    with pytest.raises(ValueError, match='unavailable for processing'):
         run(setup)
 
 
@@ -560,3 +560,60 @@ def test_slack_retry_outbox_uses_delay_and_preserves_primary_status(setup, monke
     assert scheduled[-1][1]['delay_seconds'] == 60
     saved, _ = store.load('executions/' + record['execution_id'])
     assert saved['processing_status'] == saved['notion_status'] == 'delivered'
+
+
+def test_failed_capture_requires_recovery_and_never_delivers_recovered_notes(setup):
+    store, bucket, record, _, _, deliveries = setup
+    key = 'executions/' + record['execution_id']
+    saved, gen = store.load(key)
+    saved.update(status='failed', artifacts={'system-audio.wav': True})
+    store.cas(key, saved, gen)
+    with pytest.raises(ValueError, match='unavailable for processing'):
+        run(setup)
+    saved, gen = store.load(key)
+    saved.update(recover_partial=True, processing_status='processing')
+    store.cas(key, saved, gen)
+    assert [run(setup) for _ in range(4)] == ['processing', 'processing', 'processing', 'recovered']
+    saved, _ = store.load(key)
+    assert saved['status'] == 'failed' and saved['artifacts']['transcript.txt'] and saved['artifacts']['summary.json']
+    assert saved['audio_generation'] == 1 and saved['recovery_audio_name'] == 'system-audio.wav'
+    assert run(setup) == 'recovered'
+    assert json.loads(bucket.objects[record['output_prefix'] + 'summary.json'][0])['partial'] is True
+    assert bucket.objects[record['output_prefix'] + 'transcript.txt'][0].startswith(b'Partial meeting transcript')
+    assert deliveries == []
+
+
+def test_recovery_with_missing_media_reports_audio_unavailable(setup):
+    store, _, record, _, _, deliveries = setup
+    key = 'executions/' + record['execution_id']
+    saved, gen = store.load(key)
+    saved.update(status='failed', recover_partial=True, processing_status='processing',
+                 artifacts={'recording.mp4': True})
+    store.cas(key, saved, gen)
+    assert run(setup) == 'audio_unavailable'
+    assert run(setup) == 'audio_unavailable'
+    assert deliveries == []
+
+
+def test_recovery_extracts_audio_from_video_without_wav(setup, monkeypatch, tmp_path):
+    import shutil
+    import subprocess
+
+    if not shutil.which('ffmpeg'):
+        pytest.skip('FFmpeg is unavailable')
+    _, bucket, record, _, _, _ = setup
+    video = tmp_path / 'input.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440',
+                    '-t', '1', '-c:a', 'aac', str(video)], check=True)
+    bucket.objects[record['output_prefix'] + 'recording.mp4'] = (video.read_bytes(), 9)
+    record['artifacts'] = {'recording.mp4': True}
+    def download_video(self, filename, **kwargs):
+        from pathlib import Path
+        Path(filename).write_bytes(self.download_as_bytes(**kwargs))
+    def upload_audio(self, filename, **kwargs):
+        from pathlib import Path
+        self.upload_from_string(Path(filename).read_bytes(), **kwargs)
+    monkeypatch.setattr(Blob, 'download_to_filename', download_video, raising=False)
+    monkeypatch.setattr(Blob, 'upload_from_filename', upload_audio, raising=False)
+    assert processing.recover_audio(bucket, record) == (processing.RECOVERY_AUDIO, 1)
+    assert processing.recover_audio(bucket, record) == (processing.RECOVERY_AUDIO, 1)

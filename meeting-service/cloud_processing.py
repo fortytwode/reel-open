@@ -1,12 +1,15 @@
-"""Bounded, retryable processing of a completed cloud capture."""
+"""Bounded, retryable processing of captured cloud media."""
 import io
 import json
 import os
 import struct
+import subprocess
+import tempfile
+from pathlib import Path
 import time
 import wave
 
-from google.api_core.exceptions import PreconditionFailed
+from google.api_core.exceptions import NotFound, PreconditionFailed
 
 CHUNK_SECONDS = 300
 LEASE_SECONDS = 660
@@ -100,6 +103,65 @@ def immutable_json(bucket, name, create):
     return json.loads(blob.download_as_bytes(if_generation_match=int(blob.generation), timeout=30))
 
 
+RECOVERY_AUDIO = 'processing/recovered-audio.wav'
+MAX_RECOVERY_VIDEO = 128 * 1024 * 1024
+MAX_VIDEO_AUDIO_SECONDS = 3600
+
+
+def recover_audio(bucket, record):
+    prefix = record['output_prefix']
+    artifacts = record.get('artifacts', {})
+    if artifacts.get('system-audio.wav'):
+        source = bucket.blob(prefix + 'system-audio.wav')
+        try:
+            source.reload(timeout=30)
+            generation = int(source.generation)
+            audio_layout(source, generation)
+            return 'system-audio.wav', generation
+        except (NotFound, ValueError, PreconditionFailed):
+            pass
+    if not artifacts.get('recording.mp4'):
+        return None
+
+    recovered = bucket.blob(prefix + RECOVERY_AUDIO)
+    try:
+        recovered.reload(timeout=30)
+    except NotFound:
+        video = bucket.blob(prefix + 'recording.mp4')
+        try:
+            video.reload(timeout=30)
+            if not 0 < int(video.size) <= MAX_RECOVERY_VIDEO:
+                return None
+            with tempfile.TemporaryDirectory(prefix='reel-recovery-') as folder:
+                source, output = Path(folder) / 'source.mp4', Path(folder) / 'audio.wav'
+                video.download_to_filename(str(source), if_generation_match=int(video.generation), timeout=90)
+                subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-protocol_whitelist', 'file',
+                                '-f', 'mov', '-i', str(source), '-map', '0:a:0', '-vn',
+                                '-t', str(MAX_VIDEO_AUDIO_SECONDS + 1),
+                                '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(output)],
+                               check=True, timeout=150, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                source.unlink()
+                # The Cloud Run scratch filesystem uses memory. Bound extraction,
+                # and reject over-limit results instead of silently trimming them.
+                with wave.open(str(output), 'rb') as wav:
+                    if not 0 < wav.getnframes() <= MAX_VIDEO_AUDIO_SECONDS * 16000:
+                        return None
+                try:
+                    recovered.upload_from_filename(str(output), content_type='audio/wav',
+                                                   if_generation_match=0, timeout=120)
+                except PreconditionFailed:
+                    pass
+        except (NotFound, subprocess.CalledProcessError, wave.Error, EOFError):
+            return None
+        recovered.reload(timeout=30)
+    generation = int(recovered.generation)
+    try:
+        audio_layout(recovered, generation)
+    except ValueError:
+        return None
+    return RECOVERY_AUDIO, generation
+
+
 def process_step(store, execution, scheduler, *, clock=time.time):
     """Run one bounded stage. All identities and paths come from saved state."""
     from google.cloud import storage
@@ -110,17 +172,17 @@ def process_step(store, execution, scheduler, *, clock=time.time):
     started = clock()
     key = 'executions/' + execution
     record, generation = store.load(key)
-    if not record or record.get('execution_id') != execution or record.get('status') != 'completed':
-        raise ValueError('Completed execution is unavailable')
+    from calendar_runtime import PROCESSING_TERMINAL_STATES, digest, processing_allowed
+    if not processing_allowed(record) or record.get('execution_id') != execution:
+        raise ValueError('Execution is unavailable for processing')
+    recovery = record.get('status') == 'failed'
     owner, owner_id, event_id = record.get('owner_email'), record.get('owner_id'), record.get('event_id')
     if not isinstance(owner, str) or not owner or not isinstance(owner_id, str) or not owner_id or not event_id:
         raise ValueError('Execution owner is unavailable')
     is_slack_retry = record.get('processing_status') == 'delivered' and record.get('slack_retry_pending') is True
-    from calendar_runtime import digest
     expected_prefix = 'reel-meetings/bot/' + digest(owner_id) + '/' + execution + '/'
     if (record.get('output_bucket') != os.environ.get('BOT_BUCKET') or record.get('output_prefix') != expected_prefix
-            or isinstance(record.get('audio_generation'), bool) or not isinstance(record.get('audio_generation'), int)
-            or record['audio_generation'] <= 0):
+            or (not recovery and (type(record.get('audio_generation')) is not int or record['audio_generation'] <= 0))):
         raise ValueError('Execution artifact is invalid')
     state, _ = store.load('calendar/' + digest(owner))
     identity = (state or {}).get('identity') or (state or {}).get('config') or {}
@@ -135,7 +197,6 @@ def process_step(store, execution, scheduler, *, clock=time.time):
             store.cas(key, record, generation)
             return 'delivered'
         raise ValueError('Execution owner or occurrence changed')
-    from calendar_runtime import PROCESSING_TERMINAL_STATES
     if record.get('processing_status') in PROCESSING_TERMINAL_STATES and not is_slack_retry:
         return record['processing_status']
     if is_slack_retry and clock() < record.get('slack_retry_not_before', 0):
@@ -148,7 +209,28 @@ def process_step(store, execution, scheduler, *, clock=time.time):
     try:
         bucket = storage.Client().bucket(record['output_bucket'])
         prefix = record['output_prefix']
-        audio = bucket.blob(prefix + 'system-audio.wav')
+        audio_name = 'system-audio.wav'
+        if recovery:
+            audio_name = record.get('recovery_audio_name')
+            if audio_name is None:
+                selected = recover_audio(bucket, record)
+                current, gen = store.load(key)
+                if current.get('processing_lease_until') != record['processing_lease_until']:
+                    raise RuntimeError('Processing claim expired')
+                if selected:
+                    current.update(recovery_audio_name=selected[0], audio_generation=selected[1],
+                                   processing_lease_until=0, processing_enqueue_needed=True)
+                else:
+                    current.update(processing_status='audio_unavailable', processing_lease_until=0,
+                                   processing_enqueue_needed=False)
+                store.cas(key, current, gen)
+                if selected:
+                    from calendar_runtime import enqueue_processing
+                    enqueue_processing(store, execution, scheduler)
+                return current['processing_status']
+            if audio_name not in {'system-audio.wav', RECOVERY_AUDIO}:
+                raise ValueError('Invalid recovery audio')
+        audio = bucket.blob(prefix + audio_name)
         audio_generation = int(record['audio_generation'])
         offset, size = audio_layout(audio, audio_generation)
         count = (size + CHUNK_SECONDS * 32000 - 1) // (CHUNK_SECONDS * 32000)
@@ -188,6 +270,8 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                 transcript = immutable_json(bucket, prefix + 'transcript.json', lambda: attributed_transcript(
                     segments, caption_context(bucket, record, size / 32000)))
                 text = transcript_text(transcript['segments'])
+                if recovery:
+                    text = 'Partial meeting transcript\n\n' + text
                 text_blob = bucket.blob(prefix + 'transcript.txt')
                 try:
                     text_blob.upload_from_string(text, content_type='text/plain', if_generation_match=0, timeout=30)
@@ -210,11 +294,14 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                 record['has_meeting_content'] = (False if acknowledgement_only(text) else
                     summary.get('has_meeting_content') if isinstance(summary.get('has_meeting_content'), bool) else None)
                 if record['has_meeting_content'] is True:
-                    immutable_json(bucket, prefix + 'summary.json', lambda: summary)
+                    immutable_json(bucket, prefix + 'summary.json',
+                                   lambda: {**summary, 'partial': True} if recovery else summary)
                     record['summary_available'] = True
-                    state_name = 'processing'
+                    state_name = 'recovered' if recovery else 'processing'
                 else:
                     state_name = 'review_required'
+            elif recovery:
+                raise ValueError('Invalid recovery processing step')
             else:
                 transcript = immutable_json(bucket, prefix + 'transcript.json', lambda: (_ for _ in ()).throw(ValueError('Transcript unavailable')))
                 summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: (_ for _ in ()).throw(ValueError('Summary unavailable')))
@@ -276,7 +363,7 @@ def process_step(store, execution, scheduler, *, clock=time.time):
             current.setdefault('artifacts', {})['summary.json'] = True
         if state_name == 'delivered':
             current.update(notion_url=record.get('notion_url', current.get('notion_url')), notion_status='delivered')
-        elif state_name in PROCESSING_TERMINAL_STATES:
+        elif state_name in PROCESSING_TERMINAL_STATES and not recovery:
             current['notion_status'] = state_name
         store.cas(key, current, gen)
         if state_name == 'processing' or pending:

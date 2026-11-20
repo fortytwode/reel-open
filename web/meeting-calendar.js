@@ -22,6 +22,14 @@ const CLOUD_FAILURES = {
   auth: "Reel could not sign in or needed a person to continue. Check the meeting’s sign-in and guest access requirements.",
   capture_interrupted: "Cloud capture stopped unexpectedly. Check for a downloadable recording below.",
 };
+const RECOVERY_STATUSES = {
+  processing: "Transcribing the partial recording…",
+  recovered: "Partial transcript ready. You can download the recovered files below.",
+  no_speech: "No speech was found in the partial recording.",
+  review_required: "Review the partial transcript before using it.",
+  transcript_too_long: "The partial transcript is too long to summarize. Download it below if available.",
+  audio_unavailable: "Audio from the partial recording could not be transcribed.",
+};
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[c]));
@@ -220,9 +228,15 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     for (const due of state.due || []) if (!rows.some((event) => event.id === due.id)) rows.push(due);
     if (!rows.length) q("[data-events]").innerHTML = `<p class="mc-empty">No calendar meetings to show. Sync to refresh.</p>`;
     else q("[data-events]").innerHTML = `<h3>Meetings</h3><ul class="mc-list">${rows.map((event) => {
-      const downloads = [event.video_available ? 'video' : null, event.transcript_available ? 'transcript' : null].filter(Boolean)
-        .map(kind => `<button type="button" data-action="download-${kind}" data-id="${esc(event.id)}" ${state.busy ? 'disabled' : ''}>Download ${kind}</button>`).join('');
-      const notion = event.notion_url && /^https:\/\/(?:www\.)?notion\.so\//i.test(event.notion_url)
+      const failed = event.status === "failed";
+      const recoveryStatus = failed && Object.hasOwn(RECOVERY_STATUSES, event.recovery_status)
+        ? RECOVERY_STATUSES[event.recovery_status] : "";
+      const recovery = failed && event.recovery_available === true && event.recovery_status !== "processing"
+        ? `<button type="button" data-action="recover" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Transcribe partial recording</button>` : "";
+      const downloads = [event.video_available ? 'video' : null, event.transcript_available ? 'transcript' : null,
+        failed && event.recovery_summary_available === true ? 'summary' : null].filter(Boolean)
+        .map(kind => `<button type="button" data-action="download-${kind}" data-id="${esc(event.id)}" ${state.busy ? 'disabled' : ''}>Download ${failed ? "partial " : ""}${kind === "summary" ? "notes" : kind}</button>`).join('');
+      const notion = failed ? "" : event.notion_url && /^https:\/\/(?:www\.)?notion\.so\//i.test(event.notion_url)
         ? `<a href="${esc(event.notion_url)}" target="_blank" rel="noopener">Open Notion notes</a>`
         : event.transcript_available ? `<button type="button" data-action="retry-notion" data-id="${esc(event.id)}" ${state.busy ? 'disabled' : ''}>Send notes to Notion</button>` : '';
       const cloudEvent = event.capture_provider === "cloud";
@@ -231,11 +245,11 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const desktopJoin = eventDesktop && isMac && /^[a-f0-9]{64}$/i.test(String(event.id || ""))
         ? `<a class="mc-primary" href="reel://join-meeting?id=${encodeURIComponent(event.id)}">Open in Reel</a>`
         : eventDesktop && !isMac ? `<a href="/record?mode=meeting">Capture manually</a>` : "";
-      const failure = event.status === "failed" && Object.hasOwn(CLOUD_FAILURES, event.failure_category)
+      const failure = failed && Object.hasOwn(CLOUD_FAILURES, event.failure_category)
         ? CLOUD_FAILURES[event.failure_category] : "";
       const detailText = failure || (event.notion_status === "calendar_selection_required" ? event.detail : "");
       const detail = detailText ? `<span class="mc-status">${esc(detailText)}</span>` : "";
-      return `<li class="mc-event"><div class="mc-event-copy"><strong>${esc(event.title || "Untitled meeting")}</strong><time>${esc(dateText(event.start))}</time><span class="mc-status mc-status-${esc(event.status || "unknown")}">${esc(statusText(event.status))}</span>${detail}<div class="mc-actions">${downloads}${notion}${desktopJoin}</div></div>${actionable ? `<div class="mc-event-actions"><label class="mc-check"><input type="checkbox" data-attest="${esc(event.id)}"> I confirm participants agreed to recording</label><button type="button" data-action="approve" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Approve and join</button><button type="button" data-action="decline" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Decline</button></div>` : ""}</li>`;
+      return `<li class="mc-event"><div class="mc-event-copy"><strong>${esc(event.title || "Untitled meeting")}</strong><time>${esc(dateText(event.start))}</time><span class="mc-status mc-status-${esc(event.status || "unknown")}">${esc(statusText(event.status))}</span>${detail}${recoveryStatus ? `<span class="mc-status">${esc(recoveryStatus)}</span>` : ""}<div class="mc-actions">${downloads}${recovery}${notion}${desktopJoin}</div></div>${actionable ? `<div class="mc-event-actions"><label class="mc-check"><input type="checkbox" data-attest="${esc(event.id)}"> I confirm participants agreed to recording</label><button type="button" data-action="approve" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Approve and join</button><button type="button" data-action="decline" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Decline</button></div>` : ""}</li>`;
     }).join("")}</ul>`;
 
     const browserHost = q("[data-browser]");
@@ -301,6 +315,8 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
         const link = document.createElement('a'); link.href = url.href; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open download';
         state.download = {url:url.href, expiresAt:Date.now()+300000};
         q('[data-message]').replaceChildren(link); link.click();
+      } else if (action === "recover") {
+        await request(`/calendar/meetings/${encodeURIComponent(eventId)}/recover`, "POST", {}, uid);
       } else if (action === "retry-notion") {
         await request(`/calendar/meetings/${encodeURIComponent(eventId)}/notion`, "POST", {}, uid);
       } else if (action === "choose-calendars") {

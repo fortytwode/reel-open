@@ -16,7 +16,8 @@ from calendar_meetings import (CalendarMeetingError, CalendarMeetings, CalendarP
                                canonical_join_url, cloud_capture_enabled, cloud_requires_calendar, effective_cloud_providers)
 
 
-PROCESSING_TERMINAL_STATES = {"delivered", "no_speech", "transcript_too_long", "review_required", "calendar_selection_required"}
+PROCESSING_TERMINAL_STATES = {"delivered", "no_speech", "transcript_too_long", "review_required", "calendar_selection_required", "recovered", "audio_unavailable"}
+RECOVERY_ASSETS = {"system-audio.wav", "recording.mp4"}
 CLOUD_FAILURE_CODES = {
     "startup": {"media_start_failed", "media_start_timeout", "display_unavailable", "browser_launch_failed",
                 "browser_launch_timeout", "context_create_failed", "context_create_timeout",
@@ -85,12 +86,21 @@ class CloudTasks:
         return response.json().get("name", "")
 
 
+def has_recovery_media(record):
+    return any(record.get("artifacts", {}).get(name) is True for name in RECOVERY_ASSETS)
+
+
+def processing_allowed(record):
+    return bool(record and (record.get("status") == "completed"
+                           or (record.get("status") == "failed" and record.get("recover_partial") is True)))
+
+
 def enqueue_processing(store, execution, scheduler, *, bounded=False):
     key = "executions/" + execution
     options = {"timeout": 1} if bounded else {}
     record, generation = store.load(key, **options)
     slack_retry = bool(record and record.get("processing_status") == "delivered" and record.get("slack_retry_pending"))
-    if (not record or record.get("status") != "completed" or not record.get("processing_enqueue_needed")
+    if (not processing_allowed(record) or not record.get("processing_enqueue_needed")
             or (record.get("processing_status") in PROCESSING_TERMINAL_STATES and not slack_retry)):
         return False
     step = record.get("processing_step", 0)
@@ -102,6 +112,7 @@ def enqueue_processing(store, execution, scheduler, *, bounded=False):
     current, generation = store.load(key, **options)
     if (current and current.get("processing_enqueue_needed")
             and current.get("processing_step", 0) == step
+            and current.get("recovery_audio_name") == record.get("recovery_audio_name")
             and current.get("slack_retry_attempts", 0) == record.get("slack_retry_attempts", 0)):
         current["processing_enqueue_needed"] = False
         try:
@@ -353,6 +364,13 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                     if record.get("status") == "failed" and record.get("failure_category") in CLOUD_FAILURE_CODES:
                         public["status"] = "failed"
                         public["failure_category"] = record["failure_category"]
+                    if record.get("status") == "failed":
+                        public["status"] = "failed"
+                        if record.get("recover_partial") is True:
+                            public["recovery_status"] = record.get("processing_status", "processing")
+                            public["recovery_summary_available"] = bool(record.get("artifacts", {}).get("summary.json"))
+                        elif has_recovery_media(record):
+                            public["recovery_available"] = True
                     if record.get("processing_status") == "review_required":
                         public["detail"] = "Review the transcript; notes were not delivered."
                     elif record.get("processing_status") == "transcript_too_long":
@@ -548,6 +566,27 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             return "", 204
         claims = calendar_claims()
         data = payload()
+        if action == "recover":
+            original = event_execution(claims, event_id)
+            execution = original["execution_id"]
+            store = store_for_request()
+            key = "executions/" + execution
+            current, generation = store.load(key)
+            if (not current or current.get("owner_id") != claims["sub"]
+                    or current.get("event_id") != event_id or current.get("status") != "failed"
+                    or not has_recovery_media(current)):
+                raise CalendarMeetingError("No partial recording is available for recovery")
+            if current.get("recover_partial") is not True:
+                current.update(recover_partial=True, processing_status="processing", processing_enqueue_needed=True)
+                from google.api_core.exceptions import PreconditionFailed
+                try:
+                    store.cas(key, current, generation)
+                except PreconditionFailed:
+                    current, _ = store.load(key)
+                    if not current or current.get("recover_partial") is not True:
+                        raise
+            enqueue_processing(store, execution, CloudTasks())
+            return jsonify(status=current.get("processing_status", "processing")), 202
         if action == "notion":
             record = event_execution(claims, event_id)
             if record.get("status") != "completed" or not record.get("audio_generation"):
@@ -587,8 +626,9 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             return "", 204
         claims = calendar_claims()
         record = event_execution(claims, event_id)
-        name = {"video": "recording.mp4", "transcript": "transcript.txt"}.get(kind)
-        if not name or not record.get("artifacts", {}).get(name):
+        name = {"video": "recording.mp4", "transcript": "transcript.txt", "summary": "summary.json"}.get(kind)
+        if (not name or not record.get("artifacts", {}).get(name)
+                or (kind == "summary" and record.get("recover_partial") is not True)):
             return jsonify(error="Artifact is not available"), 404
         import google.auth
         from google.auth.transport.requests import Request
@@ -597,9 +637,11 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         credentials.refresh(Request())
         blob = storage.Client().bucket(record["output_bucket"]).blob(record["output_prefix"] + name)
         blob.reload()
+        filename = "reel-partial-meeting" if record.get("status") == "failed" else "reel-meeting"
+        extension = {"video": "mp4", "transcript": "txt", "summary": "json"}[kind]
         url = blob.generate_signed_url(version="v4", expiration=timedelta(minutes=5), method="GET",
             service_account_email=os.environ["INTERNAL_SERVICE_ACCOUNT"], access_token=credentials.token,
-            response_disposition='attachment; filename="reel-meeting.' + ("mp4" if kind == "video" else "txt") + '"')
+            response_disposition=f'attachment; filename="{filename}.{extension}"')
         return jsonify(url=url, expires_in=300)
 
     @app.route("/calendar/browser", methods=["POST", "OPTIONS"])

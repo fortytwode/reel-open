@@ -1306,3 +1306,34 @@ def test_google_pilot_revoked_owner_cannot_reserve_browser_attempt(setup, monkey
     assert post(client, "/calendar/browser", {"meeting_url": "https://meet.google.com/abc-defg-hij",
         "participant_consent_attested": True}).status_code == 503
     assert store.load(key) == before and calls == []
+
+
+def test_partial_recovery_is_owner_only_and_repeated_requests_share_the_queue(setup, monkeypatch):
+    import calendar_runtime as runtime
+    owners, events, select, dispatch, launches = shared_calendar(setup, monkeypatch)
+    client, store, _, _, _ = setup
+    for owner in owners[:2]:
+        dispatch(owner)
+    key = next(key for key in store.data if key.startswith("executions/"))
+    saved, generation = store.load(key)
+    saved.update(status="failed", artifacts={"recording.mp4": True})
+    store.cas(key, saved, generation)
+    queued = []
+    monkeypatch.setattr(runtime, "CloudTasks", lambda: SimpleNamespace(
+        schedule_processing=lambda execution, **_: queued.append(execution)))
+    headers = {"Authorization": "Bearer firebase"}
+
+    select(owners[1])
+    follower = client.get("/calendar/settings", headers=headers).json["events"][0]
+    assert "recovery_available" not in follower
+    assert post(client, f"/calendar/meetings/{events[owners[1]]}/recover", {}).status_code == 400
+
+    select(owners[0])
+    owner = client.get("/calendar/settings", headers=headers).json["events"][0]
+    assert owner["recovery_available"] and owner["status"] == "failed"
+    path = f"/calendar/meetings/{events[owners[0]]}/recover"
+    assert post(client, path, {}).status_code == 202
+    assert post(client, path, {}).json["status"] == "processing"
+    assert queued == [saved["execution_id"]] and len(launches) == 1
+    owner = client.get("/calendar/settings", headers=headers).json["events"][0]
+    assert owner["recovery_status"] == "processing" and owner["status"] == "failed"
