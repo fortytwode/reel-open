@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -178,20 +179,36 @@ class GCSStateStore:
         return self.bucket.blob(name)
 
     def load(self, key, *, timeout=None):
-        blob = self._blob(key)
-        options = {} if timeout is None else {"timeout": timeout, "retry": None}
-        try:
-            blob.reload(**options)
-        except Exception as exc:
-            from google.api_core.exceptions import NotFound
-            if isinstance(exc, NotFound):
+        from google.api_core.exceptions import NotFound, PreconditionFailed
+
+        # Keep the original two requests' time budget for bounded callers.
+        deadline = None if timeout is None else time.monotonic() + 2 * timeout
+
+        def options():
+            if deadline is None:
+                return {}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BridgeError("Meeting state is temporarily unavailable", 503)
+            return {"timeout": min(timeout, remaining), "retry": None}
+
+        for _ in range(2):
+            # A reloaded blob's media URL is pinned, so refresh with a new blob.
+            blob = self._blob(key)
+            try:
+                blob.reload(**options())
+            except NotFound:
                 return None, 0
-            raise
-        generation = int(blob.generation)
-        data = json.loads(blob.download_as_bytes(if_generation_match=generation, **options))
-        if not isinstance(data, dict):
-            raise TypeError("Receipt state is not an object")
-        return data, generation
+            generation = int(blob.generation)
+            try:
+                contents = blob.download_as_bytes(if_generation_match=generation, **options())
+            except (NotFound, PreconditionFailed):
+                continue
+            data = json.loads(contents)
+            if not isinstance(data, dict):
+                raise TypeError("Receipt state is not an object")
+            return data, generation
+        raise BridgeError("Meeting state changed while being read", 503)
 
     def cas(self, key, state, generation, *, timeout=None):
         blob = self._blob(key)
