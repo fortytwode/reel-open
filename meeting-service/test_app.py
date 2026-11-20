@@ -1,9 +1,77 @@
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
+from google.api_core.exceptions import NotFound, PreconditionFailed
 
-from app import BridgeError, NotionError, RejectedDelivery, create_app, verify_firebase
+from app import BridgeError, GCSStateStore, NotionError, RejectedDelivery, create_app, verify_firebase
+
+
+@pytest.mark.parametrize(("racing_error", "replacement_generation"), [
+    (NotFound, 8),
+    (PreconditionFailed, 8),
+    (NotFound, None),
+])
+def test_gcs_load_reloads_a_fresh_blob_if_the_media_generation_changes(racing_error, replacement_generation):
+    class Blob:
+        generation = None
+
+        def __init__(self, generation):
+            self.version = generation
+
+        def reload(self, **options):
+            assert self.generation is None
+            if self.version is None:
+                raise NotFound("Object deleted")
+            self.generation = self.version
+
+        def download_as_bytes(self, *, if_generation_match, **options):
+            assert if_generation_match == self.version
+            if self.version == 7:
+                raise racing_error("Generation replaced")
+            return b'{"current": true}'
+
+    pending = iter([Blob(7), Blob(replacement_generation)])
+    store = object.__new__(GCSStateStore)
+    store.prefix = "unit"
+    store.bucket = SimpleNamespace(blob=lambda name: next(pending))
+
+    expected = (None, 0) if replacement_generation is None else ({"current": True}, 8)
+    assert store.load("calendar/fixture") == expected
+    assert next(pending, None) is None
+
+
+@pytest.mark.parametrize(("clock", "expected_options"), [
+    (None, [{}, {}, {}, {}]),
+    ([0, .75, 1.25, 2], [{"timeout": 1, "retry": None}, {"timeout": .75, "retry": None}]),
+])
+def test_gcs_load_bounds_generation_retries_and_keeps_existing_sweep_budget(monkeypatch, clock, expected_options):
+    import app
+
+    calls = []
+
+    class StaleBlob:
+        generation = 7
+
+        def reload(self, **options):
+            calls.append(options)
+
+        def download_as_bytes(self, *, if_generation_match, **options):
+            calls.append(options)
+            raise NotFound("Generation replaced")
+
+    store = object.__new__(GCSStateStore)
+    store.prefix = ""
+    store.bucket = SimpleNamespace(blob=lambda name: StaleBlob())
+    if clock is not None:
+        values = iter(clock)
+        monkeypatch.setattr(app, "time", SimpleNamespace(monotonic=lambda: next(values)))
+
+    with pytest.raises(BridgeError) as error:
+        store.load("calendar/fixture", timeout=1 if clock else None)
+    assert error.value.status == 503
+    assert calls == expected_options
 
 
 @pytest.fixture(autouse=True)
