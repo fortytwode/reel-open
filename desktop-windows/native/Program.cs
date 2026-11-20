@@ -87,8 +87,8 @@ namespace ReelNative
             {
                 var classId = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
                 enumerator = (DeviceEnumerator)Activator.CreateInstance(Type.GetTypeFromCLSID(classId));
-                const int render = 0, multimedia = 1;
-                if (enumerator.GetDefaultAudioEndpoint(render, multimedia, out device) < 0 || device == null ||
+                const int render = 0, console = 0; // Match Chromium WASAPI loopback.
+                if (enumerator.GetDefaultAudioEndpoint(render, console, out device) < 0 || device == null ||
                     device.GetId(out endpointId) < 0 || endpointId == IntPtr.Zero) return null;
                 string value = Marshal.PtrToStringUni(endpointId);
                 if (String.IsNullOrEmpty(value)) return null;

@@ -90,6 +90,7 @@ async function run() {
   }
   const processor=auth ? createMeetingProcessor({auth,store,speechURL:org.speechServiceURL,deliveryURL:org.deliveryServiceURL,allowedEmailDomain:org.allowedEmailDomain}) : null;
   const recorder=createWindowsRecorder({BrowserWindow,desktopCapturer,ipcMain,store,origin,
+    defaultRenderEndpoint: bridge?.defaultRenderEndpoint,
     onCompleted:({ownerUserID,recording})=>{ if (!shutdown && auth?.getProfile()?.userID===ownerUserID && store.getProcessing({ownerUserID,id:recording.id})?.phase==='pending') void processor.process({ownerUserID,id:recording.id}).catch(()=>{}); },
     onFailure:()=>{void service?.action('stopRecording').catch(()=>{});},
     onSourceEnded:()=>service?.action('stopRecording')});
