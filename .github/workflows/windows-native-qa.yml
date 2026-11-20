@@ -44,7 +44,9 @@ jobs:
           Get-Service AudioEndpointBuilder, Audiosrv | Set-Service -StartupType Manual
           Start-Service AudioEndpointBuilder
           Start-Service Audiosrv
-          Get-PnpDevice -Class AudioEndpoint -PresentOnly | Format-Table Status, FriendlyName
+          $endpoints = @(Get-PnpDevice -PresentOnly | Where-Object Class -eq AudioEndpoint)
+          Write-Host "Present audio endpoints: $($endpoints.Count)"
+          $endpoints | Format-Table Status, FriendlyName
           $electron = (Resolve-Path desktop-windows/probe/node_modules/electron/dist/electron.exe).Path
           $probe = (Resolve-Path desktop-windows/probe/processing-runtime.mjs).Path
           $process = Start-Process $electron -ArgumentList @(('"' + $probe + '"')) -Wait -PassThru -NoNewWindow
