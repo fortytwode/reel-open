@@ -37,7 +37,7 @@ function fixture(options = {}) {
     desktopCapturer: { getSources: async query => { calls.push(['sources', query]); return options.sources ?? [{ id: 'window:999:0' }, { id: 'window:123:0' }]; } },
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     store: { begin: async metadata => { calls.push(['begin', metadata]); return options.beginGate ? options.beginGate.promise : writer; } },
-    origin: 'http://127.0.0.1:45123', onFailure: error => failures.push(error),
+    origin: 'http://127.0.0.1:45123', defaultRenderEndpoint: options.defaultRenderEndpoint, onFailure: error => failures.push(error),
     onSourceEnded: () => { sourceEnds.push('ended'); return options.onSourceEnded?.(); } });
   const controller = new AbortController();
   const start = recorder.start(args(controller.signal)); start.catch(() => {});
@@ -128,6 +128,41 @@ test('grants display-capture only to the owned main frame and denies camera, mic
   contents.mainFrame.url = url;
   f.controller.abort(); await assert.rejects(f.start, { name:'AbortError' });
   assert.equal(request('display-capture'), false, 'An aborted capture cannot be granted permission');
+});
+
+test('refreshes system audio for a changed Windows output and revokes the temporary grant after acknowledgement', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let endpoint = 'first';
+  const f = fixture({ defaultRenderEndpoint: async () => endpoint });
+  const handle = await running(f);
+  const window = f.windows[0], contents = window.webContents;
+  const origin = 'http://127.0.0.1:45123';
+  const permitted = () => window.checkPermission(contents, 'display-capture', origin,
+    { isMainFrame: true, requestingUrl: origin + '/capture/' });
+  assert.equal(permitted(), false);
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(window.command.type, 'start');
+  endpoint = 'second';
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(window.command.type, 'refresh-audio');
+  assert.equal(permitted(), true);
+  await f.status({ type: 'audio_refreshed', ok: true, request: window.command.request - 1 });
+  assert.equal(permitted(), true);
+  await f.status({ type: 'audio_refreshed', ok: true, request: window.command.request });
+  assert.equal(permitted(), false);
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(f.calls.filter(call => call[1] === 'refresh-audio').length, 1);
+  await f.status({ type: 'audio_ended' });
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(f.calls.filter(call => call[1] === 'refresh-audio').length, 2);
+  const stop = f.recorder.stop(handle);
+  await f.status({ type: 'done', duration: 4, segments: 1 });
+  await stop;
+  assert.equal(permitted(), false);
 });
 
 test('rejects missing and ambiguous owned sources without a fallback window', async () => {
@@ -268,6 +303,7 @@ function rendererFixture(options = {}) {
     appendInit: async () => { calls.push(['init']); await options.initGate?.promise; calls.push(['init-acked']); },
     appendFragment: async () => { calls.push(['fragment']); },
     appendAudio: async bytes => { calls.push(['audio', Array.from(bytes)]); await options.audioGate?.promise; },
+    audioEnded: async () => { calls.push(['audio_ended']); },
     audioFailed: async () => { calls.push(['audio_failed']); },
     done: async () => { calls.push(['done']); }, sourceEnded: async () => { calls.push(['source_ended']); },
     failed: async reason => { calls.push(['failed', reason]); },

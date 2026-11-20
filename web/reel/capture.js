@@ -81,7 +81,12 @@ export class CaptureSession {
       await this.audioCtx.resume().catch(() => {});
       const dest = this.audioCtx.createMediaStreamDestination();
       dest.channelCount = 2;
-      for (const s of sources) this.audioCtx.createMediaStreamSource(s).connect(dest);
+      this.audioDestination = dest;
+      for (const s of sources) {
+        const node = this.audioCtx.createMediaStreamSource(s);
+        node.connect(dest);
+        if (s.getAudioTracks()[0] === sys) this.systemAudioNode = node;
+      }
       audioTrack = dest.stream.getAudioTracks()[0];
     }
     const transfer = [];
@@ -106,6 +111,17 @@ export class CaptureSession {
     }
     if (this.display) this.display.getVideoTracks()[0].addEventListener("ended", () => this.events.onSourceEnded && this.events.onSourceEnded());
     return this.info;
+  }
+
+  /** Keep the existing mixed output and encoder when a desktop audio track is replaced. */
+  replaceSystemAudio(track) {
+    if (!this.systemAudioNode || !this.audioDestination || this.audioCtx?.state === "closed") {
+      throw new Error("No active system audio to replace.");
+    }
+    const node = this.audioCtx.createMediaStreamSource(new MediaStream([track]));
+    node.connect(this.audioDestination);
+    this.systemAudioNode.disconnect();
+    this.systemAudioNode = node;
   }
 
   /** Read audio locally: transferring its ReadableStream loses small blocks under Windows load. */

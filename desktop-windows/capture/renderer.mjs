@@ -5,6 +5,7 @@ const status = document.querySelector('#status');
 const MAX_PACKET = 16 * 1024 * 1024;
 const MAX_PENDING = 32 * 1024 * 1024;
 let stream = null, capture = null, failed = false, stopping = false, starting = false, sourceEnding = false, stopPromise;
+let sourceId, canRefreshAudio, refreshingAudio = false;
 let pendingBytes = 0, audioPending = 0, audioFailed = false, audioOffset = 0, audioSum = 0, audioCount = 0;
 const audioWrites = new Set();
 let audioFailureNotice = Promise.resolve();
@@ -63,19 +64,57 @@ function append(kind, index, duration, bytes) {
     .finally(() => { pending.delete(operation); pendingBytes -= size; });
   pending.add(operation);
 }
-async function start({ sourceId }) {
+function watchAudioTrack(track) {
+  track.addEventListener('ended', () => {
+    if (failed || stopping || sourceEnding || stream?.getAudioTracks()[0] !== track) return;
+    if (canRefreshAudio) void api.audioEnded().catch(() => {});
+    else sourceEnded();
+  });
+}
+function acquireWindow(id) {
+  const mandatory = { chromeMediaSource: 'desktop', chromeMediaSourceId: id };
+  return navigator.mediaDevices.getUserMedia({
+    video: { mandatory: { ...mandatory, maxWidth: 960, maxHeight: 600, maxFrameRate: 15 } }, audio: { mandatory },
+  });
+}
+async function refreshAudio(request, deadline) {
+  if (refreshingAudio || failed || stopping || sourceEnding || !capture || Date.now() >= deadline) return;
+  refreshingAudio = true;
+  let refreshed, installed = false;
+  try {
+    // Chromium requires video in the same request for this loopback stream.
+    refreshed = await acquireWindow(sourceId);
+    if (failed || stopping || sourceEnding || Date.now() >= deadline) return;
+    const replacement = refreshed.getAudioTracks()[0];
+    if (replacement?.readyState !== 'live' || refreshed.getAudioTracks().length !== 1) throw Error('Desktop audio required');
+    const old = stream.getAudioTracks()[0];
+    capture.replaceSystemAudio(replacement);
+    stream.removeTrack(old);
+    stream.addTrack(replacement);
+    old.stop();
+    watchAudioTrack(replacement);
+    installed = true;
+  } catch { /* The main process can retry if the default endpoint is still different. */ }
+  finally {
+    if (installed) refreshed.getVideoTracks().forEach(track => track.stop());
+    else refreshed?.getTracks().forEach(track => track.stop());
+    refreshingAudio = false;
+    if (!failed && !stopping && !sourceEnding) await api.audioRefreshed(request, installed).catch(() => {});
+  }
+}
+async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled }) {
   if (starting || failed || stopping) return;
   starting = true;
   try {
-    if (!/^window:\d+:[01]$/.test(sourceId ?? '')) throw Error('Invalid owned source');
-    const mandatory = { chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId };
-    const acquired = await navigator.mediaDevices.getUserMedia({
-      video: { mandatory: { ...mandatory, maxWidth: 960, maxHeight: 600, maxFrameRate: 15 } }, audio: { mandatory },
-    });
+    if (!/^window:\d+:[01]$/.test(selectedSource ?? '')) throw Error('Invalid owned source');
+    sourceId = selectedSource;
+    canRefreshAudio = refreshEnabled === true;
+    const acquired = await acquireWindow(sourceId);
     if (failed || stopping) { acquired.getTracks().forEach(track => track.stop()); return; }
     stream = acquired;
     if (stream.getVideoTracks().length !== 1 || stream.getAudioTracks().length !== 1) throw Error('Desktop video and audio required');
-    stream.getTracks().forEach(track => track.addEventListener('ended', sourceEnded));
+    stream.getVideoTracks()[0].addEventListener('ended', sourceEnded);
+    watchAudioTrack(stream.getAudioTracks()[0]);
     capture = new CaptureSession({
       settings: { quality: 'p720', fps: 15, audio: 'systemOnly', bubbleSize: 'medium' },
       display: stream, camera: null, mic: null, composite: false,
@@ -116,4 +155,4 @@ function stop() {
   return stopPromise;
 }
 window.addEventListener('pagehide', () => { stopping = true; releaseTracks(); });
-api.onCommand(command => { if (command.type === 'start') void start(command); else if (command.type === 'stop') void stop(); });
+api.onCommand(command => { if (command.type === 'start') void start(command); else if (command.type === 'refresh-audio') void refreshAudio(command.request, command.deadline); else if (command.type === 'stop') void stop(); });

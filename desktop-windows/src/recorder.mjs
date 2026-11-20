@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const DEADLINE_MS = 45_000;
+const AUDIO_POLL_MS = 1000;
+const AUDIO_REFRESH_TIMEOUT_MS = 5000;
 const MAX_PACKET = 16 * 1024 * 1024;
 const MAX_PENDING = 32 * 1024 * 1024;
 const COMMAND = 'reel-capture:command';
@@ -14,7 +16,7 @@ const abortError = () => Object.assign(Error('Recording startup was cancelled.')
  * onFailure fires once for a capture that has already returned its handle.
  */
 export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain, store, origin,
-  onFailure = () => {}, onCompleted = () => {}, onSourceEnded = () => { throw Error('Recording source ended without a save handler.'); } } = {}) {
+  defaultRenderEndpoint, onFailure = () => {}, onCompleted = () => {}, onSourceEnded = () => { throw Error('Recording source ended without a save handler.'); } } = {}) {
   const parsed = new URL(origin);
   check(parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.port
     && parsed.origin === origin, 'A private loopback capture origin is required');
@@ -31,6 +33,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
   }
   function clear(capture) {
     clearTimeout(capture.timer);
+    clearTimeout(capture.audioTimer);
     capture.signal?.removeEventListener('abort', capture.onAbort);
     captures.delete(capture.token);
     if (current === capture) current = null;
@@ -49,12 +52,33 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
       && event.senderFrame.url === captureURL && contents.getURL() === captureURL, 'Unrecognized capture request');
     return capture;
   }
+  async function readAudioEndpoint() {
+    try { return await defaultRenderEndpoint?.(); }
+    catch { return null; }
+  }
+  function watchAudioEndpoint(capture) {
+    if (!defaultRenderEndpoint || capture.phase !== 'recording') return;
+    capture.audioTimer = setTimeout(async () => {
+      const endpoint = await readAudioEndpoint();
+      if (capture.phase !== 'recording') return;
+      const now = Date.now();
+      if (capture.audioRefresh && capture.audioRefresh.deadline <= now) capture.audioRefresh = null;
+      if (endpoint && endpoint !== capture.audioEndpoint && !capture.audioRefresh) {
+        const request = ++capture.audioRequest;
+        capture.audioRefresh = { endpoint, request, deadline: now + AUDIO_REFRESH_TIMEOUT_MS };
+        capture.window.webContents.send(COMMAND, { type: 'refresh-audio', token: capture.token, request, deadline: capture.audioRefresh.deadline });
+      }
+      watchAudioEndpoint(capture);
+    }, AUDIO_POLL_MS);
+    capture.audioTimer.unref?.();
+  }
   function maybeStarted(capture) {
     if (capture.phase !== 'starting' || !capture.ready || !capture.init || capture.index < 1) return;
     capture.phase = 'recording'; capture.returned = true;
     clearTimeout(capture.timer);
     capture.signal?.removeEventListener('abort', capture.onAbort);
     capture.started.resolve(capture.handle);
+    watchAudioEndpoint(capture);
   }
   ipcMain.handle('reel-capture:status', async (event, message) => {
     const capture = authenticate(event, message);
@@ -68,6 +92,18 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
           && Number.isInteger(message.segments) && message.segments > 0, 'Unexpected recording completion');
         check(!capture.doneReceived, 'Duplicate recording completion');
         capture.doneReceived = true; capture.done.resolve({ duration: message.duration, segments: message.segments });
+      } else if (message.type === 'audio_ended') {
+        if (capture.phase === 'starting') fail(capture, Error('System audio ended before capture started.'));
+        else if (capture.phase === 'recording' && defaultRenderEndpoint) capture.audioEndpoint = null;
+      } else if (message.type === 'audio_refreshed') {
+        if (capture.phase === 'recording' && capture.audioRefresh && capture.audioRefresh.request === message.request) {
+          if (message.ok === true) capture.audioEndpoint = capture.audioRefresh.endpoint;
+          capture.audioRefresh = null;
+        } else if (capture.phase === 'recording' && message.ok === true &&
+          Number.isSafeInteger(message.request) && message.request > 0 && message.request <= capture.audioRequest) {
+          // A late acknowledgement may have changed the installed track just before expiry.
+          capture.audioEndpoint = null;
+        }
       } else if (message.type === 'audio_failed') {
         capture.writer.failAudio?.();
       } else if (message.type === 'source_ended') {
@@ -142,7 +178,9 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
         contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
     const contents = window.webContents, session = contents.session;
     const ownedOrigin = value => value === origin || value === origin + '/';
-    const ownedCaptureRequest = (requester, details) => capture.phase === 'starting' && requester === contents
+    const ownedCaptureRequest = (requester, details) =>
+      (capture.phase === 'starting' || (capture.phase === 'recording' && capture.audioRefresh?.deadline > Date.now()))
+      && requester === contents
       && details?.isMainFrame === true && details.requestingUrl === captureURL
       && contents.mainFrame.url === captureURL && contents.getURL() === captureURL
       && (details.securityOrigin === undefined || ownedOrigin(details.securityOrigin));
@@ -160,8 +198,9 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     window.on('unresponsive', () => fail(capture, Error('The recording renderer stopped responding.')));
     window.on('closed', () => { if (!terminal(capture)) fail(capture, Error('The recording window closed.')); });
     await window.loadURL(captureURL);
+    capture.audioEndpoint = await readAudioEndpoint();
     if (terminal(capture)) return;
-    contents.send(COMMAND, { type: 'start', token: capture.token, sourceId: matches[0].id });
+    contents.send(COMMAND, { type: 'start', token: capture.token, sourceId: matches[0].id, canRefreshAudio: Boolean(defaultRenderEndpoint) });
   }
   function start(args = {}) {
     try {
@@ -174,7 +213,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
       const token = randomBytes(16).toString('hex'), handle = Object.freeze({ id: token });
       const capture = { ownerUserID: args.ownerUserID, token, handle, phase: 'starting', signal: args.signal, window: null, writer: null,
         started: deferred(), done: deferred(), failed: deferred(), ready: false, init: false, index: 0,
-        pendingPackets: 0, pendingBytes: 0, packets: Promise.resolve(), returned: false };
+        audioRequest: 0, pendingPackets: 0, pendingBytes: 0, packets: Promise.resolve(), returned: false };
       // done may reject before stop() is called; the start promise remains owned by the caller.
       capture.done.promise.catch(() => {});
       capture.failed.promise.catch(() => {});
@@ -194,6 +233,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     if (capture.stopPromise) return capture.stopPromise;
     if (capture.failure) return Promise.reject(capture.failure);
     capture.phase = 'stopping';
+    clearTimeout(capture.audioTimer);
     capture.timer = setTimeout(() => fail(capture, Error('Recording save timed out.')), DEADLINE_MS);
     capture.timer.unref?.();
     const finish = (async () => {
