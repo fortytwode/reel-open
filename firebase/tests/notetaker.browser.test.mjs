@@ -179,3 +179,71 @@ test('signed-in notes use the scoped token and clear on account change', async (
     assert.equal(await page.locator('#notes-list').textContent(), '');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
+
+test('failed cloud recording recovery keeps its failed status and offers private downloads only', async () => {
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage();
+    const example = JSON.parse(await readFile(new URL('../../organization.example.json', import.meta.url), 'utf8'));
+    await page.route('**/organization.json', route => route.fulfill({ json: example }));
+    const event = { id: 'a'.repeat(64), title: 'Partial capture', start: '2026-11-19T12:00:00Z',
+      status: 'failed', capture_provider: 'cloud', failure_category: 'capture_interrupted',
+      video_available: true, recovery_available: true };
+    let posted = false;
+    const download = 'https://storage.googleapis.com/reel-fixture/partial-summary.json';
+    await page.context().route(download, route => route.fulfill({ json: { partial: true } }));
+    await page.route('https://meetings.northwind.example/calendar/**', async route => {
+      const request = route.request();
+      const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization,content-type', 'access-control-allow-methods': 'GET,POST' };
+      if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
+      assert.equal(request.headers().authorization, 'Bearer token-owner');
+      const path = new URL(request.url()).pathname;
+      if (path.endsWith('/recover')) {
+        assert.equal(path, `/calendar/meetings/${event.id}/recover`);
+        assert.equal(request.method(), 'POST');
+        assert.deepEqual(request.postDataJSON(), {});
+        posted = true;
+        event.recovery_status = 'processing';
+      }
+      if (path.endsWith('/artifacts/summary')) {
+        assert.equal(path, `/calendar/meetings/${event.id}/artifacts/summary`);
+        assert.equal(request.method(), 'GET');
+        return route.fulfill({ json: { url: download }, headers });
+      }
+      await route.fulfill({ json: path === '/calendar/settings'
+        ? { events: [event], capabilities: { calendar: true, bot: true } } : { meetings: [] }, headers });
+    });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    await page.goto(origin + '/notetaker');
+    await page.evaluate(async () => {
+      const { mountMeetingCalendar } = await import('/meeting-calendar.js');
+      const container = document.createElement('div');
+      container.id = 'test-recovery-calendar';
+      document.body.append(container);
+      window.testRecoveryCalendar = mountMeetingCalendar({
+        container, session: async () => ({ uid: 'owner', getIdToken: async () => 'token-owner' }),
+      });
+    });
+    const calendar = page.locator('#test-recovery-calendar');
+    const recover = calendar.getByRole('button', { name: 'Transcribe partial recording' });
+    await recover.click();
+    await calendar.getByText('Transcribing the partial recording…').waitFor();
+    assert.equal(posted, true);
+    assert.equal(await recover.count(), 0);
+    Object.assign(event, { recovery_available: false, recovery_status: 'recovered', transcript_available: true, recovery_summary_available: true,
+      notion_url: 'https://www.notion.so/stale' });
+    await page.evaluate(() => window.testRecoveryCalendar.refresh());
+    await calendar.getByText('Partial transcript ready. You can download the recovered files below.').waitFor();
+    for (const name of ['Download partial video', 'Download partial transcript', 'Download partial notes']) {
+      assert.equal(await calendar.getByRole('button', { name }).count(), 1);
+    }
+    await calendar.getByRole('button', { name: 'Download partial notes' }).click();
+    const summaryLink = calendar.getByRole('link', { name: 'Open download' });
+    await summaryLink.waitFor();
+    assert.equal(await summaryLink.getAttribute('href'), download);
+    assert.equal(await calendar.getByText('Failed', { exact: true }).count(), 1);
+    assert.equal(await calendar.getByRole('button', { name: 'Send notes to Notion' }).count(), 0);
+    assert.equal(await calendar.getByRole('link', { name: 'Open Notion notes' }).count(), 0);
+  } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+});

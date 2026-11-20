@@ -1,5 +1,5 @@
 import { organization } from "./organization.js?v=20261118-orgstate1";
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261119-products1";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-partial-recovery";
 import { isOrganizationEmail, loadAuth, DOMAIN, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
 
 const el = id => document.getElementById(id);

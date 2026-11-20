@@ -20,13 +20,13 @@ STOPPED = False
 SAFE_DETAILS = {
     'denied', 'human_action_required', 'admission_timeout', 'join_not_available',
     'join_page_unavailable', 'admission_unconfirmed', 'execution_stopped',
-    'meeting_access_lost', 'meeting_connection_lost', 'recorder_exited',
+    'meeting_access_lost', 'meeting_connection_lost', 'recorder_exited', 'media_stalled',
     'recorder_start_failed', 'callback_unavailable', 'display_unavailable',
     'transcription_failed', 'transcription_timeout', 'artifact_upload_failed',
     'meeting_ended', 'duration_limit', 'runtime_failure', 'capture_deadline_expired',
-    'media_start_failed', 'browser_launch_failed', 'context_create_failed',
+    'media_start_failed', 'driver_start_failed', 'browser_launch_failed', 'context_create_failed',
     'guest_join_failed', 'recording_start_failed', 'recording_monitor_failed',
-    'media_start_timeout', 'browser_launch_timeout', 'context_create_timeout',
+    'media_start_timeout', 'driver_start_timeout', 'browser_launch_timeout', 'context_create_timeout',
     'guest_join_timeout', 'recording_start_timeout', 'recording_monitor_timeout',
     'google_auth_profile_invalid', 'google_auth_profile_unavailable', 'google_auth_account_mismatch',
 }
@@ -54,15 +54,11 @@ def failure_metadata(error):
     return result
 
 
-def command(args):
-    return subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-
-
-def stop_process(process):
+def stop_process(process, *, timeout=20):
     if process is not None and process.poll() is None:
         process.send_signal(signal.SIGINT)
         try:
-            process.wait(timeout=20)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
@@ -167,22 +163,97 @@ class Run:
         return self.artifacts
 
 
-def start_media(root):
-    # Silent input is a separate null sink: remote audio is never fed back to the meeting.
-    command(['pulseaudio', '--start', '--exit-idle-time=-1', '--log-target=file:/tmp/pulse.log'])
-    command(['pactl', 'load-module', 'module-null-sink', 'sink_name=reel_output', 'rate=48000', 'channels=2'])
-    command(['pactl', 'load-module', 'module-null-sink', 'sink_name=reel_silent_input', 'rate=48000', 'channels=1'])
-    command(['pactl', 'set-default-sink', 'reel_output'])
-    command(['pactl', 'set-default-source', 'reel_silent_input.monitor'])
-    process = subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(50):
-        if Path('/tmp/.X11-unix/X99').exists():
-            return process
-        if process.poll() is not None:
-            break
-        time.sleep(.1)
-    stop_process(process)
-    raise RuntimeError('display_unavailable')
+class MediaStartupError(Exception):
+    def __init__(self, step, reason, exit_code=None):
+        self.step = step
+        self.reason = reason
+        self.exit_code = exit_code
+
+
+def startup_budget(deadline):
+    if STOPPED:
+        raise RuntimeError('execution_stopped')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise MediaStartupError('startup_budget', 'timeout')
+    return remaining
+
+
+def media_command(step, args, deadline):
+    try:
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=min(3, startup_budget(deadline)))
+    except subprocess.CalledProcessError as error:
+        raise MediaStartupError(step, 'nonzero_exit', error.returncode) from None
+    except subprocess.TimeoutExpired:
+        raise MediaStartupError(step, 'timeout') from None
+    except OSError:
+        raise MediaStartupError(step, 'launch_error') from None
+
+
+def media_process(step, args):
+    try:
+        return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        raise MediaStartupError(step, 'launch_error') from None
+
+
+def wait_for_media(step, args, process, deadline):
+    ready_deadline = min(deadline, time.monotonic() + 5)
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise MediaStartupError(step, 'process_exited', exit_code)
+        try:
+            media_command(step, args, ready_deadline)
+            return
+        except MediaStartupError as error:
+            if error.step != step or error.reason == 'launch_error' or time.monotonic() >= ready_deadline:
+                raise
+            time.sleep(min(.1, max(0, ready_deadline - time.monotonic())))
+
+
+def start_media_attempt(processes, deadline):
+    startup_budget(deadline)
+    pulse = media_process('pulse_start', ['pulseaudio', '--daemonize=no', '--exit-idle-time=-1'])
+    processes.append(pulse)
+    wait_for_media('pulse_ready', ['pactl', 'info'], pulse, deadline)
+    # A separate silent monitor supplies the muted microphone. Remote audio is never fed back.
+    media_command('output_sink', ['pactl', 'load-module', 'module-null-sink',
+                                 'sink_name=reel_output', 'rate=48000', 'channels=2'], deadline)
+    media_command('silent_input', ['pactl', 'load-module', 'module-null-sink',
+                                  'sink_name=reel_silent_input', 'rate=48000', 'channels=1'], deadline)
+    media_command('default_sink', ['pactl', 'set-default-sink', 'reel_output'], deadline)
+    media_command('default_source', ['pactl', 'set-default-source', 'reel_silent_input.monitor'], deadline)
+    display = media_process('display_start', ['Xvfb', ':99', '-screen', '0', '1280x720x24', '-nolisten', 'tcp'])
+    processes.append(display)
+    wait_for_media('display_ready', ['xdpyinfo', '-display', ':99'], display, deadline)
+
+
+def stop_media(processes):
+    for process in reversed(processes):
+        stop_process(process, timeout=2)
+
+
+def start_media(payload):
+    for attempt in (1, 2):
+        remaining = capture_remaining(payload)
+        deadline = time.monotonic() + (min(15, remaining) if remaining is not None else 15)
+        processes = []
+        try:
+            start_media_attempt(processes, deadline)
+            return processes
+        except MediaStartupError as error:
+            print(json.dumps({'execution_id': payload['execution_id'], 'status': 'media_start_attempt_failed',
+                              'attempt': attempt, 'step': error.step, 'reason': error.reason,
+                              'exit_code': error.exit_code}), flush=True)
+            stop_media(processes)
+            capture_remaining(payload)
+            if attempt == 2 or error.reason == 'launch_error':
+                raise RuntimeError('media_start_failed') from None
+        except Exception:
+            stop_media(processes)
+            raise
 
 
 def start_recording(root):
@@ -192,10 +263,47 @@ def start_recording(root):
         '-thread_queue_size', '512', '-f', 'x11grab', '-video_size', '1280x720', '-framerate', '15', '-i', ':99.0',
         '-thread_queue_size', '512', '-f', 'pulse', '-i', 'reel_output.monitor',
         '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30',
-        '-maxrate', '1500k', '-bufsize', '3M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k',
-        '-af', 'aresample=async=1', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', str(root / 'recording.mp4'),
-        '-map', '1:a', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', str(root / 'system-audio.wav'),
+        '-maxrate', '1500k', '-bufsize', '3M', '-g', '30', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k',
+        '-af', 'aresample=async=1', '-flush_packets', '1', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', str(root / 'recording.mp4'),
+        '-map', '1:a', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-flush_packets', '1', str(root / 'system-audio.wav'),
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class RecordingProgress:
+    def __init__(self, root):
+        self.files = (root / 'recording.mp4', root / 'system-audio.wav')
+        self.sizes = [0, 0]
+        self.last_growth = [time.monotonic()] * 2
+
+    def sample(self):
+        checked_at = time.monotonic()
+        for i, file in enumerate(self.files):
+            try:
+                size = file.stat().st_size
+            except FileNotFoundError:
+                continue
+            if size > self.sizes[i] and size >= 4096:
+                self.sizes[i] = size
+                self.last_growth[i] = checked_at
+        return all(self.sizes)
+
+    def ensure_growing(self):
+        self.sample()
+        if time.monotonic() - min(self.last_growth) >= 20:
+            raise RuntimeError('media_stalled')
+
+
+async def wait_for_recording(recording, progress):
+    deadline = time.monotonic() + 12
+    while not STOPPED:
+        if recording.poll() is not None:
+            raise RuntimeError('recorder_start_failed')
+        if progress.sample():
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError('media_stalled')
+        await asyncio.sleep(.25)
+    raise RuntimeError('execution_stopped')
 
 
 def capture_remaining(payload):
@@ -211,7 +319,7 @@ def capture_remaining(payload):
 async def execute(run, root):
     from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
     from providers import prepare_and_join, monitor
-    xvfb = None
+    media = None
     recording = None
     recording_ready = False
     caption_capture = None
@@ -247,7 +355,8 @@ async def execute(run, root):
                 raise RuntimeError('capture_deadline_expired') from None
             capture_remaining(run.p)
         stage = 'media_start'
-        xvfb = start_media(root)
+        media = start_media(run.p)
+        stage = 'driver_start'
         async with async_playwright() as playwright:
             try:
                 stage = 'browser_launch'
@@ -295,18 +404,17 @@ async def execute(run, root):
                                 caption_capture.start()
                             except Exception:
                                 pass
-                        await asyncio.sleep(1)
-                        if recording.poll() is not None:
-                            raise RuntimeError('recorder_start_failed')
+                        progress = RecordingProgress(root)
+                        await wait_for_recording(recording, progress)
                         recording_ready = True
                         capture_remaining(run.p)
                         await run.callback('recording')
                         stage = 'recording_monitor'
                         remaining = capture_remaining(run.p)
-                        duration = run.p['max_duration_seconds']
+                        duration = max(0, run.p['max_duration_seconds'] - (time.monotonic() - recording_started))
                         if remaining is not None:
-                            duration = min(remaining, max(0, duration - (time.monotonic() - recording_started)))
-                        reason = await monitor(page, run.p['provider'], duration, lambda: STOPPED, recording)
+                            duration = min(remaining, duration)
+                        reason = await monitor(page, run.p['provider'], duration, lambda: STOPPED, recording, progress.ensure_growing)
                         if reason == 'execution_stopped':
                             raise RuntimeError(reason)
                 except (TimeoutError, RuntimeError) as error:
@@ -349,7 +457,8 @@ async def execute(run, root):
                 await browser.close()
             except Exception:
                 pass
-        stop_process(xvfb)
+        if media is not None:
+            stop_media(media)
     if recording:
         if run.p.get('provider') in CAPTION_SOURCES:
             try:

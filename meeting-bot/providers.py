@@ -243,12 +243,14 @@ async def prepare_and_join(page, p, callback, stopped, diagnostic=None, *, authe
     raise RuntimeError('execution_stopped')
 
 
-async def monitor(page, provider, duration, stopped, ffmpeg):
+async def monitor(page, provider, duration, stopped, ffmpeg, check_media=None):
     started = time.monotonic()
     missing_since = None
     while not stopped() and time.monotonic() - started < duration:
         if ffmpeg.poll() is not None:
             raise RuntimeError('recorder_exited')
+        if check_media is not None:
+            check_media()
         text = await body_text(page, ignore_captions=True)
         if ENDED.search(text):
             return 'meeting_ended'
