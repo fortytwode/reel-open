@@ -95,6 +95,11 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
             if process is recorder:
                 stopped.append('recorder')
 
+        async def wait_for_recording(process, _):
+            await sleep(1)
+            if process.poll() is not None:
+                raise RuntimeError("recorder_start_failed")
+
         def upload(root):
             stopped.append('upload')
             run.artifacts['system-audio.wav'] = {'size_bytes': 64, 'gcs_uri': 'gs://private/test/system-audio.wav'}
@@ -113,7 +118,7 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
              patch('worker.datetime', Clock), patch('worker.start_media', return_value=None), \
              patch('worker.start_recording', return_value=recorder) as start, \
              patch('worker.stop_process', side_effect=stop), patch('builtins.print'), \
-             patch('worker.asyncio.sleep', side_effect=sleep), \
+             patch('worker.wait_for_recording', side_effect=wait_for_recording), \
              patch('providers.prepare_and_join', side_effect=join), patch('providers.monitor', side_effect=monitor):
             result = await worker.execute(run, Path('/unused'))
         return result, run, joins, durations, start, stopped, browser

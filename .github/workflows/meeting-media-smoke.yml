@@ -1,0 +1,56 @@
+name: Meeting worker media smoke
+
+on:
+  pull_request:
+    paths:
+      - 'meeting-bot/**'
+      - '.github/workflows/meeting-media-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'meeting-bot/**'
+      - '.github/workflows/meeting-media-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  media:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: docker build -t reel-media-smoke meeting-bot
+      - name: Record synthetic media without a meeting
+        run: |
+          docker run --rm -i --network none --entrypoint python reel-media-smoke - <<'PY'
+          import asyncio
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import worker
+
+          async def smoke():
+              with tempfile.TemporaryDirectory() as directory:
+                  root = Path(directory)
+                  media = worker.start_media({'execution_id': 'media-smoke'})
+                  recorder = None
+                  try:
+                      recorder = worker.start_recording(root)
+                      progress = worker.RecordingProgress(root)
+                      await worker.wait_for_recording(recorder, progress)
+                      initial_sizes = progress.sizes.copy()
+                      await asyncio.sleep(4)
+                      progress.ensure_growing()
+                      assert all(after > before for before, after in zip(initial_sizes, progress.sizes))
+                  finally:
+                      worker.stop_process(recorder)
+                      worker.stop_media(media)
+                  for output in progress.files:
+                      subprocess.run(['ffmpeg', '-v', 'error', '-xerror', '-i', str(output),
+                                      '-f', 'null', '-'], check=True, timeout=30)
+
+          asyncio.run(smoke())
+          PY

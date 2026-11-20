@@ -15,6 +15,13 @@ const STATUSES = {
   failed: "Failed",
   cancelled: "Cancelled",
 };
+const CLOUD_FAILURES = {
+  startup: "Reel could not start cloud capture. If the call is still running, use the recorder to capture it manually.",
+  lobby_timeout: "The host did not admit Reel in time. Ask the host to admit Reel when it joins a future call.",
+  lobby_denied: "The meeting denied Reel entry. Ask the host whether recording is allowed before trying again.",
+  auth: "Reel could not sign in or needed a person to continue. Check the meeting’s sign-in and guest access requirements.",
+  capture_interrupted: "Cloud capture stopped unexpectedly. Check for a downloadable recording below.",
+};
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[c]));
@@ -224,7 +231,10 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const desktopJoin = eventDesktop && isMac && /^[a-f0-9]{64}$/i.test(String(event.id || ""))
         ? `<a class="mc-primary" href="reel://join-meeting?id=${encodeURIComponent(event.id)}">Open in Reel</a>`
         : eventDesktop && !isMac ? `<a href="/record?mode=meeting">Capture manually</a>` : "";
-      const detail = event.notion_status === "calendar_selection_required" ? `<span class="mc-status">${esc(event.detail)}</span>` : "";
+      const failure = event.status === "failed" && Object.hasOwn(CLOUD_FAILURES, event.failure_category)
+        ? CLOUD_FAILURES[event.failure_category] : "";
+      const detailText = failure || (event.notion_status === "calendar_selection_required" ? event.detail : "");
+      const detail = detailText ? `<span class="mc-status">${esc(detailText)}</span>` : "";
       return `<li class="mc-event"><div class="mc-event-copy"><strong>${esc(event.title || "Untitled meeting")}</strong><time>${esc(dateText(event.start))}</time><span class="mc-status mc-status-${esc(event.status || "unknown")}">${esc(statusText(event.status))}</span>${detail}<div class="mc-actions">${downloads}${notion}${desktopJoin}</div></div>${actionable ? `<div class="mc-event-actions"><label class="mc-check"><input type="checkbox" data-attest="${esc(event.id)}"> I confirm participants agreed to recording</label><button type="button" data-action="approve" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Approve and join</button><button type="button" data-action="decline" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Decline</button></div>` : ""}</li>`;
     }).join("")}</ul>`;
 

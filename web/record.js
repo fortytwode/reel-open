@@ -4,7 +4,7 @@
 // (link copied immediately, plays within seconds) / cancel / restart → video.mp4 assembled
 // locally → background upload. Recordings live in IndexedDB; an interrupted one is rebuilt on
 // the next visit.
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261119-products1";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-cloud-status";
 import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
 import * as C from "./reel/core.js?v=20261119-choice1";
 import * as store from "./reel/store.js?v=20261119-owner2";

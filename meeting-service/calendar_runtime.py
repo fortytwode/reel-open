@@ -17,6 +17,18 @@ from calendar_meetings import (CalendarMeetingError, CalendarMeetings, CalendarP
 
 
 PROCESSING_TERMINAL_STATES = {"delivered", "no_speech", "transcript_too_long", "review_required", "calendar_selection_required"}
+CLOUD_FAILURE_CODES = {
+    "startup": {"media_start_failed", "media_start_timeout", "display_unavailable", "browser_launch_failed",
+                "browser_launch_timeout", "context_create_failed", "context_create_timeout",
+                "driver_start_failed", "driver_start_timeout", "capture_deadline_expired"},
+    "lobby_timeout": {"admission_timeout", "admission_unconfirmed"},
+    "lobby_denied": {"denied"},
+    "auth": {"google_auth_profile_invalid", "google_auth_profile_unavailable", "google_auth_account_mismatch",
+             "google_auth_failed", "google_auth_timeout", "human_action_required"},
+    "capture_interrupted": {"media_stalled", "meeting_access_lost", "meeting_connection_lost", "recorder_exited",
+                            "recorder_start_failed", "recording_start_failed", "recording_start_timeout",
+                            "recording_monitor_failed", "recording_monitor_timeout", "execution_stopped"},
+}
 
 
 def digest(value):
@@ -338,6 +350,9 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                     public["notion_url"] = record.get("notion_url", "")
                     public["video_available"] = bool(record.get("artifacts", {}).get("recording.mp4"))
                     public["transcript_available"] = bool(record.get("artifacts", {}).get("transcript.txt"))
+                    if record.get("status") == "failed" and record.get("failure_category") in CLOUD_FAILURE_CODES:
+                        public["status"] = "failed"
+                        public["failure_category"] = record["failure_category"]
                     if record.get("processing_status") == "review_required":
                         public["detail"] = "Review the transcript; notes were not delivered."
                     elif record.get("processing_status") == "transcript_too_long":
@@ -790,8 +805,13 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                 if name in {"recording.mp4", "system-audio.wav"}
                 and isinstance(item, dict) and item.get("gcs_uri") == expected + name})
         if status == "failed":
-            # Provider details are fixed worker error codes, never page text or URL.
             record["failure"] = "Meeting entry or capture could not be confirmed"
+            detail = data.get("detail")
+            if isinstance(detail, str):
+                for category, codes in CLOUD_FAILURE_CODES.items():
+                    if detail in codes:
+                        record["failure_category"] = category
+                        break
         store.cas(key, record, generation)
         owner_key = "calendar/" + digest(record["owner_email"])
         for _ in range(3):

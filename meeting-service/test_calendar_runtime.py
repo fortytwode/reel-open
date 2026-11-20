@@ -835,6 +835,47 @@ def test_shared_capture_follower_sees_status_without_leader_private_receipts(set
     assert post(client, path + "/notion", {}).status_code == 400
 
 
+@pytest.mark.parametrize(("detail", "category"), [
+    ("media_start_failed", "startup"),
+    ("admission_timeout", "lobby_timeout"),
+    ("denied", "lobby_denied"),
+    ("google_auth_profile_unavailable", "auth"),
+    ("media_stalled", "capture_interrupted"),
+    ("https://private.example/meeting", None),
+    ({"unexpected": "callback value"}, None),
+])
+def test_cloud_failure_category_is_allowlisted_and_visible_only_to_the_owner(setup, monkeypatch, detail, category):
+    owners, _, select, dispatch, launches = shared_calendar(setup, monkeypatch)
+    client, store, _, _, _ = setup
+    for owner in owners[:2]:
+        dispatch(owner)
+    key = next(key for key in store.data if key.startswith("executions/"))
+    record, generation = store.load(key)
+    token = "callback-token"
+    record["callback_hash"] = hashlib.sha256(token.encode()).hexdigest()
+    store.cas(key, record, generation)
+    body = {"execution_id": record["execution_id"], "owner_id": record["owner_id"], "status": "failed",
+            "sequence": 1, "detail": detail}
+    headers = {"Authorization": "Bearer " + token}
+    assert client.post("/internal/bot/status", json=body, headers=headers).json["status"] == "failed"
+    replay = {**body, "detail": "denied", "sequence": 2}
+    assert client.post("/internal/bot/status", json=replay, headers=headers).json["status"] == "failed"
+    failed, _ = store.load(key)
+    assert failed.get("failure_category") == category
+    assert "detail" not in failed
+
+    select(owners[0])
+    leader = client.get("/calendar/settings", headers={"Authorization": "Bearer firebase"}).json["events"][0]
+    assert leader["status"] == "failed" and leader.get("failure_category") == category
+    assert "detail" not in leader
+    select(owners[1])
+    follower = client.get("/calendar/settings", headers={"Authorization": "Bearer firebase"}).json["events"][0]
+    assert follower["status"] == "failed"
+    assert follower["detail"] == "Meeting capture could not be completed for this invitation."
+    assert "failure_category" not in follower
+    assert len(launches) == 1
+
+
 @pytest.mark.parametrize("failure", ["record_creation", "payload_upload", "cloud_run_403"])
 def test_shared_capture_follower_sees_known_launch_failure(setup, monkeypatch, failure):
     import calendar_runtime as runtime
