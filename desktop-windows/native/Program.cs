@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -61,6 +63,47 @@ namespace ReelNative
             thread.Start();
         }
 
+        [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface DeviceEnumerator
+        {
+            [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IntPtr devices);
+            [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out AudioDevice device);
+        }
+
+        [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface AudioDevice
+        {
+            [PreserveSig] int Activate(ref Guid iid, uint context, IntPtr parameters, out IntPtr activated);
+            [PreserveSig] int OpenPropertyStore(uint access, out IntPtr properties);
+            [PreserveSig] int GetId(out IntPtr id);
+        }
+
+        private static string DefaultRenderEndpoint()
+        {
+            DeviceEnumerator enumerator = null;
+            AudioDevice device = null;
+            IntPtr endpointId = IntPtr.Zero;
+            try
+            {
+                var classId = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+                enumerator = (DeviceEnumerator)Activator.CreateInstance(Type.GetTypeFromCLSID(classId));
+                const int render = 0, console = 0; // Match Chromium WASAPI loopback.
+                if (enumerator.GetDefaultAudioEndpoint(render, console, out device) < 0 || device == null ||
+                    device.GetId(out endpointId) < 0 || endpointId == IntPtr.Zero) return null;
+                string value = Marshal.PtrToStringUni(endpointId);
+                if (String.IsNullOrEmpty(value)) return null;
+                using (var sha = SHA256.Create())
+                    return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(value))).Replace("-", "").ToLowerInvariant();
+            }
+            catch { return null; }
+            finally
+            {
+                if (endpointId != IntPtr.Zero) Marshal.FreeCoTaskMem(endpointId);
+                if (device != null) Marshal.ReleaseComObject(device);
+                if (enumerator != null) Marshal.ReleaseComObject(enumerator);
+            }
+        }
+
         private static void Handle(string line)
         {
             Dictionary<string, object> message;
@@ -72,6 +115,19 @@ namespace ReelNative
             if (!message.TryGetValue("v", out version) || !(version is int) || (int)version != 1 ||
                 id == null || !IdShape.IsMatch(id) || op == null)
             { Send(Response(id ?? "", false, "invalid_request")); return; }
+
+            if (op == "defaultRenderEndpoint")
+            {
+                if (!Keys(message, "v", "id", "op"))
+                { Send(Response(id, false, "invalid_request")); return; }
+                Worker(() => {
+                    string endpointId = DefaultRenderEndpoint();
+                    var response = Response(id, endpointId != null, endpointId == null ? "endpoint_unavailable" : "endpoint_available");
+                    if (endpointId != null) response["endpointId"] = endpointId;
+                    Send(response);
+                });
+                return;
+            }
 
             if (op == "openGoogleSignIn")
             {

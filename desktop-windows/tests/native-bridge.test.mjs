@@ -151,3 +151,31 @@ test('shutdown cancels and awaits a pending auth launch without touching browser
   await opening; await disposed;
   assert.equal(f.sent.length,2); assert.equal(f.child.killed,true);
 });
+
+test('default render endpoint returns only a bounded opaque ID or null', async () => {
+  const f = fixture();
+  const endpoint = f.bridge.defaultRenderEndpoint();
+  const request = f.sent[0];
+  assert.deepEqual(request, {v:1,id:request.id,op:'defaultRenderEndpoint'});
+  const endpointId = '9f'.repeat(32);
+  f.reply(request, {ok:true,state:'endpoint_available',endpointId});
+  assert.equal(await endpoint, endpointId);
+  const missing = f.bridge.defaultRenderEndpoint();
+  f.reply(f.sent[1], {ok:false,state:'endpoint_unavailable'});
+  assert.equal(await missing, null);
+  await f.bridge.dispose();
+});
+
+test('default render endpoint rejects raw device information and unexpected response fields', async () => {
+  for (const response of [
+    {ok:true,state:'endpoint_available',endpointId:'my raw endpoint'},
+    {ok:true,state:'endpoint_available'},
+    {ok:false,state:'endpoint_unavailable',endpointId:'9f'.repeat(32)},
+  ]) {
+    const f = fixture();
+    const result = f.bridge.defaultRenderEndpoint();
+    f.reply(f.sent[0], response);
+    await assert.rejects(result, /invalid response/i);
+    assert.equal(f.child.killed, true);
+  }
+});
