@@ -11,6 +11,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const outArg = process.argv.find(arg => arg.startsWith('--out='));
 const outDir = path.resolve(outArg ? outArg.slice(6) : path.join(here, 'adapter-out'));
 const abortNegative = process.argv.includes('--abort-negative');
+const longRun = process.argv.includes('--long');
+const captureMs = longRun ? 610_000 : 13_500;
+const maximumBytes = (longRun ? 300 : 20) * 1024 * 1024;
 const ownerUserID = 'synthetic-probe';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
@@ -94,11 +97,11 @@ async function run() {
     const handle = await recorder.start(argumentsForCapture);
     const captureWindows = BrowserWindow.getAllWindows().filter(window => !window.isDestroyed() && window !== fixtureWindow);
     if (captureWindows.length !== 1 || captureWindows[0].isVisible()) throw Error('Recorder was not one hidden window');
-    await sleep(Math.max(0, 13_500 - (Date.now() - beganAt)));
+    await sleep(Math.max(0, captureMs - (Date.now() - beganAt)));
     const recording = await recorder.stop(handle);
     const bytes = await readFile(recording.path);
     const segmentCount = fragments(bytes);
-    if (!recording.playable || segmentCount < 3 || bytes.length < 10_000 || bytes.length > 20 * 1024 * 1024
+    if (!recording.playable || segmentCount < 3 || bytes.length < 10_000 || bytes.length > maximumBytes
       || store.list(ownerUserID).length !== 1 || failures.length) throw Error('Real adapter did not save a complete local recording');
     return { ok: true, method: 'production-recorder-exact-source', hwnd: id, sourceId: exact[0].id,
       recording, bytes: bytes.length, segmentCount, recorderWindowHidden: true,
@@ -110,7 +113,7 @@ async function run() {
 }
 
 let finished = false;
-const watchdog = setTimeout(() => { void finish({ ok: false, error: 'Adapter probe timed out after 75 seconds' }); }, 75_000);
+const watchdog = setTimeout(() => { void finish({ ok: false, error: 'Adapter probe timed out' }); }, captureMs + 62_000);
 async function finish(result) {
   if (finished) return;
   finished = true; clearTimeout(watchdog);

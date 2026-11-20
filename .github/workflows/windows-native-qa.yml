@@ -1,0 +1,61 @@
+name: Windows native capture QA
+on:
+  push:
+    branches: [qa/windows-runtime]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.arch }}
+      - name: Confirm the runner can capture its desktop
+        shell: pwsh
+        run: |
+          $session = (Get-Process -Id $PID).SessionId
+          Write-Host "Windows session: $session"
+          if ($session -eq 0) { throw 'An interactive Windows session is required for desktop capture.' }
+      - run: npm --prefix desktop-windows/probe ci
+      - run: choco install ffmpeg --no-progress -y
+      - name: Run native capture and playback tests
+        shell: pwsh
+        run: |
+          $env:Path = "C:\ProgramData\chocolatey\bin;$env:Path"
+          ./desktop-windows/test-local.ps1
+      - name: Verify a ten-minute recording
+        shell: pwsh
+        run: |
+          $env:Path = "C:\ProgramData\chocolatey\bin;$env:Path"
+          $electron = (Resolve-Path desktop-windows/probe/node_modules/electron/dist/electron.exe).Path
+          $probe = (Resolve-Path desktop-windows/probe/adapter-main.mjs).Path
+          $out = Join-Path $env:RUNNER_TEMP 'reel-long-capture'
+          $process = Start-Process $electron -ArgumentList @("`"$probe`"", '--long', "`"--out=$out`"") -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode -ne 0) { throw "Capture probe exited $($process.ExitCode)" }
+          node desktop-windows/probe/adapter-verify.mjs --long "--out=$out"
+          if ($LASTEXITCODE -ne 0) { throw 'Recording verification failed.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capture-receipts-${{ matrix.arch }}
+          path: |
+            desktop-windows/probe/out/**/result.json
+            desktop-windows/probe/out/**/local-ci.json
+            ${{ runner.temp }}/reel-long-capture/result.json

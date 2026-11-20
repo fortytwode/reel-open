@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outArg = process.argv.find(arg => arg.startsWith('--out='));
 const outDir = path.resolve(outArg ? outArg.slice(6) : path.join(here, 'adapter-out'));
+const longRun = process.argv.includes('--long');
+const minimumSeconds = longRun ? 600 : 12;
+const maximumSeconds = longRun ? 620 : 20;
 const result = JSON.parse(await readFile(path.join(outDir, 'result.json'), 'utf8'));
 assert.equal(result.ok, true, JSON.stringify(result.error || result));
 assert.equal(result.method, 'production-recorder-exact-source');
@@ -15,17 +18,17 @@ assert.equal(result.recorderWindowHidden, true);
 assert.match(result.sourceId, /^window:\d+:[01]$/);
 assert.equal(result.sourceId.split(':')[1], result.hwnd);
 assert.equal(result.recording?.playable, true);
-assert.ok(result.recording.durationSeconds >= 12 && result.segmentCount >= 3);
+assert.ok(result.recording.durationSeconds >= minimumSeconds && result.segmentCount >= 3);
 const ownerHash = createHash('sha256').update('synthetic-probe').digest('hex');
 const recordingPath = path.resolve(result.recording.path);
 const sidecar = await readFile(recordingPath.replace(/\.mp4$/, '.pcm'));
-assert.ok(sidecar.length >= 12 * 16000 * 2 && sidecar.length <= 20 * 16000 * 2, 'Expected complete 16 kHz mono PCM sidecar');
+assert.ok(sidecar.length >= minimumSeconds * 16000 * 2 && sidecar.length <= maximumSeconds * 16000 * 2, 'Expected complete 16 kHz mono PCM sidecar');
 let energy = 0; for (let i = 0; i < sidecar.length; i += 2) energy += (sidecar.readInt16LE(i) / 32768) ** 2;
 assert.ok(Math.sqrt(energy / (sidecar.length / 2)) > 0.002, 'Expected audible synthetic sidecar audio');
 assert.equal(path.dirname(recordingPath), path.join(outDir, 'recordings', ownerHash));
 assert.equal(path.basename(recordingPath), result.recording.id + '.mp4');
 assert.equal((await stat(recordingPath)).size, result.bytes);
-assert.ok(result.bytes >= 10_000 && result.bytes <= 20 * 1024 * 1024);
+assert.ok(result.bytes >= 10_000 && result.bytes <= (longRun ? 300 : 20) * 1024 * 1024);
 
 function run(program, args) {
   const output = spawnSync(program, args, { encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 });
@@ -36,7 +39,7 @@ const probe = JSON.parse(run('ffprobe', ['-v', 'error', '-show_entries', 'stream
   '-of', 'json', recordingPath]).toString());
 assert.ok(probe.streams.some(stream => stream.codec_name === 'h264'));
 assert.ok(probe.streams.some(stream => stream.codec_name === 'aac'));
-assert.ok(Number(probe.format.duration) >= 12);
+assert.ok(Number(probe.format.duration) >= minimumSeconds);
 
 function pixels(seconds) {
   const rgb = run('ffmpeg', ['-v', 'error', '-ss', String(seconds), '-i', recordingPath,
@@ -74,4 +77,4 @@ function tone(seconds) {
 }
 console.log(JSON.stringify({ verified: true, sourceId: result.sourceId, fragments: result.segmentCount,
   bytes: result.bytes, durationSeconds: result.recording.durationSeconds,
-  earlyPixels: pixels(2), latePixels: pixels(11), earlyTone: tone(1), lateTone: tone(10) }));
+  earlyPixels: pixels(2), latePixels: pixels(minimumSeconds - 1), earlyTone: tone(1), lateTone: tone(minimumSeconds - 2) }));
