@@ -59,7 +59,7 @@ final class RecordingSession: @unchecked Sendable {
     private(set) var writer: SegmentedWriter!
     private let compositor = Compositor()
     private let overlayRenderer = OverlayRenderer()
-    private let renderQueue = DispatchQueue(label: "com.rocketshiphq.reel.render", qos: .userInteractive)
+    private let renderQueue = DispatchQueue(label: "\(Log.subsystem).render", qos: .userInteractive)
     private var timer: DispatchSourceTimer?
     private let lock = NSLock()
     private var clock = PauseClock()

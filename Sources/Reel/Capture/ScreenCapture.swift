@@ -13,8 +13,8 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
 
     private var stream: SCStream?
-    private let videoQueue = DispatchQueue(label: "com.rocketshiphq.reel.screen", qos: .userInteractive)
-    private let audioQueue = DispatchQueue(label: "com.rocketshiphq.reel.sysaudio", qos: .userInteractive)
+    private let videoQueue = DispatchQueue(label: "\(Log.subsystem).screen", qos: .userInteractive)
+    private let audioQueue = DispatchQueue(label: "\(Log.subsystem).sysaudio", qos: .userInteractive)
     private let lock = NSLock()
     private var latest: CVPixelBuffer?
     var onSystemAudio: ((CMSampleBuffer) -> Void)?

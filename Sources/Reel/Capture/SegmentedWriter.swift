@@ -17,7 +17,7 @@ final class SegmentedWriter: NSObject, AVAssetWriterDelegate, @unchecked Sendabl
     private let videoInput: AVAssetWriterInput
     let adaptor: AVAssetWriterInputPixelBufferAdaptor
     private let audioInput: AVAssetWriterInput?
-    private let queue = DispatchQueue(label: "com.rocketshiphq.reel.writer")
+    private let queue = DispatchQueue(label: "\(Log.subsystem).writer")
     private let logLock = NSLock()
     private var log = SegmentLog()
     private var writeError: Error?

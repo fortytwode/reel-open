@@ -10,9 +10,30 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 render = runpy.run_path(str(ROOT / "scripts/configure-organization.py"))["render"]
+export = runpy.run_path(str(ROOT / "scripts/export-open-source.py"))["export"]
 
 
 class OrganizationConfigurationTests(unittest.TestCase):
+    @unittest.skipUnless((ROOT / ".git").exists(), "source export requires a Git checkout")
+    def test_public_snapshot_contains_both_apps_and_notetaker_services(self):
+        with tempfile.TemporaryDirectory() as temp:
+            snapshot = Path(temp) / "source"
+            export("HEAD", snapshot)
+            web = snapshot / "web"
+            for page, manifest_name in (("record", "reel"), ("notetaker", "notetaker")):
+                self.assertTrue((web / f"{page}.html").is_file())
+                manifest = json.loads((web / f"{manifest_name}.webmanifest").read_text())
+                self.assertEqual(manifest["start_url"], f"/{page}")
+                for icon in manifest["icons"]:
+                    self.assertTrue((web / icon["src"].lstrip("/")).is_file())
+            for path in ("meeting-bot/browser_captions.py", "meeting-bot/captions.py",
+                         "meeting-service/speaker_alignment.py", "delivery-service/slack_recaps.py"):
+                with self.subTest(path=path):
+                    self.assertTrue((snapshot / path).is_file())
+            for path in ("organization.local.json", "web/organization.json",
+                         "desktop-windows/organization.json", ".reel"):
+                self.assertFalse((snapshot / path).exists())
+
     def test_second_organization_clients_rules_and_backend_match(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
