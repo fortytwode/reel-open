@@ -1,5 +1,5 @@
-import { isOrganizationEmail, loadAuth, FB_CDN, DOMAIN, CLOUD_CONFIG, EMU } from "./reel/firebase.js?v=20261118-orgstate1";
-import { organization, organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
+import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, FB_CDN, CLOUD_CONFIG, EMU } from "./reel/firebase.js?v=20261121-public-signup";
+import { organization, organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
 import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261105-parity2";
 
 import { displayedSharedTitle, resolveTitleRoom, saveSharedTitle, editSharedTitle, closeSharedTitleEditor } from "./reel/shared-title.js?v=20261105-parity2";
@@ -14,7 +14,7 @@ let participantMeetings = [], participantLoading = false, participantError = "",
 let note = null, noteLoading = false, noteError = "", noteLoadNumber = 0;
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
-const validUser = (u) => !!u && u.emailVerified && isOrganizationEmail(u.email);
+const validUser = (u) => !!u;
 const shareURL = (id) => viewerURL(id, organization);
 function message(text, error = false) { status.textContent = text; status.classList.toggle("error", error); status.hidden = !text; }
 function duration(seconds) { const value = Number(seconds); const t = Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0; return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; }
@@ -96,6 +96,10 @@ function updateView() {
   openManagement.clear();
   const recentView = isRecent();
   const meetingsView = isMeetings();
+  if (publicSignup && meetingsView) {
+    location.replace(organization.webBase + "/notetaker");
+    return;
+  }
   const folder = folders.find((f) => f.id === selectedFolder());
   const title = meetingsView ? "Meetings" : recentView ? "Recently viewed" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
   el("view-title").textContent = title;
@@ -110,7 +114,7 @@ function updateView() {
   document.title = `${title} · Reel`;
   for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
     const url = new URL(location.href); url.hash = id.slice(4) === "library" ? "library" : id.slice(4);
-    el(id).href = url.href;
+    el(id).href = publicSignup && id === "nav-meetings" ? organization.webBase + "/notetaker" : url.href;
     el(id).classList.toggle("active", selected);
     if (selected) el(id).setAttribute("aria-current", "page"); else el(id).removeAttribute("aria-current");
   }
@@ -332,7 +336,7 @@ function renderMeetings() {
 function renderNote() {
   const list = el("recordings");
   el("result-count").textContent = "";
-  if (!validUser(currentUser)) { message(currentUser ? `Use a verified ${DOMAIN} Google account to view meeting notes.` : `Sign in with your ${DOMAIN} Google account to see meeting notes.`); return; }
+  if (!validUser(currentUser)) { message(`Sign in with ${googleAccountLabel} to see meeting notes.`); return; }
   if (noteLoading) { message("Loading meeting notes…"); return; }
   if (noteError) { message(noteError, true); return; }
   if (!note) return;
@@ -351,7 +355,7 @@ function renderNote() {
   article.append(back, title, date, summaryHeading, summary, transcriptHeading, transcript); list.append(article);
 }
 async function loadNote() {
-  const id = selectedNote(); if (!id || !validUser(currentUser)) return;
+  const id = selectedNote(); if (publicSignup || !id || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++noteLoadNumber;
   note = null; noteError = ""; noteLoading = true; render();
   const current = () => number === noteLoadNumber && currentUser?.uid === uid && auth.currentUser?.uid === uid && selectedNote() === id;
@@ -366,7 +370,7 @@ async function loadNote() {
   } catch { if (current()) { noteLoading = false; noteError = "Couldn't load meeting notes. Check your connection and click Refresh."; render(); } }
 }
 async function loadParticipantMeetings() {
-  if (!validUser(currentUser)) return;
+  if (publicSignup || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++participantLoadNumber;
   participantLoading = true; participantError = ""; participantMeetings = []; render();
   const current = () => number === participantLoadNumber && currentUser?.uid === uid && auth.currentUser?.uid === uid;
@@ -395,7 +399,7 @@ function validNotionURL(value) {
   } catch { return null; }
 }
 async function loadMeetings() {
-  if (!validUser(currentUser)) return;
+  if (publicSignup || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++meetingLoadNumber;
   meetingError = ""; meetingLoading = true;
   if (isMeetings()) renderMeetings();
@@ -495,8 +499,7 @@ el("refresh").addEventListener("click", () => {
 el("sign-in").addEventListener("click", async () => {
   el("sign-in").disabled = true;
   try {
-    const provider = new am.GoogleAuthProvider(); provider.setCustomParameters({ hd: DOMAIN.slice(1), prompt: "select_account" });
-    await am.signInWithPopup(auth, provider);
+    await am.signInWithPopup(auth, googleSignInProvider(am));
   } catch (e) { message("Sign-in didn't finish. " + e.message, true); }
   finally { el("sign-in").disabled = false; }
 });
@@ -507,7 +510,7 @@ try {
   ({ auth, am } = session); fs = firestore;
   db = fs.getFirestore(auth.app, CLOUD_CONFIG.firestoreDatabase);
   if (EMU) fs.connectFirestoreEmulator(db, "127.0.0.1", 8080);
-  am.onAuthStateChanged(auth, (user) => {
+  observeReelAccount(am, auth, (user, candidate) => {
     ++accountNumber;
     closeSharedTitleEditor();
     openManagement.clear();
@@ -520,9 +523,9 @@ try {
     setLoading(validUser(user));
     el("result-count").textContent = isMeetings() ? "0 meetings" : "0 videos"; el("search").value = "";
     const allowed = validUser(user);
-    el("sign-in").hidden = !!user; el("sign-out").hidden = !user; el("refresh").hidden = !allowed; el("refresh").disabled = false;
+    el("sign-in").hidden = !!candidate; el("sign-out").hidden = !candidate; el("refresh").hidden = !allowed; el("refresh").disabled = false;
     el("search").disabled = !allowed; el("sort").disabled = !allowed; el("account").textContent = user?.email || "";
     if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else loadParticipantMeetings(); }
-    else message(user ? `Use a verified ${DOMAIN} Google account to view your library. Sign out to choose another account.` : isMeetings() ? `Sign in with your ${DOMAIN} Google account to see meeting details. Meetings recorded while signed out stay on that device and won't sync to this portal.` : `Sign in with your ${DOMAIN} Google account to see your recordings.`);
+    else message(candidate ? `Use ${googleAccountLabel} to view your library. Sign out to choose another account.` : isMeetings() ? `Sign in with ${googleAccountLabel} to see meeting details. Meetings recorded while signed out stay on that device and won't sync to this portal.` : `Sign in with ${googleAccountLabel} to see your recordings.`);
   });
 } catch (e) { setLoading(false); el("result-count").textContent = "Unavailable"; message("Couldn't connect to Reel. Reload this page to try again. " + e.message, true); }

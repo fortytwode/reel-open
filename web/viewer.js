@@ -4,8 +4,8 @@
 // Sources/ReelCore/ShareLinks.swift and the "Remote layout" in README.md.
 // All remote data is rendered with textContent only.
 
-import { isOrganizationEmail, BUCKET, FB_CDN, FIREBASE_CONFIG, EMU, STORAGE_ORIGIN, CLOUD_CONFIG } from "./reel/firebase.js?v=20261118-orgstate1";
-import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
+import { googleSignInProvider, observeReelAccount, BUCKET, FB_CDN, FIREBASE_CONFIG, EMU, STORAGE_ORIGIN, CLOUD_CONFIG } from "./reel/firebase.js?v=20261121-public-signup";
+import { organization, organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
 import { viewerURL } from "./reel/core.js?v=20261105-parity2";
 import { displayedSharedTitle, saveSharedTitle, editSharedTitle, closeSharedTitleEditor } from "./reel/shared-title.js?v=20261105-parity2";
 const viewOptions = new URLSearchParams(location.search);
@@ -514,7 +514,7 @@ function relock() {
 }
 
 async function boot() {
-  if (!CLOUD_CONFIG.allowedEmailDomain) { fatal("Cloud sharing is not configured", "Ask your organization for its recording link."); return; }
+  if (!organization) { fatal("Cloud sharing is not configured", "Ask the recording owner for the link."); return; }
   if (!id) { fatal("Video not found", "This link is not a valid Reel link."); return; }
   $("layout").hidden = false;
   let r;
@@ -622,7 +622,7 @@ async function startSocial(meta) {
 }
 function canRenameTitle() {
   const user = S.user;
-  return !!S.meta && !$("layout").hidden && !!user?.emailVerified && isOrganizationEmail(user.email) && S.roomData?.ownerUid === user.uid;
+  return !!S.meta && !$("layout").hidden && !!user && S.roomData?.ownerUid === user.uid;
 }
 function renderTitleAction() { $("rename-shared-title").hidden = embedded || !canRenameTitle(); }
 $("rename-shared-title").addEventListener("click", () => {
@@ -808,8 +808,7 @@ async function initAuth(app) {
       const b = el("button", null, "Sign in with Google to comment"); b.type = "button";
       b.addEventListener("click", async function () {
         showCommentMsg(""); S.authMsg = "";
-        const provider = new am.GoogleAuthProvider();
-        provider.setCustomParameters({ hd: CLOUD_CONFIG.allowedEmailDomain });
+        const provider = googleSignInProvider(am, {});
         try { await am.signInWithPopup(auth, provider); }
         catch (ex) { if (ex && ex.code !== "auth/popup-closed-by-user" && ex.code !== "auth/cancelled-popup-request") showCommentMsg("Sign-in failed. Try again."); }
       });
@@ -817,10 +816,10 @@ async function initAuth(app) {
     }
     renderComments();
   }
-  am.onAuthStateChanged(auth, function (user) {
+  observeReelAccount(am, auth, function (user, candidate) {
     ++S.authGeneration; closeSharedTitleEditor(); S.user = null; renderTitleAction();
-    if (user && (!isOrganizationEmail(user.email) || !user.emailVerified)) {
-      showCommentMsg("Only verified organization accounts can comment.");
+    if (!user && candidate) {
+      showCommentMsg(publicSignup ? "Sign in with a verified Google account to comment." : "Only verified organization accounts can comment.");
       am.signOut(auth).catch(function () {});
       return;
     }

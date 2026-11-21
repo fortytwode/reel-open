@@ -11,6 +11,8 @@ import wave
 
 from google.api_core.exceptions import NotFound, PreconditionFailed
 
+from reel_organization import public_account_access
+
 CHUNK_SECONDS = 300
 LEASE_SECONDS = 660
 
@@ -297,11 +299,13 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                     immutable_json(bucket, prefix + 'summary.json',
                                    lambda: {**summary, 'partial': True} if recovery else summary)
                     record['summary_available'] = True
-                    state_name = 'recovered' if recovery else 'processing'
+                    state_name = 'recovered' if recovery else ('private_notes_ready' if public_account_access() else 'processing')
                 else:
                     state_name = 'review_required'
             elif recovery:
                 raise ValueError('Invalid recovery processing step')
+            elif public_account_access():
+                raise ValueError('Organization delivery is unavailable')
             else:
                 transcript = immutable_json(bucket, prefix + 'transcript.json', lambda: (_ for _ in ()).throw(ValueError('Transcript unavailable')))
                 summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: (_ for _ in ()).throw(ValueError('Summary unavailable')))

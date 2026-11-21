@@ -1,11 +1,11 @@
-import { organization } from "./organization.js?v=20261118-orgstate1";
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-partial-recovery";
-import { isOrganizationEmail, loadAuth, DOMAIN, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
+import { organization, publicSignup } from "./organization.js?v=20261121-public-signup";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
+import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
 
 const el = id => document.getElementById(id);
 function showSection() {
-  const calendarOpen = location.hash === "#calendar" || location.hash.startsWith("#calendar-meeting=");
-  el("page-title").textContent = calendarOpen ? "Meeting calendar" : "Meeting notes";
+  const calendarOpen = publicSignup || location.hash === "#calendar" || location.hash.startsWith("#calendar-meeting=");
+  el("page-title").textContent = publicSignup ? "Meetings and notes" : calendarOpen ? "Meeting calendar" : "Meeting notes";
   el("notes").hidden = calendarOpen;
   el("meeting-calendar-panel").hidden = !calendarOpen;
   for (const [id, current] of [["notes-tab", !calendarOpen], ["calendar-tab", calendarOpen]]) {
@@ -15,10 +15,23 @@ function showSection() {
 }
 window.addEventListener("hashchange", showSection);
 showSection();
-el("mac-helper").hidden = !navigator.platform.startsWith("Mac");
+el("mac-helper").hidden = publicSignup || !navigator.platform.startsWith("Mac");
+const query = new URL(location.href);
+const calendarResult = publicSignup ? query.searchParams.get("calendar_oauth") : null;
+if (publicSignup) {
+  el("notes-tab").closest("nav").hidden = true;
+  const recorder = document.querySelector("[data-recorder]");
+  recorder.href = organization.webBase + "/record";
+  recorder.textContent = "Record manually";
+  if (calendarResult !== null) {
+    query.searchParams.delete("calendar_oauth");
+    history.replaceState(history.state, "", query);
+  }
+}
 let user = null, generation = 0, resolveAuth;
 const notesList = el("notes-list"), notesStatus = el("notes-status");
 async function loadNotes(selected, expectedGeneration) {
+  if (publicSignup) return;
   notesList.replaceChildren();
   if (!selected) { notesStatus.textContent = "Sign in to see your notes."; return; }
   notesStatus.textContent = "Loading notes…";
@@ -49,6 +62,7 @@ async function loadNotes(selected, expectedGeneration) {
 const authReady = new Promise(resolve => { resolveAuth = resolve; });
 const calendar = mountMeetingCalendar({
   container: el("meeting-calendar-panel"),
+  calendarResult,
   session: async () => {
     await authReady;
     const snapshot = sessionSnapshot(user), currentGeneration = generation;
@@ -57,13 +71,15 @@ const calendar = mountMeetingCalendar({
 });
 try {
   const { auth, am } = await loadAuth();
-  am.onAuthStateChanged(auth, u => {
-    if (u && (!u.emailVerified || !isOrganizationEmail(u.email))) {
-      el("auth-status").textContent = `Sign in with your ${DOMAIN.slice(1)} Google account.`;
+  observeReelAccount(am, auth, (u, candidate) => {
+    if (!u && candidate) {
+      el("auth-status").textContent = `Sign in with ${googleAccountLabel}.`;
       am.signOut(auth).catch(() => {});
-      u = null;
     } else el("auth-status").textContent = u ? "" : "Sign in to connect your calendar and view your notes.";
-    if (user?.uid !== u?.uid) generation++;
+    if (user?.uid !== u?.uid) {
+      generation++;
+      if (publicSignup) calendar.resetAccount();
+    }
     user = u;
     el("workspace").hidden = !u;
     el("user").textContent = u ? (u.displayName || u.email) : "";
@@ -74,9 +90,7 @@ try {
     calendar.refresh();
   });
   el("sign-in").addEventListener("click", async () => {
-    const provider = new am.GoogleAuthProvider();
-    provider.setCustomParameters({ hd: DOMAIN.slice(1), prompt: "select_account" });
-    try { await am.signInWithPopup(auth, provider); }
+    try { await am.signInWithPopup(auth, googleSignInProvider(am)); }
     catch (e) { if (!["auth/popup-closed-by-user", "auth/cancelled-popup-request"].includes(e?.code)) el("auth-status").textContent = "Sign-in failed. Try again."; }
   });
   el("sign-out").addEventListener("click", () => am.signOut(auth).catch(() => {}));

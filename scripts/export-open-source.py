@@ -26,6 +26,7 @@ Tests/test_organization_configuration.py
 deployment-adapter/README.md
 docs/meetings-calendar-contract.md
 docs/organization-configuration.md
+docs/public-signup.md
 docs/self-hosting.md
 firebase.json
 firebase/cors.json
@@ -102,6 +103,7 @@ meeting-service/build-context.sh
 meeting-service/calendar_meetings.py
 meeting-service/calendar_runtime.py
 meeting-service/cloud_processing.py
+meeting-service/public_calendar_oauth.py
 meeting-service/requirements.txt
 meeting-service/speaker_alignment.py
 meeting-service/speech.py

@@ -46,7 +46,7 @@ service cloud.firestore {
     function validRoomBinding(room, data) {
       return room.matches('^r2[0-9a-f]{38}(-[0-9a-f]{32})?$')
         ? matchesRecordingOwner(room[0:40], data.recordingNonce)
-        : !('recordingNonce' in data);
+        : true /* __ALLOW_LEGACY_WRITES__ */ && !('recordingNonce' in data);
     }
 
     // The library is private to its owner, including listing. Public viewers still use

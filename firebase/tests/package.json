@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Offline browser unit tests and Firestore/Storage permission tests for Reel. Emulator tests use demo-reel and require Java 21+.",
   "scripts": {
-    "test": "cd ../.. && node firebase/tests/configure-emulator.mjs && firebase emulators:exec --config .reel/test-fixture/firebase.local.json --only firestore,storage --project demo-reel \"node --test firebase/tests/storage.rules.test.mjs firebase/tests/firestore.rules.test.mjs\"",
+    "test": "cd ../.. && node firebase/tests/configure-emulator.mjs && firebase emulators:exec --config .reel/test-fixture/firebase.local.json --only firestore,storage --project demo-reel \"node --test firebase/tests/storage.rules.test.mjs firebase/tests/firestore.rules.test.mjs\" && firebase emulators:exec --config .reel/test-fixture/firebase.local.json --only firestore,storage --project demo-reel-public \"node --test firebase/tests/public.rules.test.mjs\"",
     "recorder-smoke": "cd ../.. && node firebase/tests/configure-emulator.mjs && firebase emulators:exec --config .reel/test-fixture/firebase.local.json --only auth,firestore,storage --project demo-reel \"node firebase/tests/recorder-smoke.mjs --emulators\"",
     "unit": "node --test core.test.mjs fmp4.test.mjs cloud.test.mjs capture.test.mjs audio.test.mjs encoder-worker.test.mjs publisher-transcription.test.mjs publisher-access-race.test.mjs shared-title.test.mjs meeting-transcription.test.mjs cloud-meeting-speech.test.mjs meeting-delivery.test.mjs organization.test.mjs meeting-policy.test.mjs",
     "notetaker-browser": "node --test notetaker.browser.test.mjs"

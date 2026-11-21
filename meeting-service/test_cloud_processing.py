@@ -583,6 +583,20 @@ def test_failed_capture_requires_recovery_and_never_delivers_recovered_notes(set
     assert deliveries == []
 
 
+def test_public_cloud_capture_finishes_private_notes_without_delivery(setup, monkeypatch):
+    store, bucket, record, _, _, deliveries = setup
+    monkeypatch.setenv('REEL_ACCOUNT_ACCESS', 'public')
+    monkeypatch.delenv('DELIVERY_RECEIPTS_BUCKET', raising=False)
+    assert run(setup) == 'processing'
+    assert run(setup) == 'processing'
+    assert run(setup) == 'private_notes_ready'
+    assert run(setup) == 'private_notes_ready'
+    saved, _ = store.load('executions/' + record['execution_id'])
+    assert saved['artifacts']['summary.json'] is True
+    assert json.loads(bucket.objects[record['output_prefix'] + 'summary.json'][0])['has_meeting_content'] is True
+    assert deliveries == []
+
+
 def test_recovery_with_missing_media_reports_audio_unavailable(setup):
     store, _, record, _, _, deliveries = setup
     key = 'executions/' + record['execution_id']

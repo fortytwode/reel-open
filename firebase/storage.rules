@@ -50,8 +50,9 @@ service firebase.storage {
       return isReelUser()
         && request.resource.size < 5 * 1024 * 1024 * 1024
         && request.resource.metadata.ownerUid == request.auth.uid
-        && (!id.matches('^r2[0-9a-f]{38}$')
-            || matchesRecordingOwner(id, request.resource.metadata.recordingNonce))
+        && (id.matches('^r2[0-9a-f]{38}$')
+            ? matchesRecordingOwner(id, request.resource.metadata.recordingNonce)
+            : true /* __ALLOW_LEGACY_WRITES__ */)
         && (!('expiresAt' in request.resource.metadata)
             || request.resource.metadata.expiresAt.matches('^[0-9]{1,15}$'));
     }

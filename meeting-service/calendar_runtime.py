@@ -10,13 +10,15 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
-from flask import jsonify, request
+from flask import jsonify, redirect, request
 
 from calendar_meetings import (CalendarMeetingError, CalendarMeetings, CalendarProviderError, GoogleCalendarFactory,
                                canonical_join_url, cloud_capture_enabled, cloud_requires_calendar, effective_cloud_providers)
+from reel_organization import public_account_access, trusted_origins
 
 
-PROCESSING_TERMINAL_STATES = {"delivered", "no_speech", "transcript_too_long", "review_required", "calendar_selection_required", "recovered", "audio_unavailable"}
+PROCESSING_TERMINAL_STATES = {"delivered", "private_notes_ready", "no_speech", "transcript_too_long", "review_required",
+                              "calendar_selection_required", "recovered", "audio_unavailable"}
 RECOVERY_ASSETS = {"system-audio.wav", "recording.mp4"}
 CLOUD_FAILURE_CODES = {
     "startup": {"media_start_failed", "media_start_timeout", "display_unavailable", "browser_launch_failed",
@@ -186,6 +188,11 @@ def bind_captions_generation(record):
     return 0
 
 
+def public_grant_id(store, owner, uid):
+    from public_calendar_oauth import PublicCalendarOAuth
+    return PublicCalendarOAuth(store).grant_id(owner, uid) if PublicCalendarOAuth.configured() else None
+
+
 class BotDispatcher:
     def __init__(self, store, clock=None):
         self.store = store
@@ -206,13 +213,20 @@ class BotDispatcher:
                     or any(current.get(key) != saved.get(key) for key in
                            ("calendar_id", "join_url", "ical_uid", "organizer_email", "participant_roster"))):
                 return False
+            if public_account_access():
+                expected = current.get("reservation_grant")
+                if (not expected or selection.get("grant_id") != expected
+                        or selection.get("scope_revision") != current.get("reservation_scope")
+                        or public_grant_id(self.store, owner, selection.get("owner_uid")) != expected):
+                    return False
             if calendar_backed:
                 return selection.get("enabled") is True and current.get("calendar_id") in selection.get("calendar_ids", [])
             return not cloud_requires_calendar()
 
         if not entry_allowed(saved, config):
             raise CalendarMeetingError("Cloud capture requires an approved calendar occurrence")
-        shared = bool(calendar_backed and saved.get("ical_uid") and saved.get("organizer_email") and saved.get("participant_roster"))
+        shared = bool(not public_account_access() and calendar_backed and saved.get("ical_uid")
+                      and saved.get("organizer_email") and saved.get("participant_roster"))
         identity = (state or {}).get("identity") or (state or {}).get("config") or {}
         owner_uid = identity.get("owner_uid")
         if not owner_uid:
@@ -319,18 +333,34 @@ class BotDispatcher:
 
 def install_calendar_routes(app, claims_for_request, store_for_request, deliver_notes,
                             *, calendar_factory=None, scheduler=None, dispatcher_factory=None):
+    def public_oauth():
+        from public_calendar_oauth import PublicCalendarOAuth
+        return PublicCalendarOAuth(store_for_request())
+
     def service():
         store = store_for_request()
-        return CalendarMeetings(store, calendar_factory or GoogleCalendarFactory(), scheduler or CloudTasks(),
-                                dispatcher_factory(store) if dispatcher_factory else BotDispatcher(store))
+        factory = calendar_factory or (
+            (lambda owner, ids, uid: public_oauth().factory(owner, ids, uid))
+            if public_account_access() else GoogleCalendarFactory()
+        )
+        return CalendarMeetings(store, factory, scheduler or CloudTasks(),
+                                dispatcher_factory(store) if dispatcher_factory else BotDispatcher(store),
+                                grant_reader=lambda owner, uid: public_grant_id(store, owner, uid))
 
     def capabilities(claims):
         providers = effective_cloud_providers(claims["email"].lower())
-        return {"calendar": bool(os.getenv("CALENDAR_TASK_QUEUE") and
+        result = {"calendar": bool(os.getenv("CALENDAR_TASK_QUEUE") and
                                   (calendar_factory or os.path.isfile(os.getenv("GOOGLE_CALENDAR_CREDENTIALS", "")))),
                 "bot": (not cloud_requires_calendar() or bool(providers)) and bool(os.getenv("BOT_JOB_NAME") and os.getenv("BOT_BUCKET")),
                 "provider": os.getenv("MEETING_CAPTURE_PROVIDER", "independent"),
                 "cloud_providers": providers if os.getenv("BOT_JOB_NAME") and os.getenv("BOT_BUCKET") else []}
+        if public_account_access():
+            from public_calendar_oauth import PublicCalendarOAuth
+            result["calendar_oauth"] = bool(os.getenv("CALENDAR_TASK_QUEUE") and PublicCalendarOAuth.configured())
+            result["calendar_authorized"] = result["calendar_oauth"] and public_oauth().connected(claims)
+            result["calendar"] = result["calendar_authorized"]
+            result["bot"] = result["bot"] and result["calendar"]
+        return result
 
     def owner_state(claims):
         return store_for_request().load("calendar/" + digest(claims["email"].lower()))
@@ -341,16 +371,39 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         CalendarMeetings._verify_binding(state or {}, claims)
         return claims
 
-    def public_events(claims):
+    def public_events(claims, settings, history_before=None):
         state, _ = owner_state(claims)
         state = state or {}
         config = state.get("config") or {}
-        selected = set(config.get("calendar_ids", [])) if config.get("enabled") is True else set()
+        selected = set(config.get("calendar_ids", [])) if settings and settings.get("enabled") else set()
         events = (event for event in state.get("events", {}).values() if event.get("attempted")
                   or event.get("execution_id") or event.get("status") == "completed"
                   or (not event.get("calendar_excluded") and event.get("calendar_id") in selected))
+        next_history_before = None
+        if public_account_access():
+            def order(event):
+                return event.get("start", ""), event["id"]
+
+            visible = sorted(events, key=order)
+            now = datetime.now(UTC).isoformat()
+            def current(event):
+                return event.get("end", "").replace("Z", "+00:00") >= now
+
+            upcoming = [e for e in visible if current(e)]
+            history = [e for e in reversed(visible) if e.get("execution_id") and not current(e)]
+            if history_before is not None:
+                cursor = state.get("events", {}).get(history_before)
+                if not cursor or not cursor.get("execution_id"):
+                    raise CalendarMeetingError("Invalid recording history cursor")
+                history = [e for e in history if order(e) < order(cursor)]
+                upcoming = []
+            if len(history) > 25:
+                next_history_before = history[24]["id"]
+            visible = upcoming[:50] + history[:25]
+        else:
+            visible = sorted(events, key=lambda e: e.get("start", ""))[-100:]
         result = []
-        for event in sorted(events, key=lambda e: e.get("start", ""))[-100:]:
+        for event in visible:
             public = CalendarMeetings._public(event, claims["email"].lower())
             if event.get("launch_uncertain"):
                 public["detail"] = "Entry request outcome is unconfirmed; a duplicate request is blocked."
@@ -358,9 +411,11 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                 record, _ = store_for_request().load("executions/" + event["execution_id"])
                 if record and record.get("owner_id") == claims["sub"]:
                     public["notion_status"] = record.get("notion_status", "pending")
-                    public["notion_url"] = record.get("notion_url", "")
+                    public["notion_url"] = "" if public_account_access() else record.get("notion_url", "")
                     public["video_available"] = bool(record.get("artifacts", {}).get("recording.mp4"))
                     public["transcript_available"] = bool(record.get("artifacts", {}).get("transcript.txt"))
+                    if public_account_access():
+                        public["summary_available"] = bool(record.get("artifacts", {}).get("summary.json"))
                     if record.get("status") == "failed" and record.get("failure_category") in CLOUD_FAILURE_CODES:
                         public["status"] = "failed"
                         public["failure_category"] = record["failure_category"]
@@ -377,7 +432,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                         public["detail"] = "Transcript exceeds the summary limit; download the full transcript."
                     elif record.get("processing_status") == "calendar_selection_required":
                         public["detail"] = "Select the meeting calendar and retry to send notes. The recording and transcript are available."
-            elif event.get("shared_claim"):
+            elif event.get("shared_claim") and not public_account_access():
                 claim, _ = store_for_request().load(event["shared_claim"])
                 record, _ = store_for_request().load("executions/" + claim["execution_id"]) if claim else (None, 0)
                 if record:
@@ -407,7 +462,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                     }.get((record or {}).get("processing_status"),
                           "Meeting capture is complete for this invitation. Notes are being prepared.")
             result.append(public)
-        return result
+        return result, next_history_before
 
     def event_execution(claims, event_id):
         state, _ = owner_state(claims)
@@ -417,6 +472,11 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         record, _ = store_for_request().load("executions/" + event["execution_id"])
         if not record or record.get("owner_id") != claims["sub"]:
             raise CalendarMeetingError("Meeting capture is unavailable")
+        if public_account_access():
+            expected_prefix = "reel-meetings/bot/" + digest(claims["sub"]) + "/" + event["execution_id"] + "/"
+            if (record.get("event_id") != event_id or record.get("output_bucket") != os.getenv("BOT_BUCKET")
+                    or record.get("output_prefix") != expected_prefix):
+                raise CalendarMeetingError("Meeting capture is unavailable")
         return record
 
     def payload():
@@ -457,7 +517,35 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
     def private_calendar_response(response):
         if request.path.startswith(("/calendar", "/internal")):
             response.headers["Cache-Control"] = "no-store"
+        if request.path.startswith("/calendar/oauth/"):
+            response.headers["Referrer-Policy"] = "no-referrer"
         return response
+
+    @app.route("/calendar/oauth/start", methods=["POST", "OPTIONS"])
+    def start_calendar_oauth():
+        if not public_account_access():
+            return jsonify(error="Calendar authorization is unavailable"), 404
+        if request.method == "OPTIONS":
+            return "", 204
+        origin = request.headers.get("Origin", "")
+        if not origin.startswith("https://") or origin not in trusted_origins():
+            return jsonify(error="Origin not allowed"), 403
+        claims = calendar_claims()
+        return jsonify(authorization_url=public_oauth().begin(claims, origin))
+
+    @app.post("/calendar/oauth/callback")
+    def complete_calendar_oauth():
+        if not public_account_access():
+            return jsonify(error="Calendar authorization is unavailable"), 404
+        fields = ("state", "code", "error", "iss")
+        if any(len(request.form.getlist(field)) > 1 for field in fields):
+            raise CalendarMeetingError("Invalid Calendar authorization response")
+        if request.form.get("iss", "https://accounts.google.com") != "https://accounts.google.com":
+            raise CalendarMeetingError("Invalid Calendar authorization response")
+        origin, success = public_oauth().complete(request.form.get("state"), request.form.get("code"), request.form.get("error"))
+        if not origin.startswith("https://") or origin not in trusted_origins():
+            raise CalendarMeetingError("Invalid Calendar authorization response")
+        return redirect(origin + "/notetaker?calendar_oauth=" + ("connected" if success else "error"), code=303)
 
     @app.route("/calendar/settings", methods=["GET", "POST", "OPTIONS"])
     @app.route("/calendar/sources", methods=["GET", "OPTIONS"])
@@ -479,16 +567,22 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             data = payload()
             if request.path.endswith("/disconnect"):
                 core.disconnect(claims)
+                if public_account_access():
+                    from public_calendar_oauth import PublicCalendarOAuth
+                    if PublicCalendarOAuth.configured():
+                        public_oauth().disconnect(claims)
             elif request.path.endswith("/connect"):
                 if not capabilities(claims)["calendar"]:
                     return jsonify(error="Calendar scheduling is not configured"), 503
                 ids = data.get("calendar_ids")
                 if not isinstance(ids, list) or not 1 <= len(ids) <= 25 or any(not isinstance(item, str) for item in ids):
                     raise CalendarMeetingError("Explicitly select one or more Google calendars")
+                grant_id = (public_grant_id(store_for_request(), claims["email"].lower(), claims["sub"])
+                            if public_account_access() else None)
                 available = {source["id"] for source in core.sources(claims)}
                 if any(item not in available for item in ids):
-                    raise CalendarMeetingError("Select calendars available to your work account")
-                core.connect(claims, ids)
+                    raise CalendarMeetingError("Select calendars available to your Google account")
+                core.connect(claims, ids, grant_id=grant_id)
                 try:
                     core.sync(claims)
                 except CalendarProviderError:
@@ -498,9 +592,14 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             else:
                 core.set_consent_mode(claims, data.get("consent_mode"), data.get("participant_consent_attested") is True,
                                       data.get("scope_revision"))
+        settings = core.settings(claims)
         if request.path.endswith("/meetings"):
-            return jsonify(meetings=public_events(claims))
-        result = {"config": core.settings(claims), "events": public_events(claims), "capabilities": capabilities(claims)}
+            events, cursor = public_events(claims, settings, request.args.get("history_before"))
+            return jsonify(meetings=events, next_history_before=cursor) if public_account_access() else jsonify(meetings=events)
+        events, cursor = public_events(claims, settings)
+        result = {"config": settings, "events": events, "capabilities": capabilities(claims)}
+        if public_account_access():
+            result["next_history_before"] = cursor
         if sync_error:
             result["sync_error"] = sync_error
         return jsonify(result)
@@ -588,6 +687,8 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             enqueue_processing(store, execution, CloudTasks())
             return jsonify(status=current.get("processing_status", "processing")), 202
         if action == "notion":
+            if public_account_access():
+                return jsonify(error="Organization delivery is unavailable"), 404
             record = event_execution(claims, event_id)
             if record.get("status") != "completed" or not record.get("audio_generation"):
                 raise CalendarMeetingError("Recording audio is not ready")
@@ -628,7 +729,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         record = event_execution(claims, event_id)
         name = {"video": "recording.mp4", "transcript": "transcript.txt", "summary": "summary.json"}.get(kind)
         if (not name or not record.get("artifacts", {}).get(name)
-                or (kind == "summary" and record.get("recover_partial") is not True)):
+                or (kind == "summary" and not public_account_access() and record.get("recover_partial") is not True)):
             return jsonify(error="Artifact is not available"), 404
         import google.auth
         from google.auth.transport.requests import Request

@@ -762,3 +762,52 @@ def test_google_owner_filter_preserves_existing_teams_rollout(monkeypatch):
     assert effective_cloud_providers("outsider@rocketshiphq.com") == []
     monkeypatch.delenv("MEETING_GOOGLE_CLOUD_OWNER_EMAILS")
     assert effective_cloud_providers("yakub@rocketshiphq.com") == ["teams", "google_meet"]
+
+
+def test_public_grant_replacement_invalidates_inflight_calendar_check(setup, monkeypatch):
+    service, _, calendar, scheduler, joined, clock = setup
+    monkeypatch.setenv("REEL_ACCOUNT_ACCESS", "public")
+    monkeypatch.setenv("MEETING_CLOUD_PROVIDERS", "google_meet")
+    claims = dict(CLAIMS, firebase={"sign_in_provider": "google.com", "identities": {"google.com": ["google-1"]}})
+    grant = {"current": "first"}
+    service.grant_reader = lambda owner, uid: grant["current"]
+    service.calendar_factory = lambda owner, ids, uid: calendar
+    settings = service.connect(claims, ["primary"], grant_id="first")
+    assert "grant_id" not in settings
+    service.set_consent_mode(claims, "approved", participant_consent_attested=True,
+                             scope_revision=settings["scope_revision"])
+    service.sync(claims)
+    task = scheduler.tasks[0]
+    clock["now"] += timedelta(minutes=10)
+    calendar.on_list = lambda: grant.update(current="second")
+    service.dispatch_callback(claims, task["event"], task["start"], task["generation"])
+    assert joined == []
+    assert service.settings(claims)["enabled"] is False
+    with pytest.raises(CalendarMeetingError, match="authorization changed"):
+        service.connect(claims, ["primary"], grant_id="first")
+    replacement = service.connect(claims, ["primary"], grant_id="second")
+    assert replacement["consent_mode"] == "ask"
+    assert replacement["scope_revision"] != settings["scope_revision"]
+
+
+
+def test_public_reserved_join_cannot_use_new_calendar_approval(setup, monkeypatch):
+    service, _, _, _, joined, _ = setup
+    monkeypatch.setenv("REEL_ACCOUNT_ACCESS", "public")
+    monkeypatch.setenv("MEETING_CLOUD_PROVIDERS", "google_meet")
+    claims = dict(CLAIMS, firebase={"sign_in_provider": "google.com", "identities": {"google.com": ["google-1"]}})
+    grant = {"current": "first"}
+    service.grant_reader = lambda owner, uid: grant["current"]
+    service.connect(claims, ["primary"], grant_id="first")
+    occurrence = normalize_event("primary", event(), OWNER, NOW)
+
+    def reserve(state):
+        state["events"][occurrence["id"]] = occurrence
+        return True, service._reserve_occurrence(state, occurrence)
+
+    reserved = service._mutate(OWNER, reserve)
+    grant["current"] = "second"
+    service.connect(claims, ["primary"], grant_id="second")
+    service._dispatch(OWNER, reserved)
+    assert joined == []
+    assert service._current_status(OWNER, occurrence["id"]) == "failed"

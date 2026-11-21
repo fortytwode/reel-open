@@ -11,7 +11,7 @@ import time
 from unicodedata import category
 from uuid import NAMESPACE_URL, uuid5
 
-from reel_organization import _safe_url, firebase_project, is_internal_email, notes_base_url, trusted_origins
+from reel_organization import _safe_url, firebase_project, is_internal_email, notes_base_url, public_account_access, trusted_origins
 
 if __package__:
     from .slack_recaps import SlackError, SlackRecaps
@@ -501,6 +501,8 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
         return response
 
     def owner():
+        if public_account_access():
+            raise DeliveryError('Organization delivery is unavailable')
         authorization = request.headers.get('Authorization', '')
         project = firebase_project()
         if not project or not authorization.startswith('Bearer '):
