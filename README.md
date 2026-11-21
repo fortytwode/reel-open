@@ -32,7 +32,7 @@ Use the [self-hosting guide](docs/self-hosting.md) to set up hosting, Google sig
 
 Cloud auto-join supports Google Meet and Teams links on Google Calendar. The deployment’s Google Workspace administrator grants the calendar service account delegated read access. Each verified member then signs in, selects calendars and sets recording consent.
 
-The supplied configuration serves one organization per deployment. A shared service for personal Google accounts or customers across multiple domains needs per-user Calendar OAuth and tenant-aware authorization throughout the service.
+For a hosted service serving customers across domains, use the isolated [public signup deployment](docs/public-signup.md). The web products support verified Google accounts and Notetaker requests each account's Calendar permission separately.
 
 ## Run checks
 

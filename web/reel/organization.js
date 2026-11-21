@@ -16,7 +16,11 @@ export function internalEmail(email, domain) {
 }
 
 export function organizationConfig(value) {
-  if (!validDomain(value?.allowedEmailDomain) || !validStorageBucket(value.bucket) || !validDomain(value.authDomain)
+  const accountAccess = value?.accountAccess;
+  if (accountAccess !== undefined && accountAccess !== "organization" && accountAccess !== "public") return null;
+  const domain = value?.allowedEmailDomain;
+  const validAccountDomain = accountAccess === "public" && (domain === undefined || domain === "") || validDomain(domain);
+  if (!validAccountDomain || !validStorageBucket(value.bucket) || !validDomain(value.authDomain)
       || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(value.projectID ?? "")
       || !/^[A-Za-z0-9_-]+$/.test(value.apiKey ?? "") || !/^[A-Za-z0-9_-]+$/.test(value.viewerPath ?? "")
       || !/^(?:[a-z][a-z0-9-]*|\(default\))$/.test(value.firestoreDatabase ?? "")) return null;

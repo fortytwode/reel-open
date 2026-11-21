@@ -77,6 +77,31 @@ class OrganizationConfigurationTests(unittest.TestCase):
             for key in optional[2:]:
                 self.assertEqual(client[key], "https://unconfigured.invalid")
 
+    def test_public_signup_renders_google_account_rules_without_organization_integrations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = json.loads((ROOT / "organization.example.json").read_text())
+            for key in ("allowedEmailDomain", "deliveryServiceURL", "speechServiceURL",
+                        "googleClientID", "googleDesktopClientId"):
+                config.pop(key)
+            config["accountAccess"] = "public"
+            source = root / "input.json"
+            source.write_text(json.dumps(config))
+            render(source, root=root)
+            web = json.loads((root / "web/organization.json").read_text())
+            self.assertEqual(web["accountAccess"], "public")
+            self.assertEqual(web["allowedEmailDomain"], "")
+            backend = (root / ".reel/backend.env").read_text()
+            self.assertIn("REEL_ACCOUNT_ACCESS=public", backend)
+            self.assertNotIn("REEL_MEETING_ALLOWED_DOMAIN", backend)
+            for name in ("firestore.rules", "storage.rules"):
+                rules = (root / ".reel/firebase" / name).read_text()
+                self.assertIn("request.auth.token.firebase.sign_in_provider == 'google.com'", rules)
+                self.assertNotIn("__ALLOW_LEGACY_WRITES__", rules)
+            source.write_text(json.dumps(config | {"deliveryServiceURL": "https://delivery.example.org"}))
+            with self.assertRaises(ValueError):
+                render(source, root=root)
+
     def test_firebase_deployment_selects_configured_database_and_rule_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

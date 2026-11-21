@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 from uuid import uuid4
 
-from reel_organization import meeting_domain_enabled, meeting_owner_allowed
+from reel_organization import meeting_domain_enabled, meeting_owner_allowed, public_account_access
 
 
 class CalendarMeetingError(Exception):
@@ -30,8 +30,8 @@ class CalendarSelectionChanged(CalendarMeetingError):
 def owner_identity(claims):
     """Accept only a server-verified identity authorized by deployment policy."""
     email = claims.get("email", "").strip().lower() if isinstance(claims, dict) else ""
-    if (not claims or claims.get("email_verified") is not True or not claims.get("sub")
-            or not meeting_owner_allowed(email)):
+    allowed = re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", email) if public_account_access() else meeting_owner_allowed(email)
+    if (not claims or claims.get("email_verified") is not True or not claims.get("sub") or not allowed):
         raise CalendarMeetingError("Owner identity is not authorized")
     return email
 
@@ -98,7 +98,7 @@ def effective_cloud_providers(owner):
 
 
 def cloud_requires_calendar():
-    return os.getenv("MEETING_CAPTURE_PROVIDER") == "desktop" or meeting_domain_enabled()
+    return public_account_access() or os.getenv("MEETING_CAPTURE_PROVIDER") == "desktop" or meeting_domain_enabled()
 
 
 def cloud_capture_enabled(owner, join_url):
@@ -273,10 +273,11 @@ class CalendarMeetings:
     STATUSES = {"scheduled", "awaiting_consent", "dispatching", "requesting_entry",
                 "awaiting_admission", "joined", "recording", "completed", "failed", "cancelled"}
 
-    def __init__(self, store, calendar_factory, task_scheduler, bot_dispatcher, clock=None):
+    def __init__(self, store, calendar_factory, task_scheduler, bot_dispatcher, clock=None, *, grant_reader=None):
         self.store, self.calendar_factory = store, calendar_factory
         self.task_scheduler, self.bot_dispatcher = task_scheduler, bot_dispatcher
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.grant_reader = grant_reader
 
     def _key(self, owner):
         return "calendar/" + hashlib.sha256(owner.lower().encode()).hexdigest()
@@ -287,6 +288,21 @@ class CalendarMeetings:
 
     def _save(self, owner, state, generation):
         return self.store.cas(self._key(owner), state, generation)
+
+    def _calendar_client(self, owner, calendar_ids, owner_uid):
+        if public_account_access():
+            return self.calendar_factory(owner, calendar_ids, owner_uid)
+        return self.calendar_factory(owner, calendar_ids)
+
+    def grant_active(self, owner, config):
+        if not public_account_access():
+            return True
+        expected = config.get("grant_id")
+        return bool(expected and self.grant_reader and self.grant_reader(owner, config.get("owner_uid")) == expected)
+
+    @staticmethod
+    def _public_settings(config):
+        return {k: v for k, v in config.items() if k not in {"owner_uid", "grant_id"}}
 
     def _mutate(self, owner, callback):
         for _ in range(5):
@@ -301,7 +317,7 @@ class CalendarMeetings:
                 if _ == 4:
                     raise
 
-    def connect(self, claims, calendar_ids):
+    def connect(self, claims, calendar_ids, *, grant_id=None):
         owner = owner_identity(claims)
         if not isinstance(calendar_ids, list) or not calendar_ids or len(calendar_ids) > 25:
             raise CalendarMeetingError("Explicitly select one or more calendars")
@@ -312,12 +328,21 @@ class CalendarMeetings:
             old = state.get("config") or {}
             self._verify_binding(state, claims)
             same_scope = old.get("enabled") is True and set(old.get("calendar_ids", [])) == set(ids)
+            if public_account_access():
+                selection = {"owner_uid": claims["sub"], "grant_id": grant_id}
+                if not self.grant_active(owner, selection):
+                    raise CalendarSelectionChanged("Calendar authorization changed. Connect again.")
+                same_scope = same_scope and old.get("grant_id") == grant_id
             state["config"] = {"enabled": True, "calendar_ids": ids, "owner_uid": claims["sub"],
                 "consent_mode": old.get("consent_mode", "ask") if same_scope else "ask",
                 "scope_revision": old.get("scope_revision", "legacy") if same_scope else uuid4().hex}
+            if public_account_access():
+                state["config"]["grant_id"] = grant_id
+                if not same_scope:
+                    self._cancel_excluded(state, ())
             state["identity"] = {"owner_email": owner, "owner_uid": claims["sub"]}
             self._cancel_excluded(state, ids)
-            return True, {k: v for k, v in state["config"].items() if k != "owner_uid"}
+            return True, self._public_settings(state["config"])
         return self._mutate(owner, save)
 
     @staticmethod
@@ -332,7 +357,7 @@ class CalendarMeetings:
         state, _ = self._load(owner)
         self._verify_binding(state, claims)
         existing = (state.get("config") or {}).get("calendar_ids", [])
-        client = self.calendar_factory(owner, [])
+        client = self._calendar_client(owner, [], claims["sub"])
         sources = {}
         for raw in client.list_calendars():
             identifier = raw.get("id")
@@ -362,7 +387,7 @@ class CalendarMeetings:
         def save(state):
             self._verify_binding(state, claims)
             config = state.get("config")
-            if not config or config.get("enabled") is not True:
+            if not config or config.get("enabled") is not True or not self.grant_active(owner, config):
                 raise CalendarMeetingError("Connect calendars before changing consent settings")
             if mode == "approved" and scope_revision != config.get("scope_revision", "legacy"):
                 raise CalendarSelectionChanged("Refresh calendar settings and confirm consent for the current selection")
@@ -371,10 +396,16 @@ class CalendarMeetings:
         return self._mutate(owner, save)
 
     def settings(self, claims):
-        state, _ = self._load(owner_identity(claims))
+        owner = owner_identity(claims)
+        state, _ = self._load(owner)
         self._verify_binding(state, claims)
         config = state.get("config")
-        return {"scope_revision": "legacy", **{k: v for k, v in config.items() if k != "owner_uid"}} if config else None
+        if not config:
+            return None
+        settings = {"scope_revision": "legacy", **self._public_settings(config)}
+        if not self.grant_active(owner, config):
+            settings.update(enabled=False, consent_mode="ask")
+        return settings
 
     def disconnect(self, claims):
         owner = owner_identity(claims)
@@ -393,9 +424,9 @@ class CalendarMeetings:
         state, _ = self._load(owner)
         self._verify_binding(state, claims)
         config = state.get("config")
-        if not config or not config.get("enabled") or not config.get("calendar_ids"):
+        if not config or not config.get("enabled") or not config.get("calendar_ids") or not self.grant_active(owner, config):
             raise CalendarMeetingError("Connect and select calendars before syncing")
-        client = self.calendar_factory(owner, list(config["calendar_ids"]))
+        client = self._calendar_client(owner, list(config["calendar_ids"]), claims["sub"])
         now = _now(self.clock())
         horizon = now + timedelta(hours=48)
         fetched, inaccessible = {}, set()
@@ -414,7 +445,8 @@ class CalendarMeetings:
             latest_config = current.get("config") or {}
             if (latest_config.get("enabled") is not True or latest_config.get("scope_revision") != config.get("scope_revision")
                     or latest_config.get("calendar_ids") != config["calendar_ids"]
-                    or latest_config.get("owner_uid") != config.get("owner_uid")):
+                    or latest_config.get("owner_uid") != config.get("owner_uid")
+                    or not self.grant_active(owner, latest_config)):
                 raise CalendarSelectionChanged("Calendar selection changed during sync")
             self._cancel_excluded(current, set(config["calendar_ids"]) - inaccessible)
             scheduled = []
@@ -423,7 +455,7 @@ class CalendarMeetings:
             prune_before = now - timedelta(days=30)
             for identity, old in list(existing.items()):
                 end = _parse_time({"dateTime": old.get("end", "")})
-                if end and end < prune_before:
+                if end and end < prune_before and not (public_account_access() and old.get("execution_id")):
                     del existing[identity]
             for identity, old in list(existing.items()):
                 if old.get("calendar_id") in config["calendar_ids"] and _parse_time({"dateTime": old["start"]}) <= horizon:
@@ -532,7 +564,9 @@ class CalendarMeetings:
             if not event or event.get("status") != "awaiting_consent":
                 raise CalendarMeetingError("This meeting is no longer awaiting consent")
             if (not latest_config.get("enabled") or event.get("calendar_id") not in latest_config.get("calendar_ids", [])
-                    or latest_config.get("consent_mode") != "ask"):
+                    or latest_config.get("consent_mode") != "ask"
+                    or latest_config.get("scope_revision") != config.get("scope_revision")
+                    or not self.grant_active(owner, latest_config)):
                 raise CalendarMeetingError("Calendar settings changed before approval")
             if not cloud_capture_enabled(owner, event.get("join_url")):
                 raise CalendarMeetingError("Open Reel on your computer for desktop capture")
@@ -589,6 +623,9 @@ class CalendarMeetings:
                     event.update(status="cancelled", join_url="", passcode="")
                     return True, None
                 return False, None
+            if (latest_config.get("scope_revision") != config.get("scope_revision")
+                    or not self.grant_active(owner, latest_config)):
+                return False, None
             if not cloud_capture_enabled(owner, event.get("join_url")):
                 return False, None
             if any(event.get(key) != target.get(key) for key in
@@ -630,6 +667,9 @@ class CalendarMeetings:
             event["status"] = "awaiting_consent"
             return None
         event.update(status="dispatching", attempted=True)
+        if public_account_access():
+            config = state["config"]
+            event.update(reservation_grant=config["grant_id"], reservation_scope=config["scope_revision"])
         for other in siblings:
             if other.get("status") in {"scheduled", "awaiting_consent"}:
                 other.update(status="cancelled", join_url="", passcode="")
@@ -645,10 +685,12 @@ class CalendarMeetings:
         calendar_id = target.get("calendar_id")
         if not config.get("enabled") or calendar_id not in config.get("calendar_ids", []):
             return False
-        client = self.calendar_factory(owner, list(config["calendar_ids"]))
+        if not self.grant_active(owner, config):
+            return None
         horizon = now + timedelta(hours=48)
         time_min = now - timedelta(minutes=10)
         try:
+            client = self._calendar_client(owner, list(config["calendar_ids"]), config.get("owner_uid"))
             for raw in client.list_events(calendar_id, time_min.isoformat(), horizon.isoformat()):
                 normalized = normalize_event(calendar_id, raw, owner, now)
                 if (normalized and normalized["id"] == target.get("id")
@@ -688,6 +730,10 @@ class CalendarMeetings:
                 self._mutate(owner, lambda latest: self._cancel_event(latest, event["id"], event["occurrence_start"], event.get("task_generation")))
             return
         try:
+            if public_account_access() and (current.get("reservation_scope") != config.get("scope_revision")
+                    or current.get("reservation_grant") != config.get("grant_id")
+                    or not self.grant_active(owner, config)):
+                raise CalendarMeetingError("Meeting approval was revoked")
             result = self.bot_dispatcher(owner, {k: event[k] for k in ("id", "title", "start", "end", "attendees", "join_url", "passcode")})
             if isinstance(result, dict):
                 requested = result.get("status")

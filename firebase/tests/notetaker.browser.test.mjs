@@ -247,3 +247,158 @@ test('failed cloud recording recovery keeps its failed status and offers private
     assert.equal(await calendar.getByRole('link', { name: 'Open Notion notes' }).count(), 0);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
+
+test('public Google signup connects Calendar separately and isolates Recorder data between accounts', async () => {
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const page = await browser.newPage();
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const example = JSON.parse(await readFile(new URL('../../organization.example.json', import.meta.url), 'utf8'));
+    await page.addInitScript(() => {
+      window.fixtureScheduleMessages = [];
+      addEventListener('message', event => {
+        if (event.data?.type === 'REEL_MEETING_SCHEDULE') window.fixtureScheduleMessages.push(event.data);
+      });
+    });
+    await page.route('**/organization.json', route => route.fulfill({
+      json: { ...example, accountAccess: 'public', allowedEmailDomain: '', webBase: origin },
+    }));
+    await page.route('https://www.gstatic.com/firebasejs/**/firebase-app.js', route => route.fulfill({
+      contentType: 'text/javascript', body: 'export function initializeApp() { return {}; }',
+    }));
+    await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js', route => route.fulfill({
+      contentType: 'text/javascript', body: `
+        const auth = {};
+        export function getAuth() { return auth; }
+        export function onAuthStateChanged(_, callback) {
+          window.setFakeUser = (uid, provider = 'google.com') => {
+            auth.currentUser = uid ? { uid, email: uid + '@gmail.com', emailVerified: true,
+              getIdToken: async () => 'token-' + uid, getIdTokenResult: async () => ({signInProvider: provider}) } : null;
+            if (uid) sessionStorage.setItem('fixtureUser', uid);
+            else sessionStorage.removeItem('fixtureUser');
+            callback(auth.currentUser);
+          };
+          window.setFakeUser(sessionStorage.getItem('fixtureUser'));
+        }
+        export function signOut() { window.setFakeUser(null); }
+        export class GoogleAuthProvider { setCustomParameters(parameters) { window.fixtureGoogleParameters = parameters; } }
+        export function signInWithPopup() { window.setFakeUser('outside'); }`,
+    }));
+    const headers = { 'access-control-allow-origin': origin, 'access-control-allow-headers': 'authorization,content-type',
+      'access-control-allow-methods': 'GET,POST' };
+    await page.route('https://firestore.googleapis.com/**', route => route.fulfill({ json: {}, headers }));
+    const requests = [];
+    let authorized = false, selected = false;
+    const event = { id: 'a'.repeat(64), title: 'Outside account notes', start: '2026-11-19T12:00:00Z',
+      status: 'completed', capture_provider: 'cloud', transcript_available: true, summary_available: true };
+    await page.route('https://accounts.google.com/o/oauth2/v2/auth?**', async route => {
+      authorized = true;
+      await route.fulfill({ status: 302, headers: { location: origin + '/notetaker?calendar_oauth=connected' } });
+    });
+    await page.route('https://meetings.northwind.example/calendar/**', async route => {
+      const request = route.request();
+      if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
+      assert.equal(request.headers().authorization, 'Bearer token-outside');
+      const path = new URL(request.url()).pathname;
+      requests.push(path);
+      if (path.endsWith('/oauth/start')) {
+        assert.equal(request.method(), 'POST');
+        assert.deepEqual(request.postDataJSON(), {});
+        return route.fulfill({
+          json: { authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=fixture' }, headers,
+        });
+      }
+      if (path.endsWith('/sources')) return route.fulfill({
+        json: { sources: [{ id: 'primary', title: 'My calendar', primary: true }] }, headers,
+      });
+      if (path === '/calendar/connect') {
+        assert.deepEqual(request.postDataJSON(), { calendar_ids: ['primary'] });
+        selected = true;
+      }
+      if (path === '/calendar/disconnect') { authorized = false; selected = false; }
+      return route.fulfill({ json: path === '/calendar/settings' ? {
+        capabilities: { calendar: authorized, bot: true, calendar_oauth: true, calendar_authorized: authorized },
+        config: selected ? { enabled: true, calendar_ids: ['primary'], consent_mode: 'ask' } : null,
+        events: selected ? [event] : [],
+      } : { meetings: [] }, headers });
+    });
+    let legacyDeliveryCalls = 0;
+    await page.route('https://delivery.northwind.example/**', route => {
+      legacyDeliveryCalls++;
+      return route.fulfill({ status: 403, headers });
+    });
+
+    await page.goto(origin + '/notetaker');
+    const signIn = page.getByRole('button', { name: 'Sign in with Google' });
+    await signIn.waitFor();
+    await page.evaluate(() => window.setFakeUser('blocked', 'password'));
+    await page.waitForFunction(() => !sessionStorage.getItem('fixtureUser'));
+    assert.equal(await page.locator('#workspace').isVisible(), false);
+    await signIn.click();
+    await page.getByRole('button', { name: 'Connect Google Calendar' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => window.fixtureGoogleParameters), { prompt: 'select_account' });
+    assert.equal(requests.includes('/calendar/sources'), false);
+    await page.getByRole('button', { name: 'Connect Google Calendar' }).click();
+    await page.getByRole('button', { name: 'Choose Google calendars' }).click();
+    assert.equal(requests.filter(path => path === '/calendar/settings').length > 0, true);
+    assert.equal(requests.includes('/calendar/connect'), false);
+    assert.equal(new URL(page.url()).search, '');
+    await page.getByRole('checkbox', { name: 'My calendar (primary)' }).check();
+    await page.getByRole('button', { name: 'Save selected calendars' }).click();
+    await page.getByRole('button', { name: 'Download notes' }).waitFor();
+    await page.getByRole('button', { name: 'Reconnect Google Calendar' }).waitFor();
+    assert.equal(await page.locator('[data-field="consent"]').inputValue(), 'ask');
+    assert.equal(await page.getByRole('button', { name: 'Send notes to Notion' }).count(), 0);
+    assert.deepEqual(await page.evaluate(() => window.fixtureScheduleMessages), []);
+    await page.getByRole('button', { name: 'Disconnect calendar' }).click();
+    await page.getByRole('button', { name: 'Connect Google Calendar' }).waitFor();
+
+    await page.goto(origin + '/record?mode=meeting');
+    await page.getByRole('button', { name: 'Start recording' }).waitFor();
+    await page.locator('#sign-out').waitFor();
+    await page.evaluate(async () => {
+      const { library, C, publisher, store } = window.__reel;
+      window.fixtureResumed = [];
+      publisher.publish = (row, { expectedOwnerUID } = {}) => {
+        window.fixtureResumed.push([row.recordingOwnerUID, expectedOwnerUID]);
+        return Promise.resolve(true);
+      };
+      for (const uid of ['outside', 'other']) {
+        const row = C.newRecording({ title: `Video for ${uid}`, createdAt: new Date(), upload: 'localOnly' });
+        row.recordingNonce = C.newRecordingNonce();
+        row.shareID = await C.ownerShareID(uid, row.recordingNonce);
+        row.recordingOwnerUID = uid;
+        row.captureState = 'finalizing';
+        row.transcriptStatus = 'none';
+        await library.update(row);
+        await store.putFile(row.id, C.File.video, new Blob(['fixture'], {type: 'video/mp4'}));
+        const pending = {...row, id: crypto.randomUUID(), title: `Pending for ${uid}`, captureState: 'complete', upload: 'pending'};
+        pending.recordingNonce = C.newRecordingNonce();
+        pending.shareID = await C.ownerShareID(uid, pending.recordingNonce);
+        await library.update(pending);
+      }
+    });
+    await page.evaluate(() => window.setFakeUser('outside'));
+    await page.getByRole('button', { name: 'Video for outside' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Video for other' }).count(), 0);
+    await page.waitForFunction(() => window.fixtureResumed.length > 0);
+    assert.deepEqual(await page.evaluate(() => window.fixtureResumed), [['outside', 'outside']]);
+    const captureStates = () => page.evaluate(() => Object.fromEntries(window.__reel.library.list()
+      .filter(row => row.title.startsWith('Video for')).map(row => [row.recordingOwnerUID, row.captureState])));
+    assert.deepEqual(await captureStates(), { outside: 'recovered', other: 'finalizing' });
+    await page.evaluate(() => window.setFakeUser('other'));
+    await page.getByRole('button', { name: 'Video for other' }).waitFor();
+    await page.waitForFunction(() => window.fixtureResumed.length > 1);
+    assert.deepEqual(await page.evaluate(() => window.fixtureResumed), [['outside', 'outside'], ['other', 'other']]);
+    assert.deepEqual(await captureStates(), { outside: 'recovered', other: 'recovered' });
+    assert.equal(await page.getByRole('button', { name: 'Video for outside' }).count(), 0);
+    await page.locator('#sign-out').click();
+    await page.locator('#sign-in').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Video for other' }).count(), 0);
+    assert.equal(legacyDeliveryCalls, 0);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});

@@ -41,18 +41,29 @@ def valid_storage_bucket(value):
 
 def render(source, storage_fragment=None, root=ROOT):
     config = json.loads(source.read_text(encoding="utf-8"))
-    patterns = {"allowedEmailDomain": HOST, "projectID": r"[a-z][a-z0-9-]{4,28}[a-z0-9]",
+    access = config.get("accountAccess", "organization")
+    if access not in ("organization", "public"):
+        raise ValueError("invalid accountAccess")
+    is_public = access == "public"
+    patterns = {"allowedEmailDomain": rf"(?:{HOST})?" if is_public else HOST,
+                "projectID": r"[a-z][a-z0-9-]{4,28}[a-z0-9]",
                 "apiKey": r"[A-Za-z0-9_-]+", "authDomain": HOST,
                 "firestoreDatabase": r"(?:[a-z][a-z0-9-]*|\(default\))",
                 "viewerPath": r"[A-Za-z0-9_-]+"}
-    client = {}
+    client = {"accountAccess": "public"} if is_public else {}
     if not valid_storage_bucket(config.get("bucket")):
         raise ValueError("invalid bucket")
     client["bucket"] = config["bucket"]
     for key, pattern in patterns.items():
-        if not isinstance(config.get(key), str) or not re.fullmatch(pattern, config[key]) or len(config[key]) > 253:
+        value = config.get(key, "" if is_public and key == "allowedEmailDomain" else None)
+        if not isinstance(value, str) or not re.fullmatch(pattern, value) or len(value) > 253:
             raise ValueError(f"invalid {key}")
-        client[key] = config[key]
+        client[key] = value
+    if is_public and any(config.get(key) for key in
+                         ("googleClientID", "googleDesktopClientId", "deliveryServiceURL", "speechServiceURL")):
+        raise ValueError("public signup uses the browser clients and private cloud notes")
+    if is_public and storage_fragment:
+        raise ValueError("public signup requires a dedicated storage bucket")
     for key in ("googleClientID", "googleDesktopClientId"):
         value = config.get(key, "")
         if not isinstance(value, str) or (value and not re.fullmatch(OAUTH, value)):
@@ -72,6 +83,9 @@ def render(source, storage_fragment=None, root=ROOT):
     env = {"REEL_ORGANIZATION_DOMAIN": client["allowedEmailDomain"], "REEL_FIREBASE_PROJECT": client["projectID"],
            "REEL_MEETING_ALLOWED_DOMAIN": client["allowedEmailDomain"],
            "REEL_ALLOWED_ORIGINS": ",".join(origins), "REEL_NOTES_BASE_URL": notes}
+    if is_public:
+        env["REEL_ACCOUNT_ACCESS"] = "public"
+        del env["REEL_MEETING_ALLOWED_DOMAIN"]
     rules = {}
     # DNS labels contain only letters, digits and internal hyphens. Quote every dot in RE2.
     domain_pattern = client["allowedEmailDomain"].replace(".", "[.]")
@@ -81,7 +95,10 @@ def render(source, storage_fragment=None, root=ROOT):
         if template.count(marker) != 1:
             raise ValueError(f"missing domain predicate in {name}")
         predicate = r"request.auth.token.email.lower().matches('^[^@\\s<>]+@" + domain_pattern + "$')"
-        rules[name] = template.replace(marker, predicate)
+        if is_public:
+            predicate = "request.auth.token.firebase.sign_in_provider == 'google.com'"
+        rules[name] = template.replace(marker, predicate).replace(
+            "true /* __ALLOW_LEGACY_WRITES__ */", "false" if is_public else "true")
     fragment = storage_fragment.read_text(encoding="utf-8") if storage_fragment else ""
     rules["storage.rules"] = rules["storage.rules"].replace("// __ADDITIONAL_STORAGE_RULES__", fragment)
     cors = json.loads((ROOT / "firebase/cors.json").read_text(encoding="utf-8"))

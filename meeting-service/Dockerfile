@@ -8,7 +8,7 @@ RUN python -m pip install --no-cache-dir --require-hashes --only-binary=:all: -r
     && python -m pip check
 COPY reel_organization.py PROVENANCE ./
 COPY deployment-adapter/ ./
-COPY meeting-service/app.py meeting-service/speech.py meeting-service/calendar_meetings.py meeting-service/calendar_runtime.py meeting-service/cloud_processing.py meeting-service/speaker_alignment.py ./
+COPY meeting-service/app.py meeting-service/speech.py meeting-service/calendar_meetings.py meeting-service/calendar_runtime.py meeting-service/public_calendar_oauth.py meeting-service/cloud_processing.py meeting-service/speaker_alignment.py ./
 COPY canonical_delivery/ ./canonical_delivery/
 EXPOSE 8080
 CMD exec gunicorn --bind :${PORT} --workers 1 --threads 1 --timeout 600 app:app

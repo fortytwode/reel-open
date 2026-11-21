@@ -3,8 +3,8 @@
 // rules. Keep in sync with Sources/ReelCore/ShareLinks.swift (CloudConfig.default).
 import { CLOUD } from "./core.js?v=20261110-delivery1";
 
-import { organization } from "../organization.js?v=20261118-orgstate1";
-import { internalEmail } from "./organization.js?v=20261118-orgstate1";
+import { organization, publicSignup } from "../organization.js?v=20261121-public-signup";
+import { internalEmail } from "./organization.js?v=20261121-public-signup";
 
 const deployment = { ...CLOUD, ...organization };
 export const BUCKET = deployment.bucket;
@@ -18,6 +18,31 @@ export const FIREBASE_CONFIG = {
   storageBucket: BUCKET,
 };
 export const DOMAIN = "@" + deployment.allowedEmailDomain;
+export const googleAccountLabel = publicSignup ? "a verified Google account" : `your ${deployment.allowedEmailDomain} Google account`;
+
+export function googleSignInProvider(am, parameters = { prompt: "select_account" }) {
+  const provider = new am.GoogleAuthProvider();
+  provider.setCustomParameters(publicSignup ? parameters : { ...parameters, hd: deployment.allowedEmailDomain });
+  return provider;
+}
+
+/** Only use the verified Google session in public deployments. The backend independently verifies the token. */
+export function observeReelAccount(am, auth, receive) {
+  let generation = 0;
+  return am.onAuthStateChanged(auth, candidate => {
+    const expected = ++generation;
+    if (!candidate) return receive(null);
+    if (!publicSignup) return receive(candidate.emailVerified && isOrganizationEmail(candidate.email) ? candidate : null, candidate);
+    // Clear the previous account before awaiting this session's token.
+    receive(null);
+    if (!candidate.emailVerified || !candidate.email) return receive(null, candidate);
+    Promise.resolve().then(() => candidate.getIdTokenResult()).then(result => {
+      if (expected === generation) receive(result?.signInProvider === "google.com" ? candidate : null, candidate);
+    }, () => {
+      if (expected === generation) receive(null, candidate);
+    });
+  });
+}
 
 // Local emulators, only when served from localhost with ?emulator=1 (tests).
 export const EMU = typeof location !== "undefined" &&

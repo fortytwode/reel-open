@@ -4,7 +4,7 @@
 // and plays within seconds. Then video.mp4 (assembled locally from the segments), the thumbnail
 // and meta are uploaded in the background. Same remote layout as the Mac app.
 import * as C from "./core.js?v=20261119-owner2";
-import * as store from "./store.js?v=20261119-owner2";
+import * as store from "./store.js?v=20261121-public-signup";
 import { StorageClient, FirestoreClient, SegmentUploader, CloudError, concurrently } from "./cloud.js?v=20261119-owner2";
 import { remux, parseInit, fragmentDuration } from "./fmp4.js";
 
@@ -143,7 +143,7 @@ export class Publisher {
         await this.uploadMeta({ ...r, transcriptStatus: "pending" }, "ready", this.storage(s, r), this.owner(s));
         await this.firestore(s).upsertLibraryEntry(r);
         this.stopToPlayable.set(id, (Date.now() - stoppedAt) / 1000);
-        this.ui.notify("Video ready", r.title, C.shareURL(r, this.cfg));
+        if (s.isCurrent?.() !== false) this.ui.notify("Video ready", r.title, C.shareURL(r, this.cfg));
         return true;
       } catch (e) {
         console.error("Finishing live upload failed:", e);
@@ -157,13 +157,15 @@ export class Publisher {
   // ---------------------------------------------------------------- local finalize + recovery
 
   /** Segments → video.mp4 (progressive), duration; marks capture complete (or recovered). */
-  async finalizeLocal(id, log, recovered = false) {
+  async finalizeLocal(id, log, recovered = false, isCurrent = () => true) {
     const row = await store.getRow(id);
     const init = await store.getBytes(id, C.File.initSegment);
     const segs = await store.segmentBlobs(id, log);
     const mp4 = remux(init, segs, row.codecs);
+    if (!isCurrent()) return null;
     await store.putFile(id, C.File.video, new Blob([mp4], { type: "video/mp4" }));
     const hasThumbnail = !!(await store.getFile(id, C.File.thumbnail));
+    if (!isCurrent()) return null;
     // Live publishing can finish during those writes; preserve its latest playback/upload state.
     const r = this.library.get(id);
     r.durationSeconds = Math.round(C.SegmentLog.totalDuration(log) * 1000) / 1000;
@@ -174,9 +176,11 @@ export class Publisher {
   }
 
   /** Launch-time crash recovery (Recovery.swift): rebuild unfinished recordings from their segments. */
-  async recover() {
+  async recover({ include = () => true, isCurrent = () => true, autoPublish = true, expectedOwnerUID = null } = {}) {
     const out = { recovered: [], discarded: [], failed: {} };
     for (const r of this.library.list()) {
+      if (!isCurrent()) break;
+      if (!include(r)) continue;
       if (r.captureState !== "recording" && r.captureState !== "finalizing") continue;
       if (await isRecordingElsewhere(r.id)) continue;            // still recording in another tab
       try {
@@ -191,19 +195,25 @@ export class Publisher {
         }
         const hasVideo = files.includes(C.File.video);
         const plan = C.recoveryPlan(r.captureState, hasVideo, log.hasInit && !!row.codecs, log.segments.length);
+        if (!isCurrent()) break;
         if (plan === "none") continue;
         if (plan === "discard") { await this.delete(r); out.discarded.push(r.id); continue; }
-        if (plan === "rebuildFromSegments") { log.ended = true; await this.finalizeLocal(r.id, log, true); }
+        if (plan === "rebuildFromSegments") {
+          log.ended = true;
+          if (!await this.finalizeLocal(r.id, log, true, isCurrent)) break;
+        }
         else { const d = this.library.get(r.id); d.captureState = "recovered"; await this.library.update(d); }
         const saved = this.library.get(r.id);
-        if (C.automaticCloudAllowed(saved) && this.settings().autoUpload && saved.upload !== "localOnly") this.publish(saved, { copyLink: false });
+        if (autoPublish && isCurrent() && C.automaticCloudAllowed(saved) && this.settings().autoUpload && saved.upload !== "localOnly") {
+          this.publish(saved, { copyLink: false, expectedOwnerUID });
+        }
         out.recovered.push(r.id);
       } catch (e) {
         out.failed[r.id] = e.message;
         console.error("Recovery failed", r.folderName, e);
       }
     }
-    if (out.recovered.length) {
+    if (isCurrent() && out.recovered.length) {
       const n = out.recovered.length;
       this.ui.toast(`Recovered ${n} interrupted recording${n === 1 ? "" : "s"}`);
     }
@@ -280,7 +290,7 @@ export class Publisher {
     const playable = r.playback.hls || r.playback.mp4;
     // Keep transcript polling active until this pass uploads its final transcript files.
     await this.uploadMeta({ ...r, transcriptStatus: "pending" }, allowMeetingShare ? "processing" : (playable ? "ready" : "processing"), storage, owner);
-    if (copyLink && !playable && !allowMeetingShare) this.ui.copy(C.shareURL(r, this.cfg));
+    if (copyLink && !playable && !allowMeetingShare && s.isCurrent?.() !== false) this.ui.copy(C.shareURL(r, this.cfg));
     await this.firestore(s).ensureRoom(C.recordingRoom(r), r.createdAt, r.access.expiresAt, 0, r.recordingNonce).catch(() => {});
 
     // HLS copy (open recordings only; protected ones are served as MP4).
@@ -472,13 +482,16 @@ export class Publisher {
     if (r.upload === "uploaded" && C.automaticCloudAllowed(r)) await this.publish(r);
   }
 
-  async refreshViews(r) {
+  async refreshViews(r, expectedOwnerUID = null) {
     if (r.upload !== "uploaded" || C.isMeeting(r)) return;
     const s = await this.session();
-    if (!s) return;
+    if (!s || (expectedOwnerUID && (s.uid !== expectedOwnerUID || s.isCurrent?.() === false))) return;
     const views = await this.firestore(s).views(C.recordingRoom(r)).catch(() => null);
     const cur = this.library.get(r.id);
-    if (cur && views != null && cur.viewCount !== views) { cur.viewCount = views; await this.library.update(cur); }
+    if (cur && views != null && cur.viewCount !== views && (!expectedOwnerUID || s.isCurrent?.() !== false)) {
+      cur.viewCount = views;
+      await this.library.update(cur);
+    }
   }
 
   async rename(recording, title) {

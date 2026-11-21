@@ -1,4 +1,4 @@
-import { organizationConfig } from "./reel/organization.js?v=20261118-orgstate1";
+import { organizationConfig } from "./reel/organization.js?v=20261121-public-signup";
 
 async function loadOrganization() {
   try {
@@ -8,7 +8,8 @@ async function loadOrganization() {
 }
 
 export const organization = await loadOrganization();
-const stateScope = organization ? `${organization.projectID}:${organization.allowedEmailDomain}` : "local";
+export const publicSignup = organization?.accountAccess === "public";
+const stateScope = organization ? `${organization.projectID}:${publicSignup ? "public-google" : organization.allowedEmailDomain}` : "local";
 // Use a new prefix so unscoped recordings and credentials stay untouched and unassigned.
 export const organizationStorageKey = key => `reel-state:${stateScope}:${key}`;
 

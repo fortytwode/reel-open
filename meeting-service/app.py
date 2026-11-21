@@ -12,7 +12,8 @@ from datetime import UTC, datetime
 import httpx
 from flask import Flask, Request, jsonify, request
 
-from reel_organization import explicit_meeting_owner, firebase_project, is_internal_email, meeting_owner_allowed, organization_domain, trusted_origins
+from reel_organization import (explicit_meeting_owner, firebase_project, is_internal_email, meeting_owner_allowed,
+                               organization_domain, public_account_access, public_google_account, trusted_origins)
 
 MAX_REQUEST = 300 * 1024
 MAX_TRANSCRIPT = 95_000
@@ -340,6 +341,12 @@ def allowed_email(email, speech=False):
     return meeting_owner_allowed(email)
 
 
+def allowed_claims(claims, speech=False):
+    if public_account_access():
+        return not speech and public_google_account(claims)
+    return allowed_email(str(claims.get("email", "")).lower(), speech)
+
+
 def verify_firebase(token, speech=False):
     project = firebase_project()
     if not project:
@@ -351,8 +358,7 @@ def verify_firebase(token, speech=False):
         raise BridgeError("Invalid Firebase token", 401)
     if not claims.get("sub") or claims.get("email_verified") is not True:
         raise BridgeError("Verified Firebase account required", 401)
-    email = str(claims.get("email", "")).lower()
-    if not allowed_email(email, speech):
+    if not allowed_claims(claims, speech):
         raise BridgeError("Account is not allowed", 403)
     return claims
 
@@ -392,12 +398,11 @@ def create_app(auth_verifier=None, store=None, sink_factory=None, speech_transpo
             raise
         except Exception:  # noqa: BLE001 - verifier details must not escape the auth boundary
             raise BridgeError("Invalid Firebase token", 401)
-        email = str(claims.get("email", "")).lower()
         project = firebase_project()
         if (not project
                 or claims.get("iss") != f"https://securetoken.google.com/{project}" or claims.get("aud") != project
                 or not isinstance(claims.get("sub"), str) or not claims["sub"]
-                or claims.get("email_verified") is not True or not allowed_email(email, speech)):
+                or claims.get("email_verified") is not True or not allowed_claims(claims, speech)):
             raise BridgeError("Verified allowed account required", 403)
         return claims
 
@@ -514,6 +519,8 @@ def create_app(auth_verifier=None, store=None, sink_factory=None, speech_transpo
     @app.route("/notion/preview", methods=["POST", "OPTIONS"])
     @app.route("/notion/deliver", methods=["POST", "OPTIONS"])
     def meeting_route():
+        if public_account_access():
+            return jsonify(error="Organization delivery is unavailable"), 404
         if request.method == "OPTIONS":
             if not cors():
                 return jsonify(error="Origin not allowed"), 403

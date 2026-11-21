@@ -4,6 +4,26 @@ import re
 from urllib.parse import urlsplit, urlunsplit
 
 
+def public_account_access():
+    return os.getenv("REEL_ACCOUNT_ACCESS") == "public"
+
+
+def public_google_account(claims):
+    if not isinstance(claims, dict) or claims.get("email_verified") is not True:
+        return False
+    email, uid = claims.get("email"), claims.get("sub")
+    firebase = claims.get("firebase")
+    identities = firebase.get("identities") if isinstance(firebase, dict) else None
+    subjects = identities.get("google.com") if isinstance(identities, dict) else None
+    return bool(
+        isinstance(email, str) and len(email) <= 320 and re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", email)
+        and isinstance(uid, str) and 0 < len(uid) <= 128
+        and isinstance(firebase, dict) and firebase.get("sign_in_provider") == "google.com"
+        and isinstance(subjects, list) and len(subjects) == 1
+        and isinstance(subjects[0], str) and 0 < len(subjects[0]) <= 255
+    )
+
+
 def organization_domain():
     domain = os.getenv("REEL_ORGANIZATION_DOMAIN", "").strip().lower()
     labels = domain.split(".")

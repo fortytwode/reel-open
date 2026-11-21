@@ -1,7 +1,7 @@
 // Calendar and browser-extension meeting controls for the recorder page.
 // The module deliberately keeps calendar data in memory only; Firebase tokens are
 // obtained from the caller's session and are never persisted or logged.
-import { organization } from "./organization.js?v=20261118-orgstate1";
+import { organization, publicSignup } from "./organization.js?v=20261121-public-signup";
 const API = organization?.meetingServiceURL;
 const STATUSES = {
   scheduled: "Scheduled",
@@ -74,10 +74,12 @@ function readFragmentRequest() {
   return { url: request.url, title: typeof request.title === "string" ? request.title.slice(0, 180) : "" };
 }
 
-export function mountMeetingCalendar({ container, session, onError, onSelectionChange } = {}) {
+export function mountMeetingCalendar({ container, session, onError, onSelectionChange, calendarResult } = {}) {
   if (!container || typeof session !== "function") throw new TypeError("container and session are required");
-  const state = { uid: null, config: null, events: [], due: [], capabilities: null, busy: false, error: "", download: null, browserRequest: null, disposed: false, picker: null };
+  const state = { uid: null, config: null, events: [], history: [], cursor: null, firstHistoryCursor: null, loadedHistory: false, due: [], capabilities: null, busy: false, error: "", download: null, browserRequest: null, disposed: false, picker: null };
   let pollTimer = null;
+  let calendarNotice = calendarResult === "connected" ? "Google Calendar connected. Choose which calendars Reel can read."
+    : calendarResult === "error" ? "Google Calendar connection did not finish. Try connecting again." : "";
 
   container.innerHTML = `
     <section class="mc-card" aria-labelledby="mc-heading">
@@ -107,7 +109,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       return null;
     }
     if (expectedUid && current.uid !== expectedUid) {
-      clearForAccountChange(current.uid);
+      if (state.uid !== current.uid) clearForAccountChange(current.uid);
       return null;
     }
     if (state.uid && current.uid !== state.uid) clearForAccountChange(current.uid);
@@ -115,12 +117,17 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     return current;
   }
   function relaySchedule() {
+    if (publicSignup) return;
     window.postMessage({type:'REEL_MEETING_SCHEDULE', uid:state.uid,
       consent_mode:state.config?.consent_mode || 'ask',
       events:state.events.map(({id,title,start,end,status}) => ({id,title,start,end,status}))}, location.origin);
   }
   function clearForAccountChange(uid = null) {
     state.uid = uid;
+    state.history = [];
+    state.cursor = null;
+    state.firstHistoryCursor = null;
+    state.loadedHistory = false;
     state.config = null; state.events = []; state.due = []; state.capabilities = null;
     state.error = ""; state.busy = false; state.download = null; state.picker = null;
     relaySchedule();
@@ -132,22 +139,21 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     const token = await current.getIdToken();
     // Re-check after token retrieval so a pending request never crosses accounts.
     const latest = await session();
-    if (!latest?.uid || latest.uid !== current.uid) {
-      clearForAccountChange(latest?.uid || null);
+    if (!latest?.uid || latest.uid !== current.uid || current.isCurrent?.() === false) {
       throw new Error("Your signed-in account changed. Refreshing calendar data.");
     }
     const response = await fetch(API + path, {
-      method,
+      method, redirect: "error", cache: "no-store",
       headers: { Authorization: "Bearer " + token, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(25000),
     });
-    if (response.status === 204) return {};
     let data = {};
-    try { data = await response.json(); } catch {}
+    if (response.status !== 204) {
+      try { data = await response.json(); } catch {}
+    }
     const after = await session();
-    if (!after?.uid || after.uid !== current.uid) {
-      clearForAccountChange(after?.uid || null);
+    if (!after?.uid || after.uid !== current.uid || current.isCurrent?.() === false) {
       throw new Error("Your signed-in account changed. Refreshing calendar data.");
     }
     if (!response.ok) throw new Error(data.error || data.message || `Meeting service returned ${response.status}`);
@@ -166,6 +172,9 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     state.renderedConsentKey = consentKey;
     const capability = state.capabilities || {};
     const calendarAvailable = capability.calendar === true;
+    const calendarOAuth = publicSignup && capability.calendar_oauth === true;
+    const calendarAuthorized = calendarOAuth && capability.calendar_authorized === true;
+    const canSelectCalendars = calendarAvailable && (!publicSignup || calendarAuthorized);
     const botAvailable = capability.bot === true;
     const desktop = capability.provider === "desktop";
     const cloudNames = [["teams", "Teams"], ["google_meet", "Google Meet"]]
@@ -173,14 +182,18 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     const hybridCloud = cloudNames.length > 0;
     const platform = String(capability.platform || navigator.platform || "").toLowerCase();
     const isMac = /mac|darwin/.test(platform);
-    q(".mc-subtitle").textContent = "Choose which Google calendars Reel can use for meetings and recaps.";
-    q("[data-extension-note]").hidden = desktop;
+    q(".mc-subtitle").textContent = publicSignup ? "Connect Google Calendar to find meetings and access your private notes."
+      : "Choose which Google calendars Reel can use for meetings and recaps.";
+    q("[data-extension-note]").hidden = publicSignup || desktop;
     q("[data-cloud-note]").hidden = desktop && !hybridCloud;
-    q("[data-cloud-note]").textContent = desktop && hybridCloud
+    q("[data-cloud-note]").textContent = publicSignup
+      ? "Connecting Calendar lets Reel read your selected calendars. You choose whether Reel may join and record meetings."
+      : desktop && hybridCloud
       ? `${cloudNames.join(" and ")} cloud note taker can join eligible meetings from your connected Google Calendar while this computer is closed, after participant consent. Cloud browser requests must match a connected calendar occurrence. Other providers use the Mac app while it is awake. Outlook and Apple Calendar remain native connections.`
       : "The cloud note taker can work while this computer is closed after you grant standing consent. Google Calendar is the only server calendar supported here. Outlook and Apple Calendar are available through the existing native connection; automatic server connection is not available.";
     q("[data-live]").textContent = document.hidden ? "Paused while page is hidden" : state.busy ? "Working…" : "Live status";
-    q("[data-message]").textContent = state.error || (!state.uid ? "Sign in to view or connect a calendar." : "");
+    q("[data-message]").textContent = state.error || (!state.uid ? "Sign in to view or connect a calendar."
+      : calendarResult === "connected" && !calendarAuthorized ? "" : calendarNotice);
     q("[data-message]").classList.toggle("is-error", !!state.error);
     if (!state.error && state.download && state.download.expiresAt > Date.now()) {
       const link = document.createElement('a'); link.href = state.download.url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open download (available for five minutes)';
@@ -188,27 +201,31 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     }
 
     q("[data-capabilities]").innerHTML = [
-      !calendarAvailable ? `<p class="mc-unavailable">Google Calendar connection is not available right now.</p>` : "",
-      desktop ? `<p class="mc-note">Configure autojoin in the Mac app; Reel must stay awake. Windows autojoin is not yet available.</p>` : !botAvailable ? `<p class="mc-unavailable">Cloud meeting entry is not available right now.</p>` : "",
+      !calendarAvailable && !calendarOAuth ? `<p class="mc-unavailable">Google Calendar connection is not available right now.</p>` : "",
+      desktop && !publicSignup ? `<p class="mc-note">Configure autojoin in the Mac app; Reel must stay awake. Windows autojoin is not yet available.</p>` : !botAvailable && (!publicSignup || calendarAuthorized) ? `<p class="mc-unavailable">Cloud meeting entry is not available right now.</p>` : "",
     ].join("");
 
     const connected = !!state.config?.enabled;
     const picker = state.picker;
     const ready = state.uid && !state.busy;
     const count = state.config?.calendar_ids?.length || 0;
-    q("[data-connect]").innerHTML = !calendarAvailable ? "" : picker ? `
+    const connectGoogle = `<button type="button" class="mc-primary" data-action="calendar-oauth" ${!ready ? "disabled" : ""}>${connected || calendarAuthorized ? "Reconnect Google Calendar" : "Connect Google Calendar"}</button>`;
+    const disconnectGoogle = `<button type="button" data-action="disconnect" ${!ready ? "disabled" : ""}>Disconnect calendar</button>`;
+    q("[data-connect]").innerHTML = calendarOAuth && !calendarAuthorized
+      ? connectGoogle + (connected ? disconnectGoogle : "") : !canSelectCalendars ? "" : picker ? `
       <fieldset class="mc-calendar-choices" ${state.busy ? "disabled" : ""}>
         <legend>Google calendars</legend>
-        ${picker.sources.map(({id, title, primary}) => `<label class="mc-check"><input type="checkbox" data-calendar-choice value="${esc(id)}" ${picker.selected.has(id) ? "checked" : ""}>${esc(title)}${primary ? " (work primary)" : ""}</label>`).join("") || '<p class="mc-note">No Google calendars are available to this work account.</p>'}
+        ${picker.sources.map(({id, title, primary}) => `<label class="mc-check"><input type="checkbox" data-calendar-choice value="${esc(id)}" ${picker.selected.has(id) ? "checked" : ""}>${esc(title)}${primary ? (publicSignup ? " (primary)" : " (work primary)") : ""}</label>`).join("") || '<p class="mc-note">No Google calendars are available to this account.</p>'}
         ${picker.unavailable ? '<p class="mc-note">Some saved calendars are unavailable. Saving replaces them with your current choices.</p>' : ""}
         <div class="mc-actions"><button type="button" class="mc-primary" data-action="save-calendars" ${!picker.selected.size || picker.selected.size > 25 ? "disabled" : ""}>Save selected calendars</button><button type="button" data-action="cancel-calendars">Cancel</button></div>
       </fieldset>` : `
       ${connected ? `<p class="mc-connected">${count} Google ${count === 1 ? "calendar" : "calendars"} selected</p>` : ""}
-      <button type="button" class="mc-primary" data-action="choose-calendars" ${!ready ? "disabled" : ""}>${connected ? "Change calendars" : "Choose Google calendars"}</button>`;
+      <button type="button" class="mc-primary" data-action="choose-calendars" ${!ready ? "disabled" : ""}>${connected ? "Change calendars" : "Choose Google calendars"}</button>
+      ${calendarAuthorized && !connected ? connectGoogle + disconnectGoogle : ""}`;
 
     const mode = state.config?.consent_mode === "approved" ? "approved" : "ask";
     const cloudCalendar = !desktop || hybridCloud;
-    q("[data-settings]").innerHTML = connected && calendarAvailable ? !cloudCalendar ? `
+    q("[data-settings]").innerHTML = connected && canSelectCalendars ? !cloudCalendar ? `
       <div class="mc-consent-controls"><button type="button" data-action="sync" ${state.busy ? "disabled" : ""}>Sync calendar</button><button type="button" data-action="disconnect" ${state.busy ? "disabled" : ""}>Disconnect calendar</button></div>` : `
       <div class="mc-consent-controls">
         <label class="mc-select-label" for="mc-consent-mode">Calendar consent</label>
@@ -219,14 +236,18 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
         <label class="mc-check"><input type="checkbox" data-field="standing-attest" ${state.busy ? "disabled" : ""}> I confirm participants have agreed to recording under this standing consent.</label>
         <button type="button" data-action="save-consent" ${state.busy ? "disabled" : ""}>Save consent setting</button>
         <button type="button" data-action="sync" ${state.busy ? "disabled" : ""}>Sync calendar</button>
+        ${calendarAuthorized ? connectGoogle : ""}
         <button type="button" data-action="disconnect" ${state.busy ? "disabled" : ""}>Disconnect calendar</button>
       </div>` : "";
 
-    const events = state.events || [];
+    const events = [...state.events, ...state.history.filter(item => !state.events.some(event => event.id === item.id))];
     const dueById = new Map((state.due || []).map((event) => [event.id, event]));
     const rows = [...events];
     for (const due of state.due || []) if (!rows.some((event) => event.id === due.id)) rows.push(due);
-    if (!rows.length) q("[data-events]").innerHTML = `<p class="mc-empty">No calendar meetings to show. Sync to refresh.</p>`;
+    if (!rows.length) {
+      const emptyText = publicSignup && !connected ? "" : "No calendar meetings to show. Sync to refresh.";
+      q("[data-events]").innerHTML = emptyText ? `<p class="mc-empty">${emptyText}</p>` : "";
+    }
     else q("[data-events]").innerHTML = `<h3>Meetings</h3><ul class="mc-list">${rows.map((event) => {
       const failed = event.status === "failed";
       const recoveryStatus = failed && Object.hasOwn(RECOVERY_STATUSES, event.recovery_status)
@@ -234,14 +255,14 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const recovery = failed && event.recovery_available === true && event.recovery_status !== "processing"
         ? `<button type="button" data-action="recover" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Transcribe partial recording</button>` : "";
       const downloads = [event.video_available ? 'video' : null, event.transcript_available ? 'transcript' : null,
-        failed && event.recovery_summary_available === true ? 'summary' : null].filter(Boolean)
+        (failed && event.recovery_summary_available === true || publicSignup && event.summary_available === true) ? 'summary' : null].filter(Boolean)
         .map(kind => `<button type="button" data-action="download-${kind}" data-id="${esc(event.id)}" ${state.busy ? 'disabled' : ''}>Download ${failed ? "partial " : ""}${kind === "summary" ? "notes" : kind}</button>`).join('');
-      const notion = failed ? "" : event.notion_url && /^https:\/\/(?:www\.)?notion\.so\//i.test(event.notion_url)
+      const notion = failed || publicSignup ? "" : event.notion_url && /^https:\/\/(?:www\.)?notion\.so\//i.test(event.notion_url)
         ? `<a href="${esc(event.notion_url)}" target="_blank" rel="noopener">Open Notion notes</a>`
         : event.transcript_available ? `<button type="button" data-action="retry-notion" data-id="${esc(event.id)}" ${state.busy ? 'disabled' : ''}>Send notes to Notion</button>` : '';
       const cloudEvent = event.capture_provider === "cloud";
       const eventDesktop = desktop && !cloudEvent;
-      const actionable = dueById.has(event.id) && event.status === "awaiting_consent" && (cloudEvent ? (botAvailable || hybridCloud) : (!desktop && botAvailable));
+      const actionable = (!publicSignup || calendarAuthorized) && dueById.has(event.id) && event.status === "awaiting_consent" && (cloudEvent ? (botAvailable || hybridCloud) : (!desktop && botAvailable));
       const desktopJoin = eventDesktop && isMac && /^[a-f0-9]{64}$/i.test(String(event.id || ""))
         ? `<a class="mc-primary" href="reel://join-meeting?id=${encodeURIComponent(event.id)}">Open in Reel</a>`
         : eventDesktop && !isMac ? `<a href="/record?mode=meeting">Capture manually</a>` : "";
@@ -250,7 +271,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const detailText = failure || (event.notion_status === "calendar_selection_required" ? event.detail : "");
       const detail = detailText ? `<span class="mc-status">${esc(detailText)}</span>` : "";
       return `<li class="mc-event"><div class="mc-event-copy"><strong>${esc(event.title || "Untitled meeting")}</strong><time>${esc(dateText(event.start))}</time><span class="mc-status mc-status-${esc(event.status || "unknown")}">${esc(statusText(event.status))}</span>${detail}${recoveryStatus ? `<span class="mc-status">${esc(recoveryStatus)}</span>` : ""}<div class="mc-actions">${downloads}${recovery}${notion}${desktopJoin}</div></div>${actionable ? `<div class="mc-event-actions"><label class="mc-check"><input type="checkbox" data-attest="${esc(event.id)}"> I confirm participants agreed to recording</label><button type="button" data-action="approve" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Approve and join</button><button type="button" data-action="decline" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Decline</button></div>` : ""}</li>`;
-    }).join("")}</ul>`;
+    }).join("")}</ul>${state.cursor ? `<button type="button" data-action="earlier-recordings" ${state.busy ? "disabled" : ""}>Earlier recordings</button>` : ""}`;
 
     const browserHost = q("[data-browser]");
     if (state.browserRequest) {
@@ -275,16 +296,25 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const uid = current.uid;
       const [settings, due] = await Promise.all([
         request("/calendar/settings", "GET", undefined, uid),
-        request("/calendar/meetings", "GET", undefined, uid).catch((error) => ({ _error: error })),
+        publicSignup ? null : request("/calendar/meetings", "GET", undefined, uid).catch((error) => ({ _error: error })),
       ]);
-      if (state.uid !== uid || state.disposed) return;
+      if (state.uid !== uid || current.isCurrent?.() === false || state.disposed) return;
       const previous = state.config;
       state.config = settings.config || null;
       state.events = Array.isArray(settings.events) ? settings.events : [];
+      if (publicSignup) {
+        const firstCursor = settings.next_history_before || null;
+        if (firstCursor !== state.firstHistoryCursor) {
+          state.history = [];
+          state.loadedHistory = false;
+        }
+        state.firstHistoryCursor = firstCursor;
+        if (!state.loadedHistory) state.cursor = firstCursor;
+      }
       state.capabilities = settings.capabilities || { calendar: false, bot: false };
       relaySchedule();
-      state.due = Array.isArray(due) ? due : Array.isArray(due.meetings) ? due.meetings : Array.isArray(due.events) ? due.events : [];
-      if (due._error) state.error = due._error.message;
+      state.due = publicSignup ? state.events : Array.isArray(due) ? due : Array.isArray(due.meetings) ? due.meetings : Array.isArray(due.events) ? due.events : [];
+      if (due?._error) state.error = due._error.message;
       else state.error = "";
       if (previous?.scope_revision !== state.config?.scope_revision || previous?.enabled !== state.config?.enabled) {
         state.picker = null;
@@ -303,7 +333,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     const scopeRevision = state.config?.scope_revision;
     const meetingAttested = eventId ? !!q(`[data-attest="${CSS.escape(eventId)}"]`)?.checked : false;
     const browserAttested = !!q('[data-field="browser-attest"]')?.checked;
-    state.busy = true; state.error = ""; render();
+    state.busy = true; state.error = ""; calendarNotice = ""; render();
     let syncError;
     try {
       const uid = state.uid;
@@ -315,10 +345,23 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
         const link = document.createElement('a'); link.href = url.href; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open download';
         state.download = {url:url.href, expiresAt:Date.now()+300000};
         q('[data-message]').replaceChildren(link); link.click();
+      } else if (action === "earlier-recordings" && state.cursor) {
+        const page = await request(`/calendar/meetings?history_before=${encodeURIComponent(state.cursor)}`, "GET", undefined, uid);
+        state.history.push(...page.meetings);
+        state.cursor = page.next_history_before || null;
+        state.loadedHistory = true;
+        return;
       } else if (action === "recover") {
         await request(`/calendar/meetings/${encodeURIComponent(eventId)}/recover`, "POST", {}, uid);
       } else if (action === "retry-notion") {
         await request(`/calendar/meetings/${encodeURIComponent(eventId)}/notion`, "POST", {}, uid);
+      } else if (action === "calendar-oauth") {
+        const result = await request("/calendar/oauth/start", "POST", {}, uid);
+        const url = new URL(result.authorization_url);
+        if (url.origin !== "https://accounts.google.com" || url.pathname !== "/o/oauth2/v2/auth" || url.username || url.password || url.hash)
+          throw new Error("Google Calendar authorization is unavailable.");
+        location.assign(url.href);
+        return;
       } else if (action === "choose-calendars") {
         const result = await request("/calendar/sources", "GET", undefined, uid);
         const sources = result.sources;
@@ -388,12 +431,17 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     if (!document.hidden && !state.disposed) { refresh(); pollTimer = setInterval(refresh, 5000); }
   };
   document.addEventListener("visibilitychange", onVisibility);
-  state.browserRequest = readFragmentRequest();
+  const fragmentRequest = readFragmentRequest();
+  state.browserRequest = publicSignup ? null : fragmentRequest;
   refresh();
   if (!document.hidden) pollTimer = setInterval(refresh, 5000);
 
   return {
     refresh,
+    resetAccount() {
+      clearForAccountChange();
+      render();
+    },
     dispose() {
       state.disposed = true;
       clearInterval(pollTimer);

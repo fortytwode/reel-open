@@ -4,7 +4,7 @@
 // the moment the encoder closes it, so a crashed or closed tab can be recovered on the next visit
 // (the Mac app's recording.json + segments/ folder + Recovery).
 import * as C from "./core.js?v=20261119-owner2";
-import { organizationStorageKey } from "../organization.js?v=20261118-orgstate1";
+import { organizationStorageKey } from "../organization.js?v=20261121-public-signup";
 
 const DB = organizationStorageKey("reel-recorder"), VERSION = 1;
 let dbPromise = null;

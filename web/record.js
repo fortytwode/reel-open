@@ -4,15 +4,15 @@
 // (link copied immediately, plays within seconds) / cancel / restart → video.mp4 assembled
 // locally → background upload. Recordings live in IndexedDB; an interrupted one is rebuilt on
 // the next visit.
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-partial-recovery";
-import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
+import { organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
 import * as C from "./reel/core.js?v=20261119-choice1";
-import * as store from "./reel/store.js?v=20261119-owner2";
+import * as store from "./reel/store.js?v=20261121-public-signup";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
-import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
-import { Library, Publisher, APP } from "./reel/publisher.js?v=20261119-owner2";
+import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, CLOUD_CONFIG, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
+import { Library, Publisher, APP } from "./reel/publisher.js?v=20261121-public-signup";
 import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261119-tab1";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
@@ -22,7 +22,7 @@ const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const query = new URLSearchParams(location.search);
 const tabEntry = query.get("source") === "tab";
-const isMeeting = () => $("recording-kind").value === "meeting";
+const isMeeting = () => !publicSignup && $("recording-kind").value === "meeting";
 const isTabCapture = () => tabEntry && !isMeeting();
 
 // ---------------------------------------------------------------- settings (localStorage, ReelSettings subset)
@@ -62,6 +62,22 @@ $("last-copy").addEventListener("click", () => copyText($("last-link").href));
 
 let auth = null, am = null, user = null;
 let authGeneration = 0;
+function visibleToCurrentAccount(recording) {
+  return !publicSignup || (recording && [recording.recordingOwnerUID, recording.meeting?.ownerUID]
+    .every(owner => !owner || owner === user?.uid));
+}
+function clearPublicAccountDetails() {
+  $("list").replaceChildren();
+  $("last").hidden = true;
+  $("last-link").removeAttribute("href");
+  $("last-link").textContent = "";
+  $("toast").hidden = true;
+  for (const id of ["share-dialog", "trim-dialog", "meeting-notes-dialog"]) {
+    if ($(id).open) $(id).close("account-changed");
+  }
+  for (const url of thumbURLs.values()) if (url) URL.revokeObjectURL(url);
+  thumbURLs.clear();
+}
 let authReady;
 let libraryReady;
 const authReadyPromise = new Promise((r) => { authReady = r; });
@@ -80,25 +96,31 @@ async function initAuth() {
     $("auth-msg").textContent = "Couldn't load sign-in. Recordings are kept in this browser until you can sign in."; $("auth-msg").hidden = false;
     authReady(); return;
   }
-  am.onAuthStateChanged(auth, (u) => {
-    if (u && (!isOrganizationEmail(u.email) || !u.emailVerified)) {
-      $("auth-msg").textContent = `Sign in with your ${DOMAIN.slice(1)} Google account to upload and share.`; $("auth-msg").hidden = false;
+  observeReelAccount(am, auth, (u, candidate) => {
+    if (!u && candidate) {
+      $("auth-msg").textContent = `Sign in with ${googleAccountLabel} to upload and share.`; $("auth-msg").hidden = false;
       am.signOut(auth).catch(() => {});
-      u = null;
     } else if (u) $("auth-msg").hidden = true;
-    if (user?.uid !== u?.uid) authGeneration++;
+    if (user?.uid !== u?.uid) {
+      authGeneration++;
+      if (publicSignup) clearPublicAccountDetails();
+    }
     user = u;
+    const generation = authGeneration;
     $("user").textContent = u ? (u.displayName || u.email) : "Not signed in: recordings stay in this browser";
     $("sign-in").hidden = !!u; $("sign-out").hidden = !u;
     authReady();
     renderList();
-    if (u) libraryReady.then(async () => { await publisher.syncCloudLibrary(); resumeMeetingDelivery(); }).catch((e) => toast(e.message, true));
-    if ($("recording-kind").value === "meeting") loadDeliveryInvites();
+    if (u) libraryReady.then(async () => {
+      if (publicSignup && generation !== authGeneration) return;
+      if (publicSignup) await resumeRecordings(u.uid, generation);
+      if (!publicSignup || generation === authGeneration) await publisher.syncCloudLibrary();
+      resumeMeetingDelivery();
+    }).catch((e) => { if (!publicSignup || generation === authGeneration) toast(e.message, true); });
+    if (isMeeting()) loadDeliveryInvites();
   });
   $("sign-in").addEventListener("click", async () => {
-    const provider = new am.GoogleAuthProvider();
-    provider.setCustomParameters({ hd: DOMAIN.slice(1), prompt: "select_account" });
-    try { await am.signInWithPopup(auth, provider); }
+    try { await am.signInWithPopup(auth, googleSignInProvider(am)); }
     catch (e) { if (e && e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") toast("Sign-in failed. Try again.", true); }
   });
   $("sign-out").addEventListener("click", () => am.signOut(auth).catch(() => {}));
@@ -354,7 +376,7 @@ async function stop(nav) {
   if (!R.session || !(R.phase === "recording" || R.phase === "paused")) return;
   const r = library.get(R.recording.id);
   const uploader = R.uploader;
-  if (C.automaticCloudAllowed(r) && uploader && settings.copyLinkOnStop) copyText(C.shareURL(r, CLOUD_CONFIG), nav);
+  if (visibleToCurrentAccount(r) && C.automaticCloudAllowed(r) && uploader && settings.copyLinkOnStop) copyText(C.shareURL(r, CLOUD_CONFIG), nav);
   R.stoppedAt = Date.now();
   setPhase("finishing");
   const sessionObj = R.session;
@@ -374,6 +396,7 @@ async function stop(nav) {
     if (R.unlock) { R.unlock(); R.unlock = null; }
     setPhase("idle");
     cur = library.get(r.id);
+    if (!visibleToCurrentAccount(cur)) return;
     if (C.isMeeting(cur)) {
       toast("Meeting video saved locally. Sending audio securely for transcription…");
       syncMeetingMetadata(cur);
@@ -502,6 +525,7 @@ const thumbURLs = new Map();
 async function thumbURL(r) {
   if (thumbURLs.has(r.id)) return thumbURLs.get(r.id);
   const b = r.hasThumbnail ? await store.getFile(r.id, C.File.thumbnail).catch(() => null) : null;
+  if (!visibleToCurrentAccount(r)) return null;
   const u = b ? URL.createObjectURL(b) : null;
   thumbURLs.set(r.id, u);
   return u;
@@ -520,10 +544,12 @@ function renderList() {
   renderPending = true;
   requestAnimationFrame(async () => {
     renderPending = false;
-    const list = $("list"), items = library.list();
+    const generation = authGeneration;
+    const list = $("list"), items = library.list().filter(visibleToCurrentAccount);
     $("empty").hidden = items.length > 0;
     const frag = document.createDocumentFragment();
     for (const r of items) frag.appendChild(await renderItem(r));
+    if (publicSignup && generation !== authGeneration) return;
     list.textContent = "";
     list.appendChild(frag);
   });
@@ -536,6 +562,7 @@ async function renderItem(r) {
   const body = document.createElement("div");
   const title = document.createElement("button"); title.className = "rec-title"; title.textContent = r.title; title.title = "Rename";
   title.addEventListener("click", async () => {
+    if (!visibleToCurrentAccount(r)) return;
     const t = window.prompt("Rename recording", r.title);
     if (t != null) await publisher.rename(r, t);
   });
@@ -549,7 +576,7 @@ async function renderItem(r) {
   const p = library.progress.get(r.id);
   if (p != null) { const bar = document.createElement("div"); bar.className = "progress"; const f = document.createElement("div"); f.style.width = Math.round(p * 100) + "%"; bar.appendChild(f); body.appendChild(bar); }
   const actions = document.createElement("div"); actions.className = "rec-actions";
-  const btn = (label, fn, cls) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; if (cls) b.className = cls; b.addEventListener("click", fn); actions.appendChild(b); return b; };
+  const btn = (label, fn, cls) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; if (cls) b.className = cls; b.addEventListener("click", () => { if (visibleToCurrentAccount(r)) fn(); }); actions.appendChild(b); return b; };
   const remote = C.isMeeting(r) ? r.upload === "uploaded" : r.upload === "uploaded" || r.playback.hls || r.playback.mp4;
   const busy = r.captureState === "recording" || r.captureState === "finalizing";
   if (remote) {
@@ -595,6 +622,7 @@ async function renderItem(r) {
 
 async function download(r) {
   const b = await store.getFile(r.id, C.File.video);
+  if (!visibleToCurrentAccount(r)) return;
   if (!b) { toast("video.mp4 isn't in this browser.", true); return; }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(b);
@@ -649,6 +677,7 @@ async function removeMeetingMetadata(r) {
 }
 function processRecording(recording, { resumeNotes = false } = {}) {
   if (!recording || !["complete", "recovered"].includes(recording.captureState)) return Promise.resolve();
+  if (publicSignup && (C.isMeeting(recording) || !visibleToCurrentAccount(recording))) return Promise.resolve();
   if (transcriptionJobs.has(recording.id)) return transcriptionJobs.get(recording.id);
   const id = recording.id;
   const expectedOwnerUID = user?.uid ?? null, expectedGeneration = authGeneration;
@@ -798,6 +827,7 @@ function withMeetingLock(id, run) {
   return navigator.locks.request("reel-meeting-processing:" + id, run);
 }
 async function sendMeetingDelivery(recording, {lockHeld=false}={}) {
+  if (publicSignup) return;
   if (!lockHeld && recording) {
     const generation=authGeneration, owner=recording.meeting?.ownerUID;
     return withMeetingLock(recording.id, async () => {
@@ -848,7 +878,7 @@ async function sendMeetingDelivery(recording, {lockHeld=false}={}) {
   }
 }
 function resumeMeetingDelivery() {
-  if (!user) return;
+  if (publicSignup || !user) return;
   for (const r of library.list()) {
     if (!C.isMeeting(r) || r.meeting.ownerUID !== user.uid || !["pending","failed"].includes(r.meeting.deliveryStatus) ||
         !["complete","recovered"].includes(r.captureState) || transcriptionJobs.has(r.id) || notionJobs.has(r.id) ||
@@ -859,6 +889,7 @@ function resumeMeetingDelivery() {
   }
 }
 async function loadDeliveryInvites() {
+  if (publicSignup) return;
   const owner = user?.uid, generation = authGeneration;
   const request = ++deliveryInvitesRequest;
   const select = $("meeting-calendar-invite"), status = $("meeting-calendar-status");
@@ -961,7 +992,7 @@ function openShare(r) {
   $("share-password").value = ""; $("share-remove").checked = false; $("share-remove").disabled = !r.access.key;
   $("share-expiry").value = "keep"; $("share-error").hidden = true;
   d.onclose = async () => {
-    if (d.returnValue !== "save") return;
+    if (d.returnValue !== "save" || !visibleToCurrentAccount(r)) return;
     const pw = $("share-password").value;
     const password = $("share-remove").checked ? { remove: true } : pw ? { set: pw } : { keep: true };
     const choice = $("share-expiry").value;
@@ -978,6 +1009,7 @@ function openShare(r) {
 async function openTrim(r) {
   const d = $("trim-dialog"), v = $("trim-video");
   const b = await store.getFile(r.id, C.File.video);
+  if (!visibleToCurrentAccount(r)) return;
   if (!b) { toast("video.mp4 isn't in this browser.", true); return; }
   const url = URL.createObjectURL(b);
   v.src = url;
@@ -987,6 +1019,7 @@ async function openTrim(r) {
   $("trim-set-end").onclick = () => { $("trim-end").value = v.currentTime.toFixed(1); };
   d.onclose = async () => {
     v.pause(); v.removeAttribute("src"); v.load(); URL.revokeObjectURL(url);
+    if (!visibleToCurrentAccount(r)) return;
     if (d.returnValue === "save") await publisher.setTrim(r, parseFloat($("trim-start").value), parseFloat($("trim-end").value));
     else if (d.returnValue === "clear") await publisher.setTrim(r, 0, r.durationSeconds);
     else return;
@@ -1003,6 +1036,28 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) previ
 
 // ---------------------------------------------------------------- boot
 
+async function resumeRecordings(ownerUid = null, generation = authGeneration) {
+  const autoPublish = !publicSignup || !!ownerUid;
+  const isCurrent = () => !publicSignup || !ownerUid || generation === authGeneration;
+  const include = r => !publicSignup || (
+    (r.id !== R.recording?.id || R.phase === "idle") &&
+    (r.recordingOwnerUID || r.meeting?.ownerUID || null) === ownerUid &&
+    visibleToCurrentAccount(r)
+  );
+  await publisher.recover({ include, isCurrent, autoPublish, expectedOwnerUID: ownerUid });
+  if (!isCurrent()) return;
+  const rows = library.list().filter(include);
+  for (const r of rows) {
+    if (autoPublish && (r.upload === "uploading" || r.upload === "pending") &&
+        (r.captureState === "complete" || r.captureState === "recovered") && settings.autoUpload && user && C.automaticCloudAllowed(r)) {
+      publisher.publish(r, { expectedOwnerUID: ownerUid });
+    }
+    if (r.transcriptStatus === "pending" && ["complete", "recovered"].includes(r.captureState)) processRecording(r);
+  }
+  resumeMeetingDelivery();
+  if (autoPublish) for (const r of rows.slice(0, 20)) publisher.refreshViews(r, ownerUid).catch(() => {});
+}
+
 async function boot() {
   if (!captureSupported()) { $("unsupported").hidden = false; $("start").disabled = true; }
   bindSettings();
@@ -1012,14 +1067,7 @@ async function boot() {
   await libraryReady;
   fillDevices();
   await authReadyPromise;
-  await publisher.recover();
-  // Resume uploads a closed tab left unfinished.
-  for (const r of library.list()) {
-    if ((r.upload === "uploading" || r.upload === "pending") && (r.captureState === "complete" || r.captureState === "recovered") && settings.autoUpload && user && C.automaticCloudAllowed(r)) publisher.publish(r);
-  }
-  for (const r of library.list()) if (r.transcriptStatus === "pending" && ["complete", "recovered"].includes(r.captureState)) processRecording(r);
-  resumeMeetingDelivery();
-  for (const r of library.list().slice(0, 20)) publisher.refreshViews(r).catch(() => {});
+  await resumeRecordings();
 }
 function updateRecordingKind() {
   const meeting = isMeeting();
@@ -1042,7 +1090,7 @@ $("recording-kind").addEventListener("change", () => {
 window.addEventListener("beforeunload", (e) => {
   if (R.phase === "recording" || R.phase === "paused" || R.phase === "finishing" || publisher.uploads.size || transcriptionJobs.size) { e.preventDefault(); e.returnValue = ""; }
 });
-if (query.get("mode") === "meeting") $("recording-kind").value = "meeting";
+if (!publicSignup && query.get("mode") === "meeting") $("recording-kind").value = "meeting";
 updateRecordingKind();
 boot();
 console.info(APP, EMU ? "(emulators)" : "");
@@ -1050,6 +1098,10 @@ console.info(APP, EMU ? "(emulators)" : "");
 let meetingCalendar;
 function openMeetingEntry() {
   const fragmentRequest = /(?:^#|&)(?:meeting-request|calendar-meeting)=/.test(location.hash);
+  if (publicSignup) {
+    if (fragmentRequest) history.replaceState(history.state, "", location.pathname + location.search);
+    return;
+  }
   if (!fragmentRequest && query.get("mode") !== "meeting") return;
   if (meetingCalendar) return;
   $("recording-kind-label").hidden = false;
