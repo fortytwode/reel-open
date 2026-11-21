@@ -1,6 +1,6 @@
 # Configure a Reel organization
 
-Each deployment trusts one Google Workspace email domain and one Firebase project. Use a local copy of the example to configure the clients, backend policy, and Firebase rules together.
+Each deployment trusts one verified Google account email domain and one Firebase project. Use a local copy of the example to configure the clients, backend policy, and Firebase rules together. Cloud Calendar discovery also requires Google Workspace domain-wide delegation configured by that deployment's administrator.
 
 ```sh
 cp organization.example.json organization.local.json
@@ -15,7 +15,7 @@ The helper runs entirely on the local machine. It also accepts a configuration f
 | `allowedEmailDomain` | The exact lowercase domain after the @ in a verified account. |
 | `projectID`, `bucket`, `authDomain`, `apiKey` | The Firebase project ID, Storage bucket name, Firebase Auth hostname and public web API key for the same project. Enable Google sign-in and authorize the hosting domains in Firebase Auth. |
 | `firestoreDatabase` | The Firestore database to use, normally `reel`. The Firebase deployment target must select this same database. |
-| `googleClientID`, `googleDesktopClientId` | Google OAuth client IDs for the macOS and Windows applications, respectively. For Windows, use an installed/Desktop client. Omit or leave either field empty when that platform is unused. |
+| `googleClientID`, `googleDesktopClientId` | Google OAuth client IDs for macOS and Windows, respectively. For [macOS](https://developers.google.com/identity/sign-in/ios/start-integrating#get_an_oauth_client_id), create an iOS OAuth client using the bundle identifier you build with in `REEL_BUNDLE_ID`. For [Windows](https://developers.google.com/identity/protocols/oauth2/native-app), create a Desktop app OAuth client. Omit or leave either field empty when that platform is unused. |
 | `webBase` | Origin serving the browser recorder at `/record` and the viewer at `/v/<id>`. |
 | `viewerBase`, `viewerPath` | Origin and single path segment used in shared recording links. For standalone Firebase Hosting, use the web origin and `v`. A custom link prefix needs a host that routes those links to the viewer. |
 | `notesBaseURL` | URL of the library page. Reel appends `#meetings/<id>` for participant notes. Standalone Hosting serves the library at `/library`. |

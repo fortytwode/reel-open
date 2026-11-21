@@ -16,7 +16,7 @@ Both products use the same organization deployment and account. A screen recordi
 open dist/Reel.app
 ```
 
-**Browser.** After starting the local server, open `http://localhost:8000/record.html` for Recorder or `http://localhost:8000/notetaker.html` for Notetaker. Calendar and recap access require a configured organization deployment. For camera blur and virtual backgrounds, first run `python3 scripts/fetch-web-model.py`.
+**Browser.** After starting the local server, open `http://localhost:8000/record.html` for Recorder or `http://localhost:8000/notetaker.html` for Notetaker. This serves the pages directly. Use the Firebase Hosting configuration for navigation on clean paths such as `/record` and `/notetaker`, or to test installation. Calendar and recap access require a configured organization deployment. For camera blur and virtual backgrounds, first run `python3 scripts/fetch-web-model.py`.
 
 ```sh
 python3 -m http.server 8000 --bind 127.0.0.1 --directory web
@@ -26,11 +26,13 @@ python3 -m http.server 8000 --bind 127.0.0.1 --directory web
 
 ## Deploy to your organization
 
-Anyone can self-host the same Reel code with their own organization domain, accounts, infrastructure and private credentials. No Rocketship account or infrastructure is required. Shared features and fixes belong in this public repository; each deployment supplies its own configuration and chooses when to upgrade.
+Reel Recorder and Reel Notetaker are both open source and can be self-hosted. Each deployment supplies its own email domain, Firebase project, service credentials and desktop app settings.
 
 Use the [self-hosting guide](docs/self-hosting.md) to set up hosting, Google sign-in, recording storage and optional meeting services. Enter your own Firebase and Google Workspace settings in a local copy of [organization.example.json](organization.example.json).
 
-Teams and Google Meet cloud joining can serve every verified account in your configured organization domain. Each person signs in, connects their Google Calendar and chooses their recording consent setting. Downloading the source or desktop app does not provision cloud services or connect a calendar automatically.
+Cloud auto-join supports Google Meet and Teams links on Google Calendar. The deployment’s Google Workspace administrator grants the calendar service account delegated read access. Each verified member then signs in, selects calendars and sets recording consent.
+
+The supplied configuration serves one organization per deployment. A shared service for personal Google accounts or customers across multiple domains needs per-user Calendar OAuth and tenant-aware authorization throughout the service.
 
 ## Run checks
 

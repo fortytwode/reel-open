@@ -1,6 +1,6 @@
 # Self-host Reel
 
-This guide applies to any individual or organization deploying Reel with their own resources. Use an email domain you control, your own Firebase project and Google OAuth clients, and your own Notion and Gmail credentials if you enable meeting delivery. Rocketship is one configured deployment of this public code; its accounts and private integrations are not required.
+Deploy Reel Recorder and Reel Notetaker using your own resources. For cloud features, use your own email domain, Firebase project, and Google OAuth clients. Add your own Notion and Gmail credentials if you enable meeting delivery. Local screen recording on Mac and in the browser works without an account or a cloud deployment.
 
 Keep your deployment configuration outside the public repository. Browser client settings are readable by app users; service-account keys, API secrets and bot authentication sessions must stay in your private secret store. Never put those secrets in the generated client JSON.
 
@@ -19,7 +19,7 @@ A domain name gives Reel a URL. For cloud sign-in and sharing, also provision Fi
    gcloud storage buckets update gs://YOUR_BUCKET --cors-file=.reel/firebase/cors.json
    ```
 
-   Run `python3 scripts/fetch-web-model.py` before deploying if you want browser camera blur and virtual backgrounds. Firebase Hosting serves the recorder at `/record`, the library at `/library` and the viewer at `/v/<id>`.
+   Run `python3 scripts/fetch-web-model.py` before deploying if you want browser camera blur and virtual backgrounds. Firebase Hosting serves Reel Recorder at `/record`, Reel Notetaker at `/notetaker`, the library at `/library` and shared recordings at `/v/<id>`.
 
 4. Sign in with a verified Workspace account in your configured domain. Record and upload a short test, open its share URL from the intended viewer account, and check that participant meeting notes are inaccessible to an unauthorized account. Recording share links remain available to their intended link recipients.
 
@@ -31,9 +31,11 @@ Build the macOS app after rendering the organization configuration. Use the [Win
 
 ## Add meeting services
 
-Build and deploy the [meeting API](../meeting-service/README.md) and [optional delivery service](../delivery-service/README.md) as container services. Both build-context scripts accept a committed source ref and an empty directory. Set the organization settings from `.reel/backend.env` on each service. The standalone delivery provider sends through delegated Gmail and stores verified notes in a private Notion data source and participant library.
+Build and deploy the [meeting API](../meeting-service/README.md) as a container service. Deploy the [delivery service](../delivery-service/README.md) to enable the private Notes tab and automatic recaps. Both build-context scripts accept a committed source ref and an empty directory. Set the organization settings from `.reel/backend.env` on each service. The standalone delivery provider sends through delegated Gmail and stores verified notes in a private Notion data source and participant library.
 
-The generated backend settings enable meeting access for every verified account in your configured email domain. With `MEETING_CLOUD_PROVIDERS=google_meet,teams` and the cloud worker configured, both providers are available throughout that domain. Remove optional cloud-owner pilot lists when opening the service to the whole organization. Each person opens Reel Notetaker at `/notetaker`, signs in, saves their calendar selection and chooses per-meeting approval or confirms standing participant consent. Merely downloading an app does not enroll their calendar. Domain-wide availability preserves private meeting-note access for the invited participants.
+The generated backend settings enable meeting access for every verified account in your configured email domain. For cloud Calendar discovery, your Google Workspace administrator authorizes the deployment's service account for domain-wide delegation of `calendar.readonly`. The [meeting API setup](../meeting-service/README.md#calendar-and-cloud-capture) explains which service needs the credential. Each person then opens Reel Notetaker at `/notetaker`, signs in, saves their calendar selection and chooses per-meeting approval or confirms standing participant consent.
+
+With `MEETING_CLOUD_PROVIDERS=google_meet,teams` and the cloud worker configured, both providers are available throughout that domain. Remove optional cloud-owner pilot lists when opening the service to the whole organization. Domain-wide availability preserves private meeting-note access for the invited participants.
 
 Meeting notes use a short outcome, topic bullets, decisions, actions and open questions. Calendar display names and email local parts provide spelling hints; being invited does not identify a voice. An action owner must match one invited person and be named in a supporting transcript excerpt. Otherwise the notes mark the owner unconfirmed. The original transcript remains available, including recognition errors.
 

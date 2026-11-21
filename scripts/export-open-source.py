@@ -10,6 +10,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parent.parent
 
 FILES = set("""
+.github/workflows/meeting-media-smoke.yml
 .github/workflows/open-source-ci.yml
 .github/workflows/web-recorder.yml
 .gitignore
@@ -55,12 +56,14 @@ delivery-service/build-context.sh
 delivery-service/main.py
 delivery-service/providers.py
 delivery-service/requirements.txt
+delivery-service/slack_recaps.py
 delivery-service/standalone_providers.py
 delivery-service/test_calendar_credentials.py
 delivery-service/test_delivery.py
 delivery-service/test_gmail_recovery.py
 delivery-service/test_orchestration.py
 delivery-service/test_provider_selection.py
+delivery-service/test_slack_recaps.py
 delivery-service/test_standalone_providers.py
 desktop-windows/PACKAGING.md
 desktop-windows/README.md
@@ -82,6 +85,8 @@ meeting-bot/.dockerignore
 meeting-bot/Dockerfile
 meeting-bot/Dockerfile.google-session
 meeting-bot/README.md
+meeting-bot/browser_captions.py
+meeting-bot/captions.py
 meeting-bot/google_auth.py
 meeting-bot/google_session_setup.py
 meeting-bot/policy.py
@@ -98,6 +103,7 @@ meeting-service/calendar_meetings.py
 meeting-service/calendar_runtime.py
 meeting-service/cloud_processing.py
 meeting-service/requirements.txt
+meeting-service/speaker_alignment.py
 meeting-service/speech.py
 organization.example.json
 reel_organization.py
@@ -112,8 +118,11 @@ scripts/tests/MeetingSetupSmoke.swift
 scripts/tests/WindowPickerSmoke.swift
 test_organization.py
 web/favicon.svg
+web/icons/notetaker-192.png
+web/icons/notetaker-512.png
 web/icons/reel-192.png
 web/icons/reel-512.png
+web/notetaker.webmanifest
 web/reel.webmanifest
 web/vendor/hls.js.LICENSE
 web/vendor/hls.min.js

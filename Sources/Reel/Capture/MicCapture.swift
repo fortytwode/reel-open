@@ -4,7 +4,7 @@ import AVFoundation
 /// Float32 so the writer always gets one predictable format.
 final class MicCapture: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let session = AVCaptureSession()
-    private let queue = DispatchQueue(label: "com.rocketshiphq.reel.mic")
+    private let queue = DispatchQueue(label: "\(Log.subsystem).mic")
     private let output = AVCaptureAudioDataOutput()
     private let handler: (CMSampleBuffer, CMClock?) -> Void
     private(set) var deviceName = ""

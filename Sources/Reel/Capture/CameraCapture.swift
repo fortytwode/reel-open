@@ -8,7 +8,7 @@ import ReelCore
 /// `CameraEffects` first and the bubble shows the processed frames.
 final class CameraCapture: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     let session = AVCaptureSession()
-    private let queue = DispatchQueue(label: "com.rocketshiphq.reel.camera")
+    private let queue = DispatchQueue(label: "\(Log.subsystem).camera")
     private let output = AVCaptureVideoDataOutput()
     private let lock = NSLock()
     private var latest: CVPixelBuffer?
