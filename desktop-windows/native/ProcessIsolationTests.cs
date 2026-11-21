@@ -42,6 +42,23 @@ internal static class ProcessIsolationTests
             ChromeControls.Prefix("join now without camera settings", "join now") ||
             ChromeControls.Prefix("join now without camera", "turn off camera"))
             throw new Exception("Join warning label matching broadened beyond the exact allowed action.");
+        if (ChromeControls.MeetMediaOfferCloseIndex(new[] { "use microphone", "close dialog", "use microphone and camera" }) != 1 ||
+            ChromeControls.MeetMediaOfferCloseIndex(new[] { "use microphone", "use microphone and camera" }) != -1 ||
+            ChromeControls.MeetMediaOfferCloseIndex(new[] { "close dialog", "use microphone" }) != -1 ||
+            ChromeControls.MeetMediaOfferCloseIndex(new[] { "allow", "block", "close dialog" }) != -1 ||
+            ChromeControls.MeetMediaOfferCloseIndex(new[] { "use microphone", "use microphone and camera", "close dialog (other)" }) != -1 ||
+            ChromeControls.MeetMediaOfferCloseIndex(new[] { "use microphone", "use microphone and camera", "close dialog", "close dialog" }) != -1)
+            throw new Exception("The Meet media offer must have one exact dismissal and both opt-in controls.");
+        if (!WindowsJoiner.MeetPermissionProofBelongsToJoin(Provider.GoogleMeet, true, true, true) ||
+            WindowsJoiner.MeetPermissionProofBelongsToJoin(Provider.GoogleMeet, false, true, true) ||
+            WindowsJoiner.MeetPermissionProofBelongsToJoin(Provider.GoogleMeet, true, false, true) ||
+            WindowsJoiner.MeetPermissionProofBelongsToJoin(Provider.GoogleMeet, true, true, false) ||
+            WindowsJoiner.MeetPermissionProofBelongsToJoin(Provider.Zoom, true, true, true) ||
+            WindowsJoiner.MeetPermissionProofBelongsToJoin(Provider.Teams, true, true, true) ||
+            !ChromeControls.IsMeetPermissionPrompt("allow this time") ||
+            !ChromeControls.IsMeetPermissionPrompt("meet.google.com wants to use your microphone") ||
+            ChromeControls.IsMeetPermissionPrompt("microphone: permission needed"))
+            throw new Exception("Meet permission evidence must come from our exact guarded Join, without an active permission prompt.");
         string marker = Path.Combine(Path.GetTempPath(), "reel-process-test-" + Guid.NewGuid().ToString("N"));
         try
         {
