@@ -12,14 +12,16 @@ from urllib.parse import urlsplit
 
 from flask import jsonify, redirect, request
 
-from calendar_meetings import (CalendarMeetingError, CalendarMeetings, CalendarProviderError, GoogleCalendarFactory,
-                               canonical_join_url, cloud_capture_enabled, cloud_requires_calendar, effective_cloud_providers)
-from reel_organization import public_account_access, trusted_origins
+from calendar_meetings import (CalendarMeetingError, CalendarMeetings, CalendarProviderError, CalendarSelectionChanged,
+                               GoogleCalendarFactory, canonical_join_url, cloud_capture_enabled, cloud_requires_calendar,
+                               effective_cloud_providers)
+from reel_organization import is_internal_email, meeting_domain_enabled, organization_domain, public_account_access, trusted_origins
 
 
 PROCESSING_TERMINAL_STATES = {"delivered", "private_notes_ready", "no_speech", "transcript_too_long", "review_required",
                               "calendar_selection_required", "recovered", "audio_unavailable"}
 RECOVERY_ASSETS = {"system-audio.wav", "recording.mp4"}
+DESKTOP_RESERVATION_SECONDS = 180
 CLOUD_FAILURE_CODES = {
     "startup": {"media_start_failed", "media_start_timeout", "display_unavailable", "browser_launch_failed",
                 "browser_launch_timeout", "context_create_failed", "context_create_timeout",
@@ -36,6 +38,74 @@ CLOUD_FAILURE_CODES = {
 
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def organization_desktop(email):
+    return (not public_account_access() and meeting_domain_enabled() and is_internal_email(email)
+            and os.getenv("MEETING_CAPTURE_PROVIDER") == "desktop")
+
+
+def desktop_claims_enabled(email):
+    return (organization_desktop(email) and os.getenv("REEL_DESKTOP_CLAIMS") == "1"
+            and not os.getenv("MEETING_CLOUD_PROVIDERS", "").strip())
+
+
+def shared_cloud_capture_key(event):
+    if not all(event.get(key) for key in ("ical_uid", "organizer_email", "participant_roster", "join_url")):
+        return ""
+    url = urlsplit(event["join_url"])
+    occurrence = datetime.fromisoformat(event["start"].replace("Z", "+00:00")).astimezone(UTC).isoformat()
+    return "sharedcapture/" + digest(json.dumps([event["ical_uid"], event["organizer_email"],
+        url.hostname, url.path.rstrip("/"), occurrence, event["participant_roster"]], separators=(",", ":")))
+
+
+class DesktopClaimConflict(CalendarMeetingError):
+    status = 409
+
+    def __init__(self, message, *, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def update_desktop_claim(store, key, binding, action, end):
+    """Only a live reservation may start, and only its owner can release it."""
+    for _ in range(3):
+        existing, generation = store.load(key, timeout=2)
+        current = existing or {}
+        own = bool(current and all(current.get(name) == value for name, value in binding.items()))
+        now = datetime.now(UTC).timestamp()
+        begun = current.get("status") == "begun"
+        reserved = current.get("status") == "reserved" and current["expires_at"] > now
+        if action == "reserve":
+            if own and (begun or reserved):
+                return current["status"]
+            if own or begun or reserved:
+                raise DesktopClaimConflict("This meeting already has a recorder" if begun or reserved else
+                                           "The recording reservation is no longer valid", retryable=reserved)
+            expiry = min(now + DESKTOP_RESERVATION_SECONDS, end.timestamp())
+            if expiry <= now:
+                raise DesktopClaimConflict("This meeting is no longer available for recording")
+            updated = {**binding, "status": "reserved", "expires_at": expiry}
+        elif action == "begin":
+            if own and begun:
+                return "begun"
+            if not own or not reserved:
+                raise DesktopClaimConflict("The recording reservation is no longer valid", retryable=reserved)
+            updated = {**binding, "status": "begun"}
+        else:
+            if own and current.get("status") == "released":
+                return "released"
+            if current and not own:
+                raise DesktopClaimConflict("The recording reservation belongs to another attempt")
+            # An aborted request can be released before its reserve reaches the store.
+            updated = {**binding, "status": "released"}
+        try:
+            store.cas(key, updated, generation, timeout=2)
+        except Exception:
+            # A racing writer or lost response is resolved from the same key.
+            continue
+        return updated["status"]
+    raise CalendarProviderError("Could not confirm the recording reservation. Try again.")
 
 
 def cloud_session(*, refresh_timeout=None):
@@ -245,9 +315,7 @@ class BotDispatcher:
         provider = "meet" if host == "meet.google.com" else "teams" if host in {"teams.microsoft.com", "teams.live.com"} else "zoom"
         shared_key, leader = "", True
         if shared:
-            occurrence = datetime.fromisoformat(saved["start"].replace("Z", "+00:00")).astimezone(UTC).isoformat()
-            shared_key = "sharedcapture/" + digest(json.dumps([saved["ical_uid"], saved["organizer_email"],
-                parsed.hostname, parsed.path.rstrip("/"), occurrence, saved["participant_roster"]], separators=(",", ":")))
+            shared_key = shared_cloud_capture_key(saved)
             claim = {"execution_id": execution, "owner_hash": digest(owner), "event_id": event["id"],
                      "capture_deadline": capture_deadline.isoformat()}
             try:
@@ -511,6 +579,8 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
 
     @app.errorhandler(CalendarMeetingError)
     def calendar_error(exc):
+        if isinstance(exc, DesktopClaimConflict):
+            return jsonify(error=str(exc), retryable=exc.retryable), exc.status
         return jsonify(error=str(exc)), exc.status
 
     @app.after_request
@@ -633,7 +703,84 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                 item["end"] = (end + timedelta(minutes=5)).isoformat()
             item["join_url"] = event["join_url"]
             (cloud_events if item["capture_provider"] == "cloud" else events).append(item)
-        return jsonify(events=events, cloud_events=cloud_events, cloud_providers=capabilities(claims)["cloud_providers"])
+        result = {"events": events, "cloud_events": cloud_events, "cloud_providers": capabilities(claims)["cloud_providers"]}
+        if organization_desktop(claims["email"]):
+            result["desktop_claims"] = desktop_claims_enabled(claims["email"])
+        return jsonify(result)
+
+    @app.route("/calendar/desktop/<event_id>/claim", methods=["POST", "OPTIONS"])
+    def desktop_calendar_claim(event_id):
+        if request.method == "OPTIONS":
+            return "", 204
+        claims = claims_for_request()
+        owner = claims["email"].lower()
+        if not desktop_claims_enabled(owner):
+            return jsonify(error="Desktop recording reservations are unavailable"), 404
+        data = payload()
+        action, claim_id = data.get("action"), data.get("claim_id")
+        if (set(data) != {"action", "claim_id", "participant_consent_attested"}
+                or action not in ("reserve", "begin", "release")
+                or data.get("participant_consent_attested") is not True):
+            raise CalendarMeetingError("Invalid desktop recording action or missing participant consent")
+        try:
+            if not isinstance(claim_id, str) or len(claim_id) != 36 or str(uuid.UUID(claim_id)) != claim_id:
+                raise ValueError
+        except ValueError:
+            raise CalendarMeetingError("Invalid desktop recording reservation") from None
+
+        def selected_occurrence():
+            state, _ = owner_state(claims)
+            state = state or {}
+            CalendarMeetings._verify_binding(state, claims)
+            config = state.get("config") or {}
+            event = state.get("events", {}).get(event_id) or {}
+            if not all(event.get(field) for field in ("ical_uid", "organizer_email", "desktop_occurrence_start")):
+                raise DesktopClaimConflict("A verified calendar occurrence is required for automatic recording")
+            if owner != event["organizer_email"] and owner not in {email.lower() for email in event["attendees"]}:
+                raise DesktopClaimConflict("This account is not on the meeting invitation")
+            return event, config
+
+        event, config = selected_occurrence()
+        now = datetime.now(UTC)
+        store = store_for_request()
+        if action == "release":
+            if event.get("capture_source") == "desktop" and event.get("status") in {"joined", "recording", "completed"}:
+                raise DesktopClaimConflict("This meeting has already started recording")
+        else:
+            def verify_available(event, config):
+                now = datetime.now(UTC)
+                start = datetime.fromisoformat(event["start"].replace("Z", "+00:00"))
+                if (config.get("enabled") is not True or event.get("calendar_id") not in config.get("calendar_ids", [])
+                        or not canonical_join_url(event.get("join_url")) or event.get("execution_id")
+                        or (event.get("attempted") and event.get("capture_source") != "desktop")
+                        or event.get("status") in {"cancelled", "completed"}
+                        or start > now + timedelta(seconds=30)
+                        or datetime.fromisoformat(event["end"].replace("Z", "+00:00")) <= now):
+                    raise DesktopClaimConflict("This meeting is unavailable for desktop recording")
+
+            verify_available(event, config)
+            current = service()._event_current(owner, config, event, now, verify_desktop_occurrence=True)
+            if current is None:
+                raise CalendarProviderError("Could not verify the meeting on its selected calendar")
+            latest, selection = selected_occurrence()
+            verify_available(latest, selection)
+            if (not current or selection.get("scope_revision") != config.get("scope_revision")
+                    or any(latest.get(k) != event.get(k) for k in
+                           ("join_url", "ical_uid", "organizer_email", "desktop_occurrence_start"))):
+                raise CalendarSelectionChanged("Calendar occurrence changed before recording")
+            event = latest
+            cloud_key = shared_cloud_capture_key(event)
+            if cloud_key:
+                cloud_claim, _ = store.load(cloud_key, timeout=2)
+                deadline = (cloud_claim or {}).get("capture_deadline")
+                if deadline and datetime.fromisoformat(deadline) > datetime.now(UTC):
+                    raise DesktopClaimConflict("This meeting is still assigned to a cloud recorder")
+
+        key = "desktopcapture/" + digest(json.dumps([organization_domain(), event["ical_uid"],
+            event["organizer_email"], event["desktop_occurrence_start"]], separators=(",", ":")))
+        binding = {"owner": digest(claims["sub"]), "event_id": event_id, "claim_id": claim_id}
+        end = datetime.fromisoformat(event["end"].replace("Z", "+00:00"))
+        return jsonify(status=update_desktop_claim(store, key, binding, action, end))
 
     @app.route("/calendar/desktop/<event_id>/state", methods=["POST", "OPTIONS"])
     def desktop_calendar_state(event_id):

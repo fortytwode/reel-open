@@ -353,6 +353,203 @@ def test_desktop_state_requires_consent_owner_and_available_occurrence(setup, mo
         assert post(client, path, body).status_code == 400
 
 
+@pytest.fixture
+def desktop_claims_setup(setup, monkeypatch):
+    import calendar_runtime as runtime
+
+    client, store, claims, calls, _ = setup
+    monkeypatch.setenv("REEL_ORGANIZATION_DOMAIN", "example.com")
+    monkeypatch.setenv("REEL_MEETING_ALLOWED_DOMAIN", "example.com")
+    monkeypatch.setenv("MEETING_CAPTURE_PROVIDER", "desktop")
+    monkeypatch.setenv("REEL_DESKTOP_CLAIMS", "1")
+    monkeypatch.delenv("MEETING_CLOUD_PROVIDERS", raising=False)
+    clock = [datetime.now(UTC)]
+
+    class ClaimClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz)
+
+    monkeypatch.setattr(runtime, "datetime", ClaimClock)
+    event = {"summary": "Externally hosted meeting", "iCalUID": "recurring@outside.example",
+             "organizer": {"email": "organizer@outside.example"},
+             "attendees": [{"email": "owner@example.com"}, {"email": "other@example.com"}],
+             "start": {"dateTime": (clock[0] - timedelta(seconds=5)).isoformat()},
+             "end": {"dateTime": (clock[0] + timedelta(minutes=35)).isoformat()},
+             "originalStartTime": {"dateTime": (clock[0] - timedelta(days=1)).isoformat()},
+             "hangoutLink": "https://meet.google.com/abc-defg-hij"}
+    events = [event]
+
+    def calendar(owner, _):
+        prefix = owner.split("@")[0]
+        return SimpleNamespace(list_calendars=available_calendars,
+                               list_events=lambda *_: [{**event, "id": f"{prefix}-{i}"} for i, event in enumerate(events)])
+
+    monkeypatch.setattr(runtime, "GoogleCalendarFactory", lambda: calendar)
+    user = {"owner": ("owner@example.com", "owner-uid"), "other": ("other@example.com", "other-uid")}
+
+    def authenticate(name):
+        claims["email"], claims["sub"] = user[name]
+
+    occurrence_ids = {}
+
+    def connect(name):
+        authenticate(name)
+        response = post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
+        assert response.status_code == 200
+        occurrence_ids[name] = [e["id"] for e in response.json["events"]]
+
+    def action(name, mode, claim_id, *, occurrence_index=0, extra=None):
+        authenticate(name)
+        endpoint = f"/calendar/desktop/{occurrence_ids[name][occurrence_index]}/claim"
+        return post(client, endpoint, {"action": mode, "claim_id": claim_id,
+                                      "participant_consent_attested": True, **(extra or {})})
+
+    connect("owner")
+    connect("other")
+    return SimpleNamespace(client=client, store=store, claims=claims, clock=clock, calls=calls,
+                         events=events, connect=connect, action=action, authenticate=authenticate, ids=occurrence_ids)
+
+
+def test_desktop_claim_uses_one_recorder_across_invited_accounts_and_calendar_copies(desktop_claims_setup):
+    setup = desktop_claims_setup
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    assert setup.ids["owner"] != setup.ids["other"]
+    assert setup.action("owner", "reserve", first).json == {"status": "reserved"}
+    assert setup.action("owner", "reserve", first).json == {"status": "reserved"}
+    alternate = setup.action("other", "reserve", second)
+    assert alternate.status_code == 409
+    assert alternate.json["retryable"] is True
+    assert "owner@example.com" not in alternate.get_data(as_text=True)
+    assert setup.action("other", "begin", first).status_code == 409
+    assert setup.action("other", "release", first).status_code == 409
+    assert setup.action("owner", "begin", first).json == {"status": "begun"}
+    assert setup.action("owner", "begin", first).json == {"status": "begun"}
+    setup.clock[0] += timedelta(minutes=5)
+    blocked = setup.action("other", "reserve", second)
+    assert blocked.status_code == 409
+    assert blocked.json["retryable"] is False
+    assert setup.calls == []
+
+
+@pytest.mark.parametrize("failed_at", ["lease expired", "before begin", "during capture setup"])
+def test_desktop_claim_allows_backup_until_recording_has_started(desktop_claims_setup, failed_at):
+    setup = desktop_claims_setup
+    first, backup = str(uuid.uuid4()), str(uuid.uuid4())
+    assert setup.action("owner", "reserve", first).status_code == 200
+    if failed_at == "lease expired":
+        setup.clock[0] += timedelta(minutes=3, seconds=1)
+    else:
+        if failed_at == "during capture setup":
+            assert setup.action("owner", "begin", first).status_code == 200
+        assert setup.action("owner", "release", first).json == {"status": "released"}
+        assert setup.action("owner", "release", first).json == {"status": "released"}
+    assert setup.action("other", "reserve", backup).json == {"status": "reserved"}
+    assert setup.action("owner", "begin", first).status_code == 409
+    assert setup.action("owner", "release", first).status_code == 409
+    assert setup.action("other", "begin", backup).json == {"status": "begun"}
+
+
+def test_desktop_claim_uses_original_start_for_separate_recurring_occurrences(desktop_claims_setup):
+    setup = desktop_claims_setup
+    other_occurrence = {**setup.events[0],
+                        "originalStartTime": {"dateTime": (setup.clock[0] - timedelta(days=2)).isoformat()}}
+    setup.events.append(other_occurrence)
+    setup.connect("other")
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    assert setup.action("owner", "reserve", first).status_code == 200
+    assert setup.action("other", "reserve", second).status_code == 409
+    assert setup.action("other", "reserve", second, occurrence_index=1).status_code == 200
+    assert setup.action("other", "begin", second, occurrence_index=1).status_code == 200
+
+
+@pytest.mark.parametrize("action", ["reserve", "begin"])
+def test_desktop_claim_rejects_a_cancelled_calendar_before_capture(desktop_claims_setup, action):
+    setup = desktop_claims_setup
+    first = str(uuid.uuid4())
+    if action == "begin":
+        assert setup.action("owner", "reserve", first).status_code == 200
+    setup.events[0]["status"] = "cancelled"
+    assert setup.action("owner", action, first).status_code == 409
+    assert setup.action("owner", "release", first).status_code == 200
+
+
+def test_desktop_claim_keeps_an_already_started_recording(desktop_claims_setup):
+    setup = desktop_claims_setup
+    first = str(uuid.uuid4())
+    assert setup.action("owner", "reserve", first).status_code == 200
+    assert setup.action("owner", "begin", first).status_code == 200
+    path = "/calendar/desktop/" + setup.ids["owner"][0] + "/state"
+    assert post(setup.client, path, {"state": "joined", "participant_consent_attested": True}).status_code == 200
+    assert setup.action("owner", "release", first).status_code == 409
+    assert setup.action("other", "reserve", str(uuid.uuid4())).status_code == 409
+
+
+def test_desktop_claim_release_is_honored_before_an_in_flight_reserve(desktop_claims_setup):
+    setup = desktop_claims_setup
+    first = str(uuid.uuid4())
+    assert setup.action("owner", "release", first).status_code == 200
+    assert setup.action("owner", "reserve", first).status_code == 409
+    assert setup.action("other", "reserve", str(uuid.uuid4())).status_code == 200
+
+
+def test_desktop_claim_retries_a_simultaneous_reservation_and_respects_the_winner(desktop_claims_setup, monkeypatch):
+    setup = desktop_claims_setup
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    actual_cas = setup.store.cas
+    competitor = []
+
+    def racing_cas(key, data, generation, **kwargs):
+        if key.startswith("desktopcapture/") and data["claim_id"] == first:
+            winner = {**data, "owner": hashlib.sha256(b"other-uid").hexdigest(),
+                      "event_id": setup.ids["other"][0], "claim_id": second}
+            competitor.append(actual_cas(key, winner, generation, **kwargs))
+        return actual_cas(key, data, generation, **kwargs)
+
+    monkeypatch.setattr(setup.store, "cas", racing_cas)
+    assert setup.action("owner", "reserve", first).status_code == 409
+    assert competitor == [1]
+    assert setup.action("other", "begin", second).status_code == 200
+
+
+@pytest.mark.parametrize("disabled", ["flag", "public", "cloud"])
+def test_desktop_claims_stay_disabled_otherwise(desktop_claims_setup, monkeypatch, disabled):
+    setup = desktop_claims_setup
+    if disabled == "flag":
+        monkeypatch.delenv("REEL_DESKTOP_CLAIMS")
+    elif disabled == "public":
+        monkeypatch.setenv("REEL_ACCOUNT_ACCESS", "public")
+        setup.claims["firebase"] = {"sign_in_provider": "google.com", "identities": {"google.com": ["google-subject"]}}
+    else:
+        monkeypatch.setenv("MEETING_CLOUD_PROVIDERS", "google_meet")
+    auth = {"Authorization": "Bearer firebase"}
+    feed = setup.client.get("/calendar/desktop", headers=auth)
+    assert feed.status_code == 200
+    if disabled == "public":
+        assert "desktop_claims" not in feed.json
+    else:
+        assert feed.json["desktop_claims"] is False
+    assert setup.action("owner", "reserve", str(uuid.uuid4())).status_code == 404
+
+
+def test_desktop_claim_rejects_untrusted_occurrence_and_checks_rollover_cloud_claim(desktop_claims_setup):
+    import calendar_runtime as runtime
+
+    setup = desktop_claims_setup
+    claim_id = str(uuid.uuid4())
+    setup.authenticate("owner")
+    client_auth = {"Authorization": "Bearer firebase"}
+    assert setup.client.get("/calendar/desktop", headers=client_auth).json["desktop_claims"] is True
+    assert setup.action("owner", "reserve", claim_id, extra={"join_url": "https://attacker.invalid"}).status_code == 400
+    assert setup.action("owner", "reserve", claim_id.upper()).status_code == 400
+    assert post(setup.client, "/calendar/desktop/" + setup.ids["other"][0] + "/claim",
+                {"action": "reserve", "claim_id": claim_id, "participant_consent_attested": True}).status_code == 409
+    state, _ = setup.store.load("calendar/" + runtime.digest("owner@example.com"))
+    cloud_key = runtime.shared_cloud_capture_key(state["events"][setup.ids["owner"][0]])
+    setup.store.cas(cloud_key, {"capture_deadline": (setup.clock[0] + timedelta(minutes=2)).isoformat()}, 0)
+    assert setup.action("owner", "reserve", claim_id).status_code == 409
+
+
 def test_desktop_provider_disables_cloud_dispatch(setup, monkeypatch):
     client, _, _, calls, _ = setup
     monkeypatch.setenv("MEETING_CAPTURE_PROVIDER", "desktop")

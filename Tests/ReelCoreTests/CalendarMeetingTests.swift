@@ -74,6 +74,19 @@ final class CalendarMeetingTests: XCTestCase {
         XCTAssertTrue(DesktopCalendarRouting.allowsLocal(routingMeeting("https://zoom.us/j/123456789"), routing: nil))
     }
 
+    func testDesktopClaimsRequireAnExplicitCapabilityOnTheCurrentFeed() throws {
+        let legacy = try XCTUnwrap(DesktopCalendarRouting(payload: ["events": []], now: now))
+        XCTAssertFalse(legacy.requiresDesktopClaims)
+        XCTAssertNil(legacy.desktopClaimsCapability)
+        let current: [String: Any] = ["events": [], "cloud_events": [], "cloud_providers": []]
+        XCTAssertTrue(try XCTUnwrap(DesktopCalendarRouting(payload: current.merging(["desktop_claims": true]) { _, new in new },
+                                                         now: now)).requiresDesktopClaims)
+        XCTAssertEqual(try XCTUnwrap(DesktopCalendarRouting(payload: current.merging(["desktop_claims": false]) { _, new in new },
+                                                          now: now)).desktopClaimsCapability, false)
+        XCTAssertNil(DesktopCalendarRouting(payload: ["events": [], "desktop_claims": true], now: now))
+        XCTAssertNil(DesktopCalendarRouting(payload: current.merging(["desktop_claims": "true"]) { _, new in new }, now: now))
+    }
+
     func testManualLinksUseActiveCloudWindowInsteadOfManufacturedStart() throws {
         for url in [teams, meet, "https://zoom.us/j/123456789"] {
             let cloud = routingMeeting(url, start: now.addingTimeInterval(-600))

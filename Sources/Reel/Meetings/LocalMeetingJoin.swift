@@ -84,15 +84,17 @@ enum LocalMeetingJoin {
         }
     }
 
-    static func join(url: URL, consentConfirmed: Bool, onStatus: ((String) -> Void)? = nil) async throws -> Outcome {
+    static func join(url: URL, consentConfirmed: Bool, closeOnFailure: Bool = false,
+                     onStatus: ((String) -> Void)? = nil) async throws -> Outcome {
         try Task.checkCancellation()
         guard consentConfirmed else { throw JoinError.consentRequired }
         guard let link = MeetingLinkParser.parse(url.absoluteString) else { throw JoinError.invalidMeetingURL }
-        return try await joinDedicated(expected: link, entryURL: link.url, allowStandaloneHop: true, onStatus: onStatus)
+        return try await joinDedicated(expected: link, entryURL: link.url, allowStandaloneHop: true,
+                                       closeOnFailure: closeOnFailure, onStatus: onStatus)
     }
 
     private static func joinDedicated(expected link: MeetingLink, entryURL: URL, allowStandaloneHop: Bool,
-                                      onStatus: ((String) -> Void)?) async throws -> Outcome {
+                                      closeOnFailure: Bool, onStatus: ((String) -> Void)?) async throws -> Outcome {
         try Task.checkCancellation()
         guard AXIsProcessTrusted() else { throw JoinError.accessibilityPermissionRequired }
         guard let chromeURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") else {
@@ -190,7 +192,7 @@ enum LocalMeetingJoin {
         var reusableTabForCleanup: AXUIElement?
         var openRequested = false
         defer {
-            if !windowClosingForHop, Task.isCancelled {
+            if !windowClosingForHop, Task.isCancelled || (closeOnFailure && ownedCalls[id] == nil) {
                 // The open request may have completed just as cancellation arrived.
                 if openRequested, ownedTab == nil, let previous = previousTabsForCleanup, let tabs = browserTabs(window) {
                     let added = tabs.filter { tab in !previous.contains(where: { CFEqual($0, tab) }) }
@@ -330,7 +332,8 @@ enum LocalMeetingJoin {
                     }
                     guard disappeared else { return manual("standalone_close_unconfirmed") }
                     log.info("Zoom standalone navigation: original tab closed")
-                    return try await joinDedicated(expected: link, entryURL: target, allowStandaloneHop: false, onStatus: onStatus)
+                    return try await joinDedicated(expected: link, entryURL: target, allowStandaloneHop: false,
+                                                   closeOnFailure: closeOnFailure, onStatus: onStatus)
                 }
                 if link.platform == .zoom,
                    dismissZoomTranscriptNotice(application: application, window: window, tab: ownedTab,

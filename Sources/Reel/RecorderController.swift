@@ -151,7 +151,8 @@ final class RecorderController {
 
     @discardableResult
     func start(window preselected: SCWindow? = nil, area preselectedArea: CGRect? = nil,
-               focusWindowOnStart: Bool = true, authorization: (() -> Bool)? = nil) -> Bool {
+               focusWindowOnStart: Bool = true, authorization: (() -> Bool)? = nil,
+               authorizeStart: (() async -> Bool)? = nil, captureSetupFinished: ((Bool) -> Void)? = nil) -> Bool {
         guard model.phase == .idle, !startFlowActive else {
             model.meetingCalendarOccurrenceID = nil
             model.meetingCalendarReference = nil
@@ -163,13 +164,17 @@ final class RecorderController {
         Task {
             defer { self.startFlowActive = false }
             await self.startFlow(preselected: preselected, requestedArea: requestedArea,
-                                 focusWindowOnStart: focusWindowOnStart, authorization: authorization)
+                                 focusWindowOnStart: focusWindowOnStart, authorization: authorization,
+                                 authorizeStart: authorizeStart, captureSetupFinished: captureSetupFinished)
         }
         return true
     }
 
     private func startFlow(preselected: SCWindow?, requestedArea: CGRect?,
-                           focusWindowOnStart: Bool, authorization: (() -> Bool)?) async {
+                           focusWindowOnStart: Bool, authorization: (() -> Bool)?,
+                           authorizeStart: (() async -> Bool)?, captureSetupFinished: ((Bool) -> Void)?) async {
+        var captureStarted = false
+        defer { captureSetupFinished?(captureStarted) }
         let s = model.effectiveSettings()
         let captureOwnerUserID = await CloudAuth.shared.current?.userID
         func bail(_ message: String?) {
@@ -346,6 +351,10 @@ final class RecorderController {
             await abandonPreparation(session, recording: recording)
             return bail("Couldn't start recording: \(error.localizedDescription)")
         }
+        if model.phase != .idle, authorization?() != false, let authorizeStart, !(await authorizeStart()) {
+            await abandonPreparation(session, recording: recording)
+            return bail(nil)
+        }
         guard model.phase != .idle, authorization?() != false else {   // cancelled
             await abandonPreparation(session, recording: recording)
             return bail(authorization?() == false ? "Meeting setup cancelled because authorization changed." : nil)
@@ -374,6 +383,7 @@ final class RecorderController {
             if focusWindowOnStart { (NSApp.delegate as? AppDelegate)?.dismissWindowRecordingSetup() }
         }
         session.begin()
+        captureStarted = true
         model.phase = .recording
         Sound.play(.start)
         HotKeys.shared.registerRecordingKeys(s)
