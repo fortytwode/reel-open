@@ -9,6 +9,7 @@ struct MeetingSetupView: View {
     let onFinish: () -> Void
     let onLater: () -> Void
     let onManageCalendars: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
 
     private let steps = [
         (title: "Choose calendars", icon: "calendar"),
@@ -51,6 +52,7 @@ struct MeetingSetupView: View {
         }
         .padding(24)
         .frame(width: 540, height: 390)
+        .tint(ReelPanelPalette.accentText(in: colorScheme))
         .task { await setup.monitorForeground() }
     }
 
@@ -99,7 +101,7 @@ struct MeetingSetupView: View {
             if showResult {
                 Button("Done", action: onFinish)
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(ReelProminentButtonStyle())
             } else {
                 if setup.step > 0 {
                     Button("Back") { setup.step -= 1 }.disabled(setup.busy)
@@ -108,12 +110,12 @@ struct MeetingSetupView: View {
                     Button("Continue") { setup.step += 1 }
                         .disabled(setup.busy)
                         .keyboardShortcut(.defaultAction)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(ReelProminentButtonStyle())
                 } else {
                     Button(setup.willEnableJoining ? "Turn on auto-join" : "Save setup") { setup.complete() }
                         .disabled(setup.busy || !setup.readiness.isReady || !setup.participantConsent)
                         .keyboardShortcut(.defaultAction)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(ReelProminentButtonStyle())
                 }
             }
         }

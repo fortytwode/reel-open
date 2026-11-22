@@ -1,6 +1,32 @@
 import AppKit
 import SwiftUI
 
+enum ReelPanelPalette {
+    static let ink = Color(red: 18 / 255, green: 21 / 255, blue: 26 / 255)
+    static let mint = Color(red: 114 / 255, green: 231 / 255, blue: 212 / 255)
+
+    static func accentText(in scheme: ColorScheme) -> Color {
+        scheme == .dark ? mint : Color(red: 14 / 255, green: 101 / 255, blue: 87 / 255)
+    }
+}
+
+struct ReelProminentButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(isEnabled ? ReelPanelPalette.ink : Color.secondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .background(
+                isEnabled ? ReelPanelPalette.mint.opacity(configuration.isPressed ? 0.78 : 1)
+                    : Color.secondary.opacity(0.12),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+    }
+}
+
 @MainActor
 final class ReelAppearance: ObservableObject {
     enum Mode: String, CaseIterable {
