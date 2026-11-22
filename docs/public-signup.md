@@ -8,7 +8,22 @@ Create a dedicated Firebase project, web origin, Firestore database, recording b
 
 Copy `organization.example.json` to a private deployment file, fill in the new project's values and set `"accountAccess": "public"`. You can omit `allowedEmailDomain`. Leave `googleClientID`, `googleDesktopClientId`, `deliveryServiceURL` and `speechServiceURL` empty or omit them. Set `meetingServiceURL` to the public deployment's meeting API origin and include only your HTTPS web origin in `allowedOrigins`. Render the configuration and deploy the generated Firebase rules with the web client. These rules allow verified Google accounts to create UID-bound recordings and access only their own library.
 
-Deploy the meeting API using the generated `.reel/backend.env`. Configure Cloud Tasks and the meeting worker with the deployment's private service identities. Run the authenticated Cloud Scheduler request to `POST /internal/calendar/sync` regularly so meetings are discovered and processing is reconciled while users are offline. Use your own dedicated Meet bot account and confirm that the host can admit it. The cloud worker still requires participant consent and a currently authorized calendar occurrence. Direct transcription and automatic delivery through Notion, email or Slack are unavailable in public mode.
+## Set up the Notetaker backend
+
+Build the [meeting API](../meeting-service/README.md#build-and-configure) and [cloud worker](../meeting-bot/README.md#build-and-deploy) from this repository. Load `.reel/backend.env` on the API. In public mode, each user's Calendar OAuth grant supplies Calendar access. Workspace domain-wide delegation and the standalone delivery service are optional for organization deployments and are unnecessary here. Public mode uses private in-app notes, and the cloud processing job handles transcription.
+
+| API setting | Value |
+| --- | --- |
+| `RECEIPT_BUCKET`, `RECEIPT_PREFIX` | Private meeting-state bucket and prefix. The API runtime needs object read, create and replacement access. |
+| `CALENDAR_TASK_QUEUE`, `PROCESSING_TASK_QUEUE` | Full Cloud Tasks queue names of the form `projects/PROJECT/locations/REGION/queues/NAME`. Use separate queues for scheduling and processing. |
+| `INTERNAL_SERVICE_ACCOUNT` | Service account email used for authenticated queue and scheduler requests, and private download signatures. |
+| `BOT_JOB_NAME`, `BOT_BUCKET` | Fully qualified Cloud Run Job name and private bucket for worker payloads and artifacts. |
+| `MEETING_CLOUD_PROVIDERS` | Enable the providers you test with `google_meet`, `teams`, or `google_meet,teams`. |
+| `OPENAI_API_KEY` | Server-side key for transcription and summarization. Store it as a runtime secret. Configure `OPENAI_TRANSCRIPTION_MODEL` and `OPENAI_SUMMARY_MODEL` if your account uses models other than the [API defaults](../meeting-service/README.md#speech-endpoints). |
+
+Give the API runtime permission to enqueue tasks as the internal service account, run the worker job with overrides, and read and write its private payloads and artifacts. Give the internal service account read access to the private artifact objects it signs. Enable the IAM Service Account Credentials API and allow the API runtime to sign blobs as that account. See the [worker guide](../meeting-bot/README.md#dedicated-google-meet-account) for configuring a separate Google Meet bot account. Confirm that the host can admit the bot and that participants have given consent.
+
+Run the Cloud Scheduler request to `POST /internal/calendar/sync` regularly with an OIDC token for the internal service account. Use the exact HTTPS meeting API origin as the token audience. For processing, use a 600-second API timeout, concurrency 1 and a retry window of at least 24 hours with at least 100 attempts and a maximum backoff of 300 seconds.
 
 ## Authorize Google Calendar
 

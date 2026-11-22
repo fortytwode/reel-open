@@ -5,7 +5,7 @@ Reel contains two products that can be used independently.
 - **Reel Recorder** opens a capture toolbar on macOS or in the browser at `/record`. Record a window, screen or camera and share the video link. On the Mac, you can also save clips locally.
 - **Reel Notetaker** opens at `/notetaker`. Choose calendars, manage upcoming calls and read participant meeting notes. The web app can be added to the Mac Dock. Configured Google Meet and Teams meetings can run in the cloud while your Mac is closed. Local meeting capture remains available from the Mac companion.
 
-Both products use the same organization deployment and account. A screen recording can be shared by link under its access settings. Meeting notes use the participant access checks in the delivery service.
+For online features, both products can share a self-hosted deployment and account. Local screen recording is available without an account. A screen recording can be shared by link under its access settings. Meeting notes use the participant access checks in the delivery service.
 
 ## Run locally
 
@@ -32,7 +32,7 @@ Use the [self-hosting guide](docs/self-hosting.md) to set up hosting, Google sig
 
 Cloud auto-join supports Google Meet and Teams links on Google Calendar. The deployment’s Google Workspace administrator grants the calendar service account delegated read access. Each verified member then signs in, selects calendars and sets recording consent.
 
-For a hosted service serving customers across domains, use the isolated [public signup deployment](docs/public-signup.md). The web products support verified Google accounts and Notetaker requests each account's Calendar permission separately.
+For a self-hosted browser deployment that accepts verified Google accounts across domains, use the isolated [public signup deployment](docs/public-signup.md). The web products support verified Google accounts and Notetaker requests each account's Calendar permission separately.
 
 ## Run checks
 

@@ -79,3 +79,17 @@ jobs:
         with:
           persist-credentials: false
       - run: swift test
+      - name: Launch the certificate-free Mac build
+        run: |
+          CONFIG=debug REEL_SIGN_IDENTITY=- ./scripts/build-app.sh
+          python3 - <<'PYSMOKE'
+          import subprocess
+
+          with subprocess.Popen(["dist/Reel.app/Contents/MacOS/Reel"]) as app:
+              try:
+                  status = app.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  app.terminate()
+              else:
+                  raise SystemExit(f"Reel exited during launch smoke test ({status})")
+          PYSMOKE

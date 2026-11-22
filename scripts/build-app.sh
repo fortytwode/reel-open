@@ -132,9 +132,13 @@ if [[ -z "$SIGN_IDENTITY" ]]; then
 fi
 echo "Signing with: $SIGN_IDENTITY"
 if [[ "${REEL_TIMESTAMP:-0}" == "1" ]]; then TS_FLAG="--timestamp"; else TS_FLAG="--timestamp=none"; fi
-# Hardened runtime (required for notarization) with Reel's camera/microphone entitlements.
-# Sign inside-out, never with --deep: Sparkle's helpers, then the framework, then the app.
-sign() { codesign --force --options runtime "$TS_FLAG" --sign "$SIGN_IDENTITY" "$@"; }
+# Hardened runtime requires a signing team to load bundled Sparkle. Ad hoc
+# contributor builds have no Team ID and are only for local use.
+SIGN_OPTIONS=()
+if [[ "$SIGN_IDENTITY" != "-" ]]; then SIGN_OPTIONS=(--options runtime); fi
+
+# Sign inside-out: Sparkle's helpers, then the framework, then the app.
+sign() { codesign --force ${SIGN_OPTIONS[@]+"${SIGN_OPTIONS[@]}"} "$TS_FLAG" --sign "$SIGN_IDENTITY" "$@"; }
 SPARKLE="$APP_PATH/Contents/Frameworks/Sparkle.framework/Versions/B"
 for nested in "$SPARKLE/XPCServices/Installer.xpc" "$SPARKLE/XPCServices/Downloader.xpc" \
   "$SPARKLE/Autoupdate" "$SPARKLE/Updater.app"; do
