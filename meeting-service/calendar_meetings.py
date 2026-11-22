@@ -198,6 +198,8 @@ def normalize_event(calendar_id, event, owner_email, now=None):
             and all(0 < len(email) <= 320 and
                 re.fullmatch(r"[^@\s<>]+@[^@\s<>]+", email) for email in roster)):
         normalized.update(ical_uid=uid, organizer_email=organizer_email, participant_roster=sorted(roster))
+        original = _parse_time(event.get("originalStartTime")) or start
+        normalized["desktop_occurrence_start"] = original.isoformat()
     roster_emails = {email.strip().lower() for email in normalized.get("participant_roster", normalized["attendees"])}
     attendee_names = {}
     for participant in (*attendees[:100], organizer):
@@ -465,6 +467,9 @@ class CalendarMeetings:
                 old = existing.get(identity)
                 if old and old.get("status") == "cancelled" and not old.get("calendar_excluded"):
                     continue
+                if old and "desktop_occurrence_start" in new:
+                    # Backfill calendars saved before desktop capture was coordinated.
+                    old["desktop_occurrence_start"] = new["desktop_occurrence_start"]
                 if old and old.get("status") in {"dispatching", "requesting_entry", "awaiting_admission", "joined", "recording", "completed", "failed"}:
                     continue
                 changed = not old or old.get("calendar_excluded") or any(old.get(key) != new.get(key) for key in
@@ -681,7 +686,7 @@ class CalendarMeetings:
             raise CalendarMeetingError("No calendar connection")
         return state["config"], state, generation
 
-    def _event_current(self, owner, config, target, now):
+    def _event_current(self, owner, config, target, now, *, verify_desktop_occurrence=False):
         calendar_id = target.get("calendar_id")
         if not config.get("enabled") or calendar_id not in config.get("calendar_ids", []):
             return False
@@ -694,6 +699,8 @@ class CalendarMeetings:
             for raw in client.list_events(calendar_id, time_min.isoformat(), horizon.isoformat()):
                 normalized = normalize_event(calendar_id, raw, owner, now)
                 if (normalized and normalized["id"] == target.get("id")
+                        and (not verify_desktop_occurrence or normalized.get("desktop_occurrence_start")
+                             == target.get("desktop_occurrence_start"))
                         and all(normalized.get(key) == target.get(key) for key in
                             ("join_url", "ical_uid", "organizer_email", "participant_roster"))):
                     return True

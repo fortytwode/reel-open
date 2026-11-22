@@ -50,6 +50,15 @@ public struct MeetingJoinSchedule {
         entries[key] = entry
     }
 
+    /// A competing reservation may expire without either Mac trying to join.
+    public mutating func deferForRecorder(key: String, now: Date) {
+        guard var entry = entries[key], entry.inFlight else { return }
+        entry.inFlight = false
+        entry.attempts -= 1
+        entry.retryAfter = now.addingTimeInterval(retryDelay)
+        entries[key] = entry
+    }
+
     public mutating func complete(key: String) {
         var entry = entries[key, default: Entry()]
         entry.completed = true

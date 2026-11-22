@@ -60,4 +60,20 @@ final class MeetingJoinScheduleTests: XCTestCase {
         schedule.finish(key: "recover", now: start, retryable: true)
         XCTAssertTrue(schedule.shouldAttempt(key: "recover", start: start, end: end, now: start.addingTimeInterval(30)))
     }
+
+    func testRecorderContentionBacksOffOnlyThatMeetingWithoutUsingAnAttempt() {
+        var schedule = MeetingJoinSchedule()
+        let end = start.addingTimeInterval(600)
+        var now = start
+        for _ in 0..<4 {
+            XCTAssertTrue(schedule.shouldAttempt(key: "waiting", start: start, end: end, now: now))
+            schedule.begin(key: "waiting", now: now)
+            schedule.deferForRecorder(key: "waiting", now: now)
+            XCTAssertFalse(schedule.shouldAttempt(key: "waiting", start: start, end: end, now: now))
+            XCTAssertTrue(schedule.shouldAttempt(key: "different", start: start, end: end, now: now))
+            now = now.addingTimeInterval(30)
+        }
+        XCTAssertTrue(schedule.shouldAttempt(key: "waiting", start: start, end: end, now: now))
+        XCTAssertFalse(schedule.shouldAttempt(key: "waiting", start: start, end: end, now: start.addingTimeInterval(301)))
+    }
 }

@@ -41,6 +41,8 @@ final class MeetingJoinCoordinator: ObservableObject {
     private var captureWatch: Task<Void, Never>?
     private var cloudIDs: [String: String] = [:]
     private var desktopRouting: DesktopCalendarRouting?
+    // After the server advertises claims, a failed refresh must not restore uncoordinated joins.
+    private var desktopClaimsRequired = OrganizationState.defaults.bool(forKey: "meetingCalendar.desktopClaimsRequired")
     private var routingRevision = 0
     private var scheduled = Set<String>()
     private var schedule = MeetingJoinSchedule()
@@ -48,6 +50,14 @@ final class MeetingJoinCoordinator: ObservableObject {
         let generation: UInt64
         let selection: CalendarSelection
     }
+    private struct DesktopClaim {
+        let eventID: String
+        let id = UUID().uuidString.lowercased()
+        let ownerID: String
+        let cleanupToken: String
+    }
+    private enum DesktopClaimAction: String { case reserve, begin, release }
+    private enum DesktopClaimResponse { case accepted, waiting, unavailable }
     private var reconciledReminderScope: RefreshScope?
     private var refreshTask: (scope: RefreshScope, task: Task<Void, Never>)?
     private var refreshing: Bool { refreshTask != nil }
@@ -264,6 +274,10 @@ final class MeetingJoinCoordinator: ObservableObject {
                    let events = body["events"] as? [[String: Any]],
                    let routing = DesktopCalendarRouting(payload: body, now: Date()) {
                     desktopRouting = routing; routingRevision += 1
+                    if let advertised = routing.desktopClaimsCapability, desktopClaimsRequired != advertised {
+                        desktopClaimsRequired = advertised
+                        OrganizationState.defaults.set(advertised, forKey: "meetingCalendar.desktopClaimsRequired")
+                    }
                     cloudFound = routing.cloudMeetings
                     for event in events {
                         guard let id = event["id"] as? String, let title = event["title"] as? String,
@@ -310,6 +324,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         else { calendarStatus = "Joining in Chrome is on while this Mac is awake. \(meetings.filter { $0.calendarID != "manual" }.count) upcoming or ongoing meetings found." }
         if autoJoin && hasStandingConsentForCurrentScope && !busy && AppModel.shared.phase == .idle {
             if let due = meetings.first(where: {
+                (!desktopClaimsRequired || verifiedDesktopEventID(for: $0) != nil) &&
                 hasStandingConsent(for: $0) && schedule.shouldAttempt(key: Self.key($0), start: $0.start, end: $0.end, now: Date()) && AppModel.shared.existingMeeting(forOccurrence: $0.id) == nil
             }) {
                 schedule.begin(key: Self.key(due), now: Date())
@@ -337,30 +352,40 @@ final class MeetingJoinCoordinator: ObservableObject {
         busy = true; accessibilitySettingsURL = nil; status = "Opening meeting"
         log.notice("Meeting entry started; automatic=\(automatic, privacy: .public)")
         let consentRevision = automaticConsentRevision
+        let accountGeneration = AppModel.shared.accountGeneration
         joinTask = Task {
             var captureHandedOff = false
             var joinedWindowID: CGWindowID?
             var retryable = false
+            var waitingForRecorder = false
+            var desktopClaim: DesktopClaim?
             defer {
                 if !captureHandedOff, let joinedWindowID { LocalMeetingJoin.closeOwned(windowID: joinedWindowID) }
-                if automatic && !captureHandedOff { schedule.finish(key: Self.key(meeting), now: Date(), retryable: retryable) }
+                if !captureHandedOff, let desktopClaim { releaseDesktopClaim(desktopClaim) }
+                if automatic && !captureHandedOff {
+                    if waitingForRecorder { schedule.deferForRecorder(key: Self.key(meeting), now: Date()) }
+                    else { schedule.finish(key: Self.key(meeting), now: Date(), retryable: retryable) }
+                }
                 busy = false; joinTask = nil
             }
             let owner = await CloudAuth.shared.current?.userID
             do {
                 guard owner == accountIdentity,
+                      AppModel.shared.accountGeneration == accountGeneration,
                       consentOwner == (owner ?? "local:\(getuid())") else {
                     consent = false
                     status = "Your account changed. Refresh meetings and confirm consent again."
                     return
                 }
-                if meeting.platform == .teams || meeting.platform == .googleMeet || meeting.calendarID == "manual" {
+                if meeting.platform == .teams || meeting.platform == .googleMeet || meeting.calendarID == "manual" ||
+                    desktopClaimsRequired {
                     let previousRevision = routingRevision
                     // Recheck stale selections, notification links and manual objects before any AX action.
                     // busy prevents refresh from recursively scheduling another automatic join.
                     await refresh()
                     guard await CloudAuth.shared.current?.userID == owner,
-                          AppModel.shared.account?.userID == owner, accountIdentity == owner else {
+                          AppModel.shared.account?.userID == owner, accountIdentity == owner,
+                          AppModel.shared.accountGeneration == accountGeneration else {
                         status = "Your account changed. Refresh meetings and confirm consent again."
                         return
                     }
@@ -387,10 +412,45 @@ final class MeetingJoinCoordinator: ObservableObject {
                     }
                 }
                 guard !automatic || isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision) else { return }
+                if desktopClaimsRequired, meeting.calendarID != "manual" {
+                    guard let owner, let eventID = verifiedDesktopEventID(for: meeting) else {
+                        status = "Sign in and select this meeting’s Google calendar in Reel Notetaker to coordinate recording."
+                        return
+                    }
+                    let session = try await CloudAuth.shared.validSession()
+                    try Task.checkCancellation()
+                    guard session.userID == owner, AppModel.shared.accountGeneration == accountGeneration,
+                          await captureAuthorized(meeting, expectedOwner: owner, automatic: automatic,
+                                                  consentRevision: consentRevision) else { return }
+                    let claim = DesktopClaim(eventID: eventID, ownerID: owner, cleanupToken: session.idToken)
+                    desktopClaim = claim
+                    retryable = automatic
+                    let reservation = try await requestDesktopClaim(claim, action: .reserve, token: session.idToken)
+                    retryable = false
+                    switch reservation {
+                    case .accepted: break
+                    case .waiting:
+                        desktopClaim = nil
+                        waitingForRecorder = true
+                        status = "Another Mac is preparing to record this meeting."
+                        return
+                    case .unavailable:
+                        desktopClaim = nil
+                        status = "This meeting is unavailable for coordinated recording."
+                        return
+                    }
+                    try Task.checkCancellation()
+                    guard AppModel.shared.accountGeneration == accountGeneration,
+                          await captureAuthorized(meeting, expectedOwner: owner, automatic: automatic,
+                                                  consentRevision: consentRevision) else { return }
+                }
                 await markCloud(meeting, state: "requesting_entry", expectedOwner: owner)
                 try Task.checkCancellation()
-                guard !automatic || isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision) else { return }
-                let result = try await LocalMeetingJoin.join(url: meeting.joinURL, consentConfirmed: true) { self.status = $0 }
+                guard AppModel.shared.accountGeneration == accountGeneration,
+                      await captureAuthorized(meeting, expectedOwner: owner, automatic: automatic,
+                                              consentRevision: consentRevision) else { return }
+                let result = try await LocalMeetingJoin.join(url: meeting.joinURL, consentConfirmed: true,
+                                                            closeOnFailure: desktopClaim != nil) { self.status = $0 }
                 if case .joined(let id) = result { joinedWindowID = id }
                 try Task.checkCancellation()
                 guard AppModel.shared.account?.userID == owner, AppModel.shared.phase == .idle else { status = "Account or recording changed. Start again."; return }
@@ -398,7 +458,8 @@ final class MeetingJoinCoordinator: ObservableObject {
                 case .joined(let id):
                     let content = try await ScreenCapture.shareableContent()
                     try Task.checkCancellation()
-                    guard await CloudAuth.shared.current?.userID == owner, AppModel.shared.phase == .idle else { return }
+                    guard await CloudAuth.shared.current?.userID == owner, AppModel.shared.phase == .idle,
+                          AppModel.shared.accountGeneration == accountGeneration else { return }
                     guard let window = content.windows.first(where: { $0.windowID == id }) else {
                         status = "The meeting window is unavailable. Choose it in Reel."
                         await markCloud(meeting, state: "failed", expectedOwner: owner)
@@ -410,10 +471,54 @@ final class MeetingJoinCoordinator: ObservableObject {
                     model.meetingCalendarOccurrenceID = meeting.id
                     model.meetingCalendarReference = meeting.deliveryCalendar
                     model.meetingMicrophoneEnabled = includeMicrophone
-                    guard RecorderController.shared.start(window: window, focusWindowOnStart: false, authorization: {
+                    let locallyAuthorized = {
                         self.accountIdentity == owner && model.account?.userID == owner &&
+                        model.accountGeneration == accountGeneration &&
                         (!automatic || self.isAutomaticCaptureAuthorized(for: meeting, consentRevision: consentRevision))
-                    }) else {
+                    }
+                    var retryClaim = false
+                    var claimFailure: String?
+                    var cleanupToken = desktopClaim?.cleanupToken
+                    let authorizeStart: (() async -> Bool)? = desktopClaim.map { claim in
+                        return {
+                            do {
+                                guard locallyAuthorized(), !Task.isCancelled else { return false }
+                                let session = try await CloudAuth.shared.validSession()
+                                guard session.userID == claim.ownerID, locallyAuthorized(), !Task.isCancelled else { return false }
+                                cleanupToken = session.idToken
+                                switch try await self.requestDesktopClaim(claim, action: .begin, token: session.idToken) {
+                                case .accepted: return locallyAuthorized() && !Task.isCancelled
+                                case .waiting:
+                                    retryClaim = true
+                                    claimFailure = "Another Mac is preparing to record this meeting."
+                                case .unavailable:
+                                    claimFailure = "This Mac no longer has the meeting recording claim."
+                                }
+                            } catch {
+                                retryClaim = true
+                                claimFailure = "Couldn’t confirm the recording claim. Reel did not start recording."
+                            }
+                            return false
+                        }
+                    }
+                    let captureSetupFinished: ((Bool) -> Void)? = desktopClaim.map { claim in
+                        return { started in
+                            if !started { self.releaseDesktopClaim(claim, token: cleanupToken) }
+                            guard self.accountIdentity == owner, model.accountGeneration == accountGeneration else { return }
+                            if automatic {
+                                if started { self.schedule.complete(key: Self.key(meeting)) }
+                                else if retryClaim { self.schedule.deferForRecorder(key: Self.key(meeting), now: Date()) }
+                                else { self.schedule.finish(key: Self.key(meeting), now: Date(), retryable: false) }
+                            }
+                            if !started {
+                                self.status = claimFailure ?? model.lastError ?? "Capture did not start."
+                                if claimFailure == nil { Task { await self.markCloud(meeting, state: "failed", expectedOwner: owner) } }
+                            }
+                        }
+                    }
+                    guard RecorderController.shared.start(window: window, focusWindowOnStart: false,
+                                                          authorization: locallyAuthorized, authorizeStart: authorizeStart,
+                                                          captureSetupFinished: captureSetupFinished) else {
                         status = "A previous recording is still finishing setup cleanup. Try again shortly."
                         retryable = automatic
                         await markCloud(meeting, state: "failed", expectedOwner: owner)
@@ -421,16 +526,18 @@ final class MeetingJoinCoordinator: ObservableObject {
                     }
                     captureHandedOff = true
                     watchCapture(meeting, windowID: id, expectedOwner: owner, automatic: automatic,
-                                 consentRevision: consentRevision)
+                                 consentRevision: consentRevision, coordinated: desktopClaim != nil)
                     status = "Joined. Starting local meeting capture."
                 case .awaitingAdmission:
-                    status = "Still waiting for the host. Join manually, then start meeting capture in Reel."
+                    status = desktopClaim == nil ? "Still waiting for the host. Join manually, then start meeting capture in Reel."
+                        : "The host didn’t admit this Mac. Another eligible Mac can try to join."
                     await markCloud(meeting, state: "awaiting_admission", expectedOwner: owner)
                 case .signInRequired:
                     status = "Sign in to the meeting in Chrome, then try again."
                     await markCloud(meeting, state: "failed", expectedOwner: owner)
                 case .manualInteractionRequired:
-                    status = "Finish joining in Chrome, then start meeting capture in Reel."
+                    status = desktopClaim == nil ? "Finish joining in Chrome, then start meeting capture in Reel."
+                        : "Chrome needed help joining. Another eligible Mac can try to join."
                     await markCloud(meeting, state: "failed", expectedOwner: owner)
                 case .timedOut:
                     status = "Meeting entry was not confirmed. Join manually and choose the meeting window in Reel."
@@ -457,6 +564,51 @@ final class MeetingJoinCoordinator: ObservableObject {
     }
 
     func cancel() { joinTask?.cancel() }
+
+    private func verifiedDesktopEventID(for meeting: CalendarMeeting) -> String? {
+        guard desktopRouting?.requiresDesktopClaims == true else { return nil }
+        return cloudIDs.first { $0.value == meeting.id && $0.key.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil }?.key
+    }
+
+    private func requestDesktopClaim(_ claim: DesktopClaim, action: DesktopClaimAction,
+                                     token: String) async throws -> DesktopClaimResponse {
+        var request = URLRequest(url: base.appendingPathComponent("calendar/desktop/\(claim.eventID)/claim"), timeoutInterval: 12)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["action": action.rawValue, "claim_id": claim.id,
+                                                                       "participant_consent_attested": true])
+        let (data, response) = try await URLSession.shared.data(for: request, delegate: DesktopCalendarRedirectBlocker())
+        let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let expected: String
+        switch action {
+        case .reserve: expected = "reserved"
+        case .begin: expected = "begun"
+        case .release: expected = "released"
+        }
+        switch (response as? HTTPURLResponse)?.statusCode {
+        case 200 where body?["status"] as? String == expected: return .accepted
+        case 409:
+            if let retryable = body?["retryable"] as? Bool { return retryable ? .waiting : .unavailable }
+        default: break
+        }
+        throw CloudError.message("Reel couldn’t verify which Mac should record this meeting.")
+    }
+
+    private func releaseDesktopClaim(_ claim: DesktopClaim, token: String? = nil) {
+        // Cleanup is for the exact attempt and keeps its original authorization across a refresh or account switch.
+        Task {
+            for attempt in 0..<2 {
+                do {
+                    _ = try await requestDesktopClaim(claim, action: .release, token: token ?? claim.cleanupToken)
+                    return
+                } catch {
+                    if attempt == 0 { try? await Task.sleep(for: .seconds(1)) }
+                }
+            }
+            log.info("Desktop meeting claim cleanup unavailable")
+        }
+    }
 
     private func markCloud(_ meeting: CalendarMeeting, state: String, expectedOwner: String?) async {
         guard let id = cloudIDs.first(where: { $0.value == meeting.id })?.key,
@@ -503,7 +655,7 @@ final class MeetingJoinCoordinator: ObservableObject {
     }
 
     private func watchCapture(_ meeting: CalendarMeeting, windowID: CGWindowID, expectedOwner: String?,
-                              automatic: Bool, consentRevision: Int) {
+                              automatic: Bool, consentRevision: Int, coordinated: Bool) {
         captureWatch?.cancel()
         captureWatch = Task {
             defer { LocalMeetingJoin.forget(windowID: windowID) }
@@ -511,7 +663,7 @@ final class MeetingJoinCoordinator: ObservableObject {
             defer {
                 if !captureStarted {
                     LocalMeetingJoin.closeOwned(windowID: windowID)
-                    if automatic { schedule.finish(key: Self.key(meeting), now: Date(), retryable: false) }
+                    if automatic && !coordinated { schedule.finish(key: Self.key(meeting), now: Date(), retryable: false) }
                 }
             }
             while !Task.isCancelled {
@@ -530,9 +682,11 @@ final class MeetingJoinCoordinator: ObservableObject {
                     continue
                 }
                 if AppModel.shared.phase == .idle {
-                    if automatic { schedule.finish(key: Self.key(meeting), now: Date(), retryable: false) }
-                    status = AppModel.shared.lastError ?? "Capture did not start. Check Reel's recording permissions."
-                    await markCloud(meeting, state: "failed", expectedOwner: expectedOwner)
+                    if !coordinated {
+                        if automatic { schedule.finish(key: Self.key(meeting), now: Date(), retryable: false) }
+                        status = AppModel.shared.lastError ?? "Capture did not start. Check Reel's recording permissions."
+                        await markCloud(meeting, state: "failed", expectedOwner: expectedOwner)
+                    }
                     return
                 }
                 if AppModel.shared.phase == .recording || AppModel.shared.phase == .paused { break }

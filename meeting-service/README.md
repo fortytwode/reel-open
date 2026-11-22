@@ -29,6 +29,12 @@ Cloud Google Meet and Teams recordings also attempt to retain native live captio
 
 Speaker names are platform display labels, not proof of an email identity. They never determine who receives notes or can access a meeting. Summaries receive labelled dialogue only from the internal capture pipeline. A first-person task can acquire an owner only with an explicit commitment in one matched turn and an unambiguous invited-person match. Public summary callers cannot submit trusted speaker labels. Caption capture failure preserves the recording and unnamed transcript. Older recordings and local recordings without caption evidence cannot acquire verified names from the invitation list alone. No stored voice profiles or additional bot vendor are required.
 
+### Coordinate desktop recording across Macs
+
+Set `REEL_DESKTOP_CLAIMS=1` on an organization-wide desktop deployment to coordinate eligible meetings from the users’ selected Google calendars. Use an empty `MEETING_CLOUD_PROVIDERS` setting for desktop-only capture. The first eligible Mac reserves the occurrence before opening the meeting and confirms the claim immediately before capture. A setup failure can release its claim if no recording started. A lost reservation expires so another Mac can try. A claim that made it to recording prevents duplicate capture for that occurrence.
+
+Deploy the meeting API and update the recording Macs before enabling claims. Turn off automatic joining on any Mac that still runs an older release. Drain in-progress captures before switching between cloud capture and coordinated desktop capture. Verify a shared invitation with two updated Macs before enabling the setting for the team. For teams using this mode, calendar meetings without a verified server occurrence need manual capture. Recap delivery still uses the organization’s calendar invitees and existing delivery deduplication.
+
 ## Speech endpoints
 
 `POST /transcription` accepts mono PCM16 16 kHz WAV via multipart upload (up to 600 seconds and 20 MiB) and a language code. `POST /summary` accepts up to 200,000 characters of transcript and optional title and attendee data. Audio is held in memory for the request. These routes send meeting content to OpenAI and require `OPENAI_API_KEY` on the server. The client expects `OPENAI_TRANSCRIPTION_MODEL=gpt-transcribe` and `OPENAI_SUMMARY_MODEL=gpt-6.1-sol`.

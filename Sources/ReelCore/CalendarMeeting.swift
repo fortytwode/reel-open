@@ -296,12 +296,19 @@ public struct DesktopCalendarRouting {
     private var cloudOccurrences: Set<String> = []
     private var activeCloudLinks: Set<String> = []
     public private(set) var cloudMeetings: [CloudCalendarMeeting] = []
+    public let desktopClaimsCapability: Bool?
+    public var requiresDesktopClaims: Bool { desktopClaimsCapability == true }
 
     public init?(payload: [String: Any], now: Date) {
         guard let events = payload["events"] as? [[String: Any]] else { return nil }
+        if let advertised = payload["desktop_claims"] {
+            guard let required = advertised as? Bool else { return nil }
+            desktopClaimsCapability = required
+        } else { desktopClaimsCapability = nil }
         let legacy = payload["cloud_events"] == nil && payload["cloud_providers"] == nil
         if legacy {
-            guard events.allSatisfy({ $0["capture_provider"] == nil || $0["capture_provider"] as? String == "desktop" }) else { return nil }
+            guard !requiresDesktopClaims,
+                  events.allSatisfy({ $0["capture_provider"] == nil || $0["capture_provider"] as? String == "desktop" }) else { return nil }
             return
         }
         guard let cloud = payload["cloud_events"] as? [[String: Any]],
