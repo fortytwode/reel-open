@@ -624,8 +624,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
 
     @objc func showMeetings() {
         if meetingsWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 800), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-            w.title = "Desktop Meeting Helper"
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 420), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            w.title = "Reel Meetings"
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: MeetingCalendarsView(model: model))
             w.center()
@@ -642,7 +642,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         let setup = MeetingSetupModel()
         meetingSetupModel = setup
         if meetingSetupWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 560),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 390),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Set Up Automatic Meetings"
             window.isReleasedWhenClosed = false
