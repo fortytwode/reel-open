@@ -16,6 +16,10 @@ struct MeetingCalendarsView: View {
     @State private var calendarActionMessage: String?
     @State private var showCalendarSettings = false
     @State private var showManualLink = false
+    @State private var hoveredMeetingID: String?
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var mintText: Color { ReelPanelPalette.accentText(in: colorScheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -26,7 +30,8 @@ struct MeetingCalendarsView: View {
             controls
         }
         .padding(20)
-        .frame(width: 560, height: 420)
+        .frame(minWidth: 460, idealWidth: 560, minHeight: 360, idealHeight: 420)
+        .tint(mintText)
         .sheet(isPresented: $showCalendarSettings) { calendarSettings }
         .task { await refreshPeriodically() }
         .task(id: model.accountGeneration) {
@@ -71,30 +76,39 @@ struct MeetingCalendarsView: View {
     }
 
     private var joiningStatus: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "laptopcomputer")
-                .font(.title3).foregroundStyle(.secondary)
+        let hasConsent = joining.hasStandingConsentForCurrentScope
+        let isReady = hasConsent && joining.autoJoin
+            && joining.visibleCalendarStatus.hasPrefix("Joining in Chrome is on")
+        let status = !hasConsent ? "Set up Reel to join meetings on this Mac."
+            : !joining.autoJoin ? "Paused on this Mac"
+            : isReady ? "On for this Mac while it’s awake" : joining.visibleCalendarStatus
+        return HStack(spacing: 10) {
+            Image(systemName: isReady ? "checkmark.circle.fill" : "laptopcomputer")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(mintText)
+                .frame(width: 34, height: 34)
+                .background(ReelPanelPalette.mint.opacity(0.17), in: RoundedRectangle(cornerRadius: 8))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Automatic joining").font(.subheadline.weight(.semibold))
-                Text(joining.hasStandingConsentForCurrentScope
-                     ? joining.autoJoin ? "On for this Mac while it’s awake" : "Paused on this Mac"
-                     : "Set up Reel to join meetings on this Mac.")
+                Text(status)
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if joining.hasStandingConsentForCurrentScope {
+            if hasConsent {
                 Toggle("Automatic joining", isOn: Binding(
                     get: { joining.autoJoin }, set: { joining.setAutomaticJoining($0) }))
                     .toggleStyle(.switch).labelsHidden().controlSize(.small)
                     .disabled(joining.busy)
             } else {
                 Button("Set Up…") { (NSApp.delegate as? AppDelegate)?.showMeetingSetup() }
+                    .buttonStyle(ReelProminentButtonStyle())
                     .disabled(model.phase != .idle || joining.busy)
             }
         }
         .padding(11)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 9))
+        .background(ReelPanelPalette.mint.opacity(colorScheme == .dark ? 0.08 : 0.12),
+                    in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var meetingList: some View {
@@ -150,28 +164,45 @@ struct MeetingCalendarsView: View {
 
     private func meetingRow(_ meeting: CalendarMeeting) -> some View {
         let isSelected = joining.selectedID == meeting.id
+        let isHovered = hoveredMeetingID == meeting.id
+        let now = Date()
+        let isInProgress = meeting.start <= now && now < meeting.end
+        let time = isInProgress ? "Now" : meeting.start.formatted(date: .omitted, time: .shortened)
         return Button {
             joining.selectedID = isSelected ? nil : meeting.id
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 11) {
+                Text(time)
+                    .font(.caption.monospacedDigit().weight(.medium))
+                    .foregroundStyle(isInProgress ? mintText : .secondary)
+                    .lineLimit(1)
+                    .frame(minWidth: 54, alignment: .leading)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(meeting.title).fontWeight(.medium).lineLimit(1)
-                    Text(meeting.start.formatted(date: .omitted, time: .shortened) + " · " + platformName(meeting.platform))
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text(platformName(meeting.platform)).font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark").font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.accentColor).accessibilityHidden(true)
-                }
+                Spacer(minLength: 2)
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isSelected ? mintText : .secondary)
+                    .opacity(isSelected || isHovered ? 1 : 0.55)
+                    .accessibilityHidden(true)
             }
-            .padding(8)
+            .padding(.vertical, 7)
+            .padding(.horizontal, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isSelected ? Color.accentColor.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 7))
+            .background(isSelected ? ReelPanelPalette.mint.opacity(0.15)
+                        : isHovered ? Color.secondary.opacity(0.09) : .clear,
+                        in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { isHovering in
+            if isHovering { hoveredMeetingID = meeting.id }
+            else if hoveredMeetingID == meeting.id { hoveredMeetingID = nil }
+        }
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityHint("Shows actions for this meeting")
     }
 
     private var controls: some View {
@@ -196,7 +227,7 @@ struct MeetingCalendarsView: View {
             HStack(spacing: 10) {
                 Button(showManualLink ? "Hide Link" : "Use a Meeting Link…") { showManualLink.toggle() }
                     .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(mintText)
                 Spacer()
                 if joining.busy {
                     Button("Cancel Join") { joining.cancel() }
@@ -211,7 +242,7 @@ struct MeetingCalendarsView: View {
                         preparedMeetingTitle = nil
                         joining.join(meeting, confirmed: manualConsent || joining.hasStandingConsent(for: meeting))
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(ReelProminentButtonStyle())
                     .disabled(model.phase != .idle || !(manualConsent || joining.hasStandingConsent(for: meeting)))
                 }
             }
@@ -224,8 +255,6 @@ struct MeetingCalendarsView: View {
             } else if !joining.visibleStatus.isEmpty {
                 Text(joining.visibleStatus).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if joining.autoJoin && !joining.visibleCalendarStatus.hasPrefix("Joining in Chrome is on") {
-                Text(joining.visibleCalendarStatus).font(.caption).foregroundStyle(.secondary)
             }
         }
     }

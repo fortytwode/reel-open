@@ -74,8 +74,8 @@ struct RecorderPanel: View {
         }
     }
 
-    private let recorderInk = Color(red: 18 / 255, green: 21 / 255, blue: 26 / 255)
-    private let recorderAccent = Color(red: 114 / 255, green: 231 / 255, blue: 212 / 255)
+    private let recorderInk = ReelPanelPalette.ink
+    private let recorderAccent = ReelPanelPalette.mint
 
     private var desktopControls: some View {
         VStack(alignment: .leading, spacing: 0) {

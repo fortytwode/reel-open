@@ -626,6 +626,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopo
         if meetingsWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 420), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             w.title = "Reel Meetings"
+            w.contentMinSize = NSSize(width: 460, height: 360)
             w.isReleasedWhenClosed = false
             w.contentView = NSHostingView(rootView: MeetingCalendarsView(model: model))
             w.center()
