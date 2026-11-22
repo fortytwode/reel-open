@@ -140,6 +140,7 @@ namespace ReelNative
         private readonly List<AutomationElement> nodes = new List<AutomationElement>();
         private readonly List<AutomationElement> buttons = new List<AutomationElement>();
         private readonly List<AutomationElement> documents = new List<AutomationElement>();
+        private const string MeetMediaOffer = "do you want people to hear you in the meeting?";
 
         internal ChromeControls(WindowIdentity window)
         {
@@ -214,12 +215,226 @@ namespace ReelNative
             return nodes.Exists(n => {
                 string v = Name(n);
                 return v.Contains("verify it's you") || v.Contains("enter your password") ||
-                    v.Contains("allow microphone access") || v.Contains("allow camera access") ||
-                    v == "do you want people to hear you in the meeting?";
-            }) || buttons.Exists(n => {
+                    v.Contains("allow microphone access") || v.Contains("allow camera access");
+            });
+        }
+        internal bool HasMeetMediaOffer()
+        {
+            return nodes.Exists(n => Name(n) == MeetMediaOffer) || buttons.Exists(n => {
                 string v = Name(n);
                 return v == "use microphone" || v == "use microphone and camera";
             });
+        }
+        private AutomationElementCollection FindDocumentMeetMediaOffer()
+        {
+            if (documents.Count != 1) return null;
+            return documents[0].FindAll(TreeScope.Descendants, new OrCondition(
+                new PropertyCondition(AutomationElement.NameProperty, MeetMediaOffer, PropertyConditionFlags.IgnoreCase),
+                new PropertyCondition(AutomationElement.NameProperty, "use microphone", PropertyConditionFlags.IgnoreCase),
+                new PropertyCondition(AutomationElement.NameProperty, "use microphone and camera", PropertyConditionFlags.IgnoreCase),
+                new PropertyCondition(AutomationElement.NameProperty, "close dialog", PropertyConditionFlags.IgnoreCase)));
+        }
+
+        internal bool HasDocumentMeetMediaOffer()
+        {
+            bool present;
+            return TryReadDocumentMeetMediaOffer(out present) && present;
+        }
+
+        private bool TryReadDocumentMeetMediaOffer(out bool present)
+        {
+            present = false;
+            try
+            {
+                AutomationElementCollection controls = FindDocumentMeetMediaOffer();
+                if (controls == null) return false;
+                foreach (AutomationElement node in controls)
+                {
+                    string name = (node.Current.Name ?? "").Trim().ToLowerInvariant();
+                    if ((name == MeetMediaOffer || name == "use microphone" || name == "use microphone and camera") &&
+                        !node.Current.IsOffscreen) { present = true; break; }
+                }
+                return true;
+            }
+            catch (ElementNotAvailableException) { return false; }
+        }
+
+        internal bool MeetMicPermissionNeeded()
+        {
+            if (documents.Count != 1 || !MeetPermissionStateClear()) return false;
+            try
+            {
+                var condition = new AndCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.NameProperty, "microphone: permission needed", PropertyConditionFlags.IgnoreCase));
+                AutomationElementCollection candidates = documents[0].FindAll(TreeScope.Descendants, condition);
+                if (candidates.Count != 1) return false;
+                AutomationElement button = candidates[0];
+                string name = Name(button);
+                object pattern;
+                return name == "microphone: permission needed" &&
+                    button.Current.ControlType == ControlType.Button && HasLiveAncestor(button, documents[0], true) &&
+                    !button.Current.IsOffscreen && !button.Current.IsEnabled && !button.Current.IsKeyboardFocusable &&
+                    !button.TryGetCurrentPattern(InvokePattern.Pattern, out pattern) &&
+                    !button.TryGetCurrentPattern(TogglePattern.Pattern, out pattern);
+            }
+            catch (ElementNotAvailableException) { return false; }
+        }
+
+        internal bool MeetPermissionStateClear()
+        {
+            bool offerPresent;
+            return !NeedsSignIn() && !NeedsManual() && !HasDenial() && !HasMeetMediaOffer() &&
+                !buttons.Exists(button => Prefix(Name(button), "turn off microphone", "mute microphone", "mute my microphone")) &&
+                !nodes.Exists(node => IsMeetPermissionPrompt(Name(node))) &&
+                TryReadDocumentMeetMediaOffer(out offerPresent) && !offerPresent &&
+                MeetDocumentMicAndPromptClear();
+        }
+
+        private bool MeetDocumentMicAndPromptClear()
+        {
+            if (documents.Count != 1) return false;
+            try
+            {
+                // The capped walking snapshot can miss active controls. For
+                // this permission fallback, require a fresh document query.
+                var visibleButton = new AndCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.IsOffscreenProperty, false));
+                foreach (AutomationElement button in documents[0].FindAll(TreeScope.Descendants, visibleButton))
+                {
+                    string name = (button.Current.Name ?? "").Trim().ToLowerInvariant();
+                    if (Prefix(name, "turn off microphone", "mute microphone", "mute my microphone") ||
+                        IsMeetPermissionPrompt(name)) return false;
+                }
+                return true;
+            }
+            catch (ElementNotAvailableException) { return false; }
+            catch (InvalidOperationException) { return false; }
+            catch (COMException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+
+        internal static bool IsMeetPermissionPrompt(string name)
+        {
+            switch (name)
+            {
+                case "allow this time":
+                case "allow while visiting the site":
+                case "never allow":
+                case "use your microphone":
+                case "use your camera":
+                case "use your microphone and camera":
+                case "meet.google.com wants to use your microphone":
+                case "meet.google.com wants to use your camera":
+                case "meet.google.com wants to use your microphone and camera":
+                    return true;
+                default: return false;
+            }
+        }
+
+        private Dictionary<AutomationElement, List<AutomationElement>> DocumentMeetMediaOfferDialogs()
+        {
+            var dialogs = new Dictionary<AutomationElement, List<AutomationElement>>();
+            AutomationElementCollection controls = FindDocumentMeetMediaOffer();
+            if (controls == null) return dialogs;
+            TreeWalker walker = TreeWalker.ControlViewWalker;
+            foreach (AutomationElement node in controls)
+            {
+                if (node.Current.IsOffscreen) continue;
+                AutomationElement ancestor = node;
+                for (int depth = 0; depth < 25; depth++)
+                {
+                    ancestor = walker.GetParent(ancestor);
+                    if (ancestor == null || ancestor == documents[0] ||
+                        ancestor.Current.ControlType == ControlType.Document) break;
+                    // Chromium exposes its web dialog as a Window under the document.
+                    if (ancestor.Current.ControlType != ControlType.Window) continue;
+                    if (!HasLiveAncestor(ancestor, documents[0])) break;
+                    List<AutomationElement> members;
+                    if (!dialogs.TryGetValue(ancestor, out members))
+                    {
+                        members = new List<AutomationElement>();
+                        dialogs.Add(ancestor, members);
+                    }
+                    if (!members.Contains(node)) members.Add(node);
+                    break;
+                }
+            }
+            return dialogs;
+        }
+
+        internal bool DismissMeetMediaOffer(Func<bool> stillMatches, CancellationToken token)
+        {
+            if (documents.Count != 1) return false;
+            try
+            {
+                AutomationElement matchedDialog = null, heading = null, close = null;
+                foreach (var dialog in DocumentMeetMediaOfferDialogs())
+                {
+                    AutomationElement candidateHeading = dialog.Value.Find(node =>
+                        Name(node) == MeetMediaOffer && !node.Current.IsOffscreen);
+                    if (candidateHeading == null) continue;
+                    var visibleButtons = new List<AutomationElement>();
+                    var buttonNames = new List<string>();
+                    foreach (AutomationElement node in dialog.Value)
+                    {
+                        string name = Name(node);
+                        if (name != "use microphone" && name != "use microphone and camera" && name != "close dialog")
+                            continue;
+                        if (node.Current.ControlType != ControlType.Button || node.Current.IsOffscreen) continue;
+                        visibleButtons.Add(node);
+                        buttonNames.Add(name);
+                    }
+                    int index = MeetMediaOfferCloseIndex(buttonNames);
+                    if (index < 0 || matchedDialog != null) return false;
+                    matchedDialog = dialog.Key;
+                    heading = candidateHeading;
+                    close = visibleButtons[index];
+                }
+                if (matchedDialog == null || token.IsCancellationRequested || !stillMatches()) return false;
+                if (matchedDialog.Current.ControlType != ControlType.Window || matchedDialog.Current.IsOffscreen ||
+                    !HasLiveAncestor(matchedDialog, documents[0]) ||
+                    !HasLiveAncestor(heading, matchedDialog) || !HasLiveAncestor(close, matchedDialog)) return false;
+                if (heading.Current.IsOffscreen || Name(heading) != MeetMediaOffer ||
+                    close.Current.ControlType != ControlType.Button || close.Current.IsOffscreen ||
+                    Name(close) != "close dialog") return false;
+                return Invoke(close, token);
+            }
+            catch (ElementNotAvailableException) { return false; }
+        }
+
+        private static bool HasLiveAncestor(AutomationElement node, AutomationElement ancestor, bool allowWindows = false)
+        {
+            TreeWalker walker = TreeWalker.ControlViewWalker;
+            for (int i = 0; i < 25; i++)
+            {
+                node = walker.GetParent(node);
+                if (node == null) return false;
+                if (node == ancestor) return true;
+                ControlType type = node.Current.ControlType;
+                if (type == ControlType.Document || (!allowWindows && type == ControlType.Window)) return false;
+            }
+            return false;
+        }
+
+        internal static int MeetMediaOfferCloseIndex(IList<string> names)
+        {
+            int close = -1;
+            bool useMic = false, useMicAndCamera = false;
+            for (int i = 0; i < names.Count; i++)
+            {
+                switch (names[i])
+                {
+                    case "use microphone": useMic = true; break;
+                    case "use microphone and camera": useMicAndCamera = true; break;
+                    case "close dialog":
+                        if (close != -1) return -1;
+                        close = i;
+                        break;
+                }
+            }
+            return useMic && useMicAndCamera ? close : -1;
         }
         private AutomationElement Button(params string[] names)
         {
@@ -234,6 +449,36 @@ namespace ReelNative
         }
         internal bool MicOff() { return Button("turn on microphone", "unmute microphone", "unmute") != null; }
         internal bool CameraOff() { return Button("turn on camera", "start video") != null; }
+        internal bool MeetCameraExplicitlyOff()
+        {
+            return !buttons.Exists(button => Prefix(Name(button), "turn off camera", "stop video")) &&
+                IsVisibleMeetControl(Button("turn on camera"));
+        }
+        internal bool HasVisibleMeetCallControls()
+        {
+            return IsVisibleMeetControl(Button("leave call", "leave meeting", "leave")) &&
+                IsVisibleMeetControl(Button("present now", "share screen", "share content", "stop presenting", "stop sharing"));
+        }
+        internal bool TurnMeetCameraOff(CancellationToken token)
+        {
+            AutomationElement camera = Button("turn off camera");
+            return IsVisibleMeetControl(camera) && Invoke(camera, token);
+        }
+        internal bool PressMeetJoin(CancellationToken token)
+        {
+            AutomationElement join = Button("join now", "ask to join", "join meeting");
+            return IsVisibleMeetControl(join) && Invoke(join, token);
+        }
+        private bool IsVisibleMeetControl(AutomationElement button)
+        {
+            if (button == null || documents.Count != 1) return false;
+            try
+            {
+                return HasLiveAncestor(button, documents[0], true) &&
+                    button.Current.ControlType == ControlType.Button && !button.Current.IsOffscreen && button.Current.IsEnabled;
+            }
+            catch (ElementNotAvailableException) { return false; }
+        }
         internal bool TurnMicOff(CancellationToken token) { return Invoke(Button("turn off microphone", "mute microphone"), token); }
         internal bool TurnCameraOff(CancellationToken token) { return Invoke(Button("turn off camera", "stop video"), token); }
         internal bool MicOn() { return Button("turn off microphone", "mute microphone") != null; }
@@ -273,6 +518,12 @@ namespace ReelNative
         {
             ProviderUrl observed;
             return ProviderUrl.TryParse(controls.Address(), out observed) && expected.SameAddress(observed);
+        }
+
+        internal static bool MeetPermissionProofBelongsToJoin(Provider provider,
+            bool offerDismissed, bool permissionVerified, bool joinInvoked)
+        {
+            return provider == Provider.GoogleMeet && offerDismissed && permissionVerified && joinInvoked;
         }
 
         internal string OpenGoogleSignIn(GoogleSignInUrl url, CancellationToken token)
@@ -332,7 +583,10 @@ namespace ReelNative
             if (owned == null) return new JoinResult("dedicated_window_unavailable");
             DateTime deadline = DateTime.UtcNow.AddSeconds(90);
             DateTime addressDeadline = DateTime.UtcNow.AddSeconds(10);
-            bool requested = false, lobby = false;
+            bool requested = false, lobby = false, cameraOffAfterOfferRequested = false;
+            DateTime mediaOfferDismissalDeadline = DateTime.MinValue;
+            DateTime meetMicOffDeadline = DateTime.MinValue;
+            DateTime meetPermissionProofUntil = DateTime.MinValue;
             try {
                 while (DateTime.UtcNow < deadline)
                 {
@@ -355,7 +609,15 @@ namespace ReelNative
                     }
                     if (ui.HasLeave() && ui.HasShare())
                     {
-                        if (!ui.MicOff() || !ui.CameraOff() || ui.MicOn() || ui.CameraOn()) return new JoinResult("manual_required");
+                        if (meetPermissionProofUntil != DateTime.MinValue)
+                        {
+                            if (!ui.HasVisibleMeetCallControls() || !ui.MeetCameraExplicitlyOff() ||
+                                !ui.MeetPermissionStateClear() ||
+                                (!ui.MicOff() && DateTime.UtcNow > meetPermissionProofUntil))
+                                return new JoinResult("manual_required");
+                        }
+                        else if (!ui.MicOff() || !ui.CameraOff() || ui.MicOn() || ui.CameraOn())
+                            return new JoinResult("manual_required");
                         token.ThrowIfCancellationRequested();
                         var session = new WindowSession(owned, url);
                         lock (gate) sessions[session.Id] = session;
@@ -365,7 +627,42 @@ namespace ReelNative
                     if (ui.HasLobby()) { lobby = true; requested = true; }
                     if (ui.NeedsSignIn()) return new JoinResult("sign_in_required");
                     if (ui.NeedsManual()) return new JoinResult("manual_required");
+                    bool offerInWalker = ui.HasMeetMediaOffer();
+                    bool offerInDocument = !offerInWalker && url.Kind == Provider.GoogleMeet && !requested &&
+                        meetMicOffDeadline != DateTime.MinValue && !ui.MicOff() && ui.HasDocumentMeetMediaOffer();
+                    if (offerInWalker || offerInDocument)
+                    {
+                        if (url.Kind != Provider.GoogleMeet || requested)
+                            return new JoinResult("manual_required");
+                        if (mediaOfferDismissalDeadline == DateTime.MinValue)
+                        {
+                            if (!ui.DismissMeetMediaOffer(() => NativeWindows.StillOwned(owned) && MatchesAddress(ui, url), token))
+                                return new JoinResult("manual_required");
+                            mediaOfferDismissalDeadline = DateTime.UtcNow.AddSeconds(3);
+                        }
+                        else if (DateTime.UtcNow >= mediaOfferDismissalDeadline)
+                            return new JoinResult("manual_required");
+                        token.WaitHandle.WaitOne(500);
+                        continue;
+                    }
                     if ((ui.MicOn() && ui.MicOff()) || (ui.CameraOn() && ui.CameraOff())) return new JoinResult("manual_required");
+                    bool meetOfferDismissed = !requested && url.Kind == Provider.GoogleMeet &&
+                        mediaOfferDismissalDeadline != DateTime.MinValue;
+                    bool meetMicPermissionNeeded = meetOfferDismissed && !ui.MicOff() && ui.MeetMicPermissionNeeded();
+                    if (meetOfferDismissed && !cameraOffAfterOfferRequested && !ui.MicOff() && ui.CameraOn())
+                    {
+                        cameraOffAfterOfferRequested = true;
+                        if (!NativeWindows.StillOwned(owned) || !MatchesAddress(ui, url) || !ui.TurnMeetCameraOff(token))
+                            return new JoinResult("manual_required");
+                        token.WaitHandle.WaitOne(500);
+                        continue;
+                    }
+                    if (!requested && meetMicOffDeadline != DateTime.MinValue && !ui.MicOff() && !meetMicPermissionNeeded)
+                    {
+                        if (DateTime.UtcNow >= meetMicOffDeadline) return new JoinResult("manual_required");
+                        token.WaitHandle.WaitOne(500);
+                        continue;
+                    }
                     if (!requested)
                     {
                         if (ui.HasBrowserChoice()) { if (!ui.ContinueBrowser(token)) return new JoinResult("manual_required"); }
@@ -374,16 +671,36 @@ namespace ReelNative
                             // Media warnings can change Join's accessible label.
                             // Disable known active inputs independently; Join still
                             // requires its own recognized control and both off states.
-                            if (ui.MicOn()) { if (!ui.TurnMicOff(token)) return new JoinResult("manual_required"); }
-                            else if (ui.CameraOn()) { if (!ui.TurnCameraOff(token)) return new JoinResult("manual_required"); }
-                            else if (ui.MicOff() && ui.CameraOff() && ui.HasJoin())
+                            if (ui.MicOn())
                             {
-                                if (!ui.PressJoin(token)) return new JoinResult("manual_required");
+                                if (url.Kind == Provider.GoogleMeet)
+                                {
+                                    // An accessibility invoke can return before Meet updates its
+                                    // state or opens its microphone offer. Do not toggle again
+                                    // until a fresh, owned snapshot confirms the microphone is off.
+                                    meetMicOffDeadline = DateTime.UtcNow.AddSeconds(28);
+                                    ui.TurnMicOff(token);
+                                }
+                                else if (!ui.TurnMicOff(token)) return new JoinResult("manual_required");
+                            }
+                            else if (ui.CameraOn() && !cameraOffAfterOfferRequested) { if (!ui.TurnCameraOff(token)) return new JoinResult("manual_required"); }
+                            else if ((ui.MicOff() || meetMicPermissionNeeded) && ui.CameraOff() && ui.HasJoin())
+                            {
+                                if (meetMicPermissionNeeded &&
+                                    (!NativeWindows.StillOwned(owned) || !MatchesAddress(ui, url) ||
+                                     !ui.MeetMicPermissionNeeded() || !ui.MeetCameraExplicitlyOff()))
+                                    return new JoinResult("manual_required");
+                                bool joinInvoked = meetMicPermissionNeeded ? ui.PressMeetJoin(token) : ui.PressJoin(token);
+                                if (!joinInvoked) return new JoinResult("manual_required");
+                                // Only our guarded Join can carry permission-needed evidence
+                                // across the immediate transition into this same owned call.
+                                if (MeetPermissionProofBelongsToJoin(url.Kind, meetOfferDismissed, meetMicPermissionNeeded, joinInvoked))
+                                    meetPermissionProofUntil = DateTime.UtcNow.AddSeconds(20);
                                 requested = true;
                             }
                             // Meet can expose Join before its media controls
                             // finish loading. Re-scan within the existing deadline;
-                            // never join until both explicit off states are present.
+                            // wait for the known device controls before joining.
                         }
                     }
                     token.WaitHandle.WaitOne(500);
