@@ -7,6 +7,12 @@ Reel contains two products that can be used independently.
 
 For online features, both products can share a self-hosted deployment and account. Local screen recording is available without an account. A screen recording can be shared by link under its access settings. Meeting notes use the participant access checks in the delivery service.
 
+## Install Reel Recorder for Mac
+
+[Download the signed Mac installer](https://github.com/fortytwode/reel-open/releases/latest). Open the disk image and drag **Reel Recorder** to **Applications**. The same download supports Apple silicon and Intel Macs running macOS 15 or later.
+
+The installer saves recordings on your Mac without an account. For share links or online Notetaker features, follow the [self-hosting guide](docs/self-hosting.md). The browser-based Notetaker is available at `/notetaker` on your deployment.
+
 ## Run locally
 
 **macOS.** Build with Xcode 26 or newer. Reel runs on macOS 15 or later as a menu bar app. Grant screen recording, camera and microphone permissions when macOS prompts for them.
