@@ -1,9 +1,23 @@
-import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, sessionSnapshot, FB_CDN, CLOUD_CONFIG, EMU } from "./reel/firebase.js?v=20261121-public-signup";
+import * as firebase from "./reel/firebase.js?v=20261121-public-signup";
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261123-workspace1";
-import { organization, organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
+import * as org from "./organization.js?v=20261121-public-signup";
 import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261105-parity2";
 
 import { displayedSharedTitle, resolveTitleRoom, saveSharedTitle, editSharedTitle, closeSharedTitleEditor } from "./reel/shared-title.js?v=20261105-parity2";
+
+// Older team Hosting deployments expose the same verified Google identity but
+// predate the public-signup helpers. Keep the library compatible during rollout.
+const { loadAuth, sessionSnapshot, FB_CDN, CLOUD_CONFIG, EMU } = firebase;
+const { organization, organizationStorageKey } = org;
+const publicSignup = org.publicSignup ?? false;
+const googleAccountLabel = firebase.googleAccountLabel ?? `your ${organization?.allowedEmailDomain || "work"} Google account`;
+const googleSignInProvider = firebase.googleSignInProvider ?? (am => {
+  const provider = new am.GoogleAuthProvider();
+  provider.setCustomParameters({ hd: organization.allowedEmailDomain, prompt: "select_account" });
+  return provider;
+});
+const observeReelAccount = firebase.observeReelAccount ?? ((am, auth, receive) => am.onAuthStateChanged(auth, candidate =>
+  receive(candidate?.emailVerified && firebase.isOrganizationEmail(candidate.email) ? candidate : null, candidate)));
 
 const el = (id) => document.getElementById(id);
 const status = el("status");

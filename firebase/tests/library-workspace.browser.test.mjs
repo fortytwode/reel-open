@@ -72,3 +72,37 @@ test('Mission Control calendar stays in the workspace and clears on sign out', a
     assert.equal(await manual.getAttribute('href'), 'https://example.test/record?mode=meeting');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
+
+test('workspace loads against the existing team Hosting auth modules', async () => {
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const browser = await chromium.launch({headless:true, executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'});
+  try {
+    const page = await browser.newPage();
+    await page.route('**/reel/assets/organization.js*', route => route.fulfill({contentType:'text/javascript',body:`
+      export const organization={allowedEmailDomain:'rocketshiphq.com',webBase:'https://example.test',viewerBase:'https://example.test',viewerPath:'v',meetingServiceURL:'https://meetings.example.test',deliveryServiceURL:'https://delivery.example.test'};
+      export const organizationStorageKey=key=>'legacy:'+key;
+    `}));
+    await page.route('**/reel/firebase.js*', route => route.fulfill({contentType:'text/javascript',body:`
+      export const FB_CDN='https://sdk.example.test/', CLOUD_CONFIG={firestoreDatabase:'reel'}, EMU=false;
+      export const isOrganizationEmail=e=>e.endsWith('@rocketshiphq.com');
+      const user={uid:'owner',email:'owner@rocketshiphq.com',emailVerified:true,getIdToken:async()=> 'token'};
+      const auth={currentUser:user}; const am={onAuthStateChanged:(_a,cb)=>{window.changeAccount=u=>{auth.currentUser=u;cb(u)};cb(user)}};
+      export const loadAuth=async()=>({auth,am}); export const sessionSnapshot=u=>u&&({uid:u.uid,email:u.email,getIdToken:()=>u.getIdToken()});
+    `}));
+    await page.route('https://sdk.example.test/firebase-firestore.js', route => route.fulfill({contentType:'text/javascript',body:`
+      export const getFirestore=()=>({});export const collection=(...x)=>x;export const query=x=>x;export const orderBy=()=>null;
+      export const onSnapshot=(_q,cb)=>{queueMicrotask(()=>cb({docs:[]}));return ()=>{}};
+    `}));
+    await page.route('https://meetings.example.test/**', route => route.fulfill({json:{events:[],meetings:[],capabilities:{calendar:true}}}));
+    await page.route('https://delivery.example.test/**', route => route.fulfill({json:{meetings:[],next_cursor:null}}));
+    await page.goto(`http://127.0.0.1:${server.address().port}/reel#calendar`);
+    await page.locator('#meeting-calendar-panel .mc-card').waitFor();
+    assert.equal(await page.locator('#account').textContent(), 'owner@rocketshiphq.com');
+    await page.evaluate(() => window.changeAccount({uid:'other',email:'other@example.com',emailVerified:true}));
+    assert.equal(await page.locator('#account').textContent(), '');
+    assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
+    await page.evaluate(() => window.changeAccount({uid:'unverified',email:'owner@rocketshiphq.com',emailVerified:false}));
+    assert.equal(await page.locator('#account').textContent(), '');
+    assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
+  } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+});

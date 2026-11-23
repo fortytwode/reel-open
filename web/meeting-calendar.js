@@ -1,7 +1,9 @@
 // Calendar and browser-extension meeting controls for the recorder page.
 // The module deliberately keeps calendar data in memory only; Firebase tokens are
 // obtained from the caller's session and are never persisted or logged.
-import { organization, publicSignup } from "./organization.js?v=20261121-public-signup";
+import * as org from "./organization.js?v=20261121-public-signup";
+const { organization } = org;
+const publicSignup = org.publicSignup ?? false;
 const API = organization?.meetingServiceURL;
 const WEB_BASE = organization?.webBase || location.origin;
 const STATUSES = {
