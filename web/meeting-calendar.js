@@ -3,6 +3,7 @@
 // obtained from the caller's session and are never persisted or logged.
 import { organization, publicSignup } from "./organization.js?v=20261121-public-signup";
 const API = organization?.meetingServiceURL;
+const WEB_BASE = organization?.webBase || location.origin;
 const STATUSES = {
   scheduled: "Scheduled",
   awaiting_consent: "Awaiting your consent",
@@ -90,7 +91,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       <div class="mc-connect" data-connect></div>
       <div class="mc-settings" data-settings></div>
       <div class="mc-events" data-events></div>
-      <details class="mc-note" data-extension-note><summary>Detect meetings in Chrome or Edge</summary><p><a href="/downloads/reel-meeting-prompt-0.1.1.zip" download>Download the meeting prompt extension</a>. Unzip it, open chrome://extensions or edge://extensions, turn on Developer mode, choose Load unpacked, and select the unzipped folder. On a meeting preview page, choose Allow, then confirm participant consent in Reel.</p></details>
+      <details class="mc-note" data-extension-note><summary>Detect meetings in Chrome or Edge</summary><p><a href="${esc(WEB_BASE)}/downloads/reel-meeting-prompt-0.1.1.zip" download>Download the meeting prompt extension</a>. Unzip it, open chrome://extensions or edge://extensions, turn on Developer mode, choose Load unpacked, and select the unzipped folder. On a meeting preview page, choose Allow, then confirm participant consent in Reel.</p></details>
       <p class="mc-note" data-cloud-note>The cloud note taker can work while this computer is closed after you grant standing consent. Google Calendar is the only server calendar supported here. Outlook and Apple Calendar are available through the existing native connection; automatic server connection is not available.</p>
     </section>`;
 
@@ -135,11 +136,11 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
   }
   async function request(path, method = "GET", body, expectedUid) {
     const current = await currentSession(expectedUid);
-    if (!current) throw new Error("Sign in to use meeting calendar.");
+    if (!current || state.disposed) throw new Error("Sign in to use meeting calendar.");
     const token = await current.getIdToken();
     // Re-check after token retrieval so a pending request never crosses accounts.
     const latest = await session();
-    if (!latest?.uid || latest.uid !== current.uid || current.isCurrent?.() === false) {
+    if (state.disposed || !latest?.uid || latest.uid !== current.uid || current.isCurrent?.() === false) {
       throw new Error("Your signed-in account changed. Refreshing calendar data.");
     }
     const response = await fetch(API + path, {
@@ -265,7 +266,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const actionable = (!publicSignup || calendarAuthorized) && dueById.has(event.id) && event.status === "awaiting_consent" && (cloudEvent ? (botAvailable || hybridCloud) : (!desktop && botAvailable));
       const desktopJoin = eventDesktop && isMac && /^[a-f0-9]{64}$/i.test(String(event.id || ""))
         ? `<a class="mc-primary" href="reel://join-meeting?id=${encodeURIComponent(event.id)}">Open in Reel</a>`
-        : eventDesktop && !isMac ? `<a href="/record?mode=meeting">Capture manually</a>` : "";
+        : eventDesktop && !isMac ? `<a href="${esc(WEB_BASE)}/record?mode=meeting">Capture manually</a>` : "";
       const failure = failed && Object.hasOwn(CLOUD_FAILURES, event.failure_category)
         ? CLOUD_FAILURES[event.failure_category] : "";
       const detailText = failure || (event.notion_status === "calendar_selection_required" ? event.detail : "");
@@ -278,7 +279,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       browserHost.hidden = false;
       const cloudRequest = cloudProviderForURL(state.browserRequest.url, capability);
       const cloudRequestName = cloudRequest === "google_meet" ? "Google Meet" : "Teams";
-      browserHost.innerHTML = desktop && !cloudRequest ? `<div class="mc-browser-card"><strong>Meeting requested by the browser</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${isMac ? "Open this meeting link in Reel to continue." : "Open manual capture in Reel, then choose the meeting from your browser picker."}</p><a href="${isMac ? `reel://meeting-link?url=${encodeURIComponent(state.browserRequest.url)}` : "/record?mode=meeting"}">${isMac ? "Open in Reel" : "Capture manually"}</a> <button type="button" data-action="browser-dismiss">Dismiss</button></div>` : `<div class="mc-browser-card"><strong>Meeting requested by the browser extension</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${cloudRequest ? "This request must match an eligible meeting in your connected Google Calendar. Reel will not open this link." : "Reel will ask the meeting provider to admit its note taker. This page will not open the meeting link."}</p><label class="mc-check"><input type="checkbox" data-field="browser-attest"> I confirm the participants have agreed to recording this meeting.</label><div class="mc-actions"><button type="button" data-action="browser-join" ${!state.uid || state.busy || !(botAvailable || cloudRequest) ? "disabled" : ""}>${cloudRequest ? `Consent and request ${cloudRequestName} entry` : "Consent and request entry"}</button><button type="button" data-action="browser-dismiss" ${state.busy ? "disabled" : ""}>Dismiss</button></div></div>`;
+      browserHost.innerHTML = desktop && !cloudRequest ? `<div class="mc-browser-card"><strong>Meeting requested by the browser</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${isMac ? "Open this meeting link in Reel to continue." : "Open manual capture in Reel, then choose the meeting from your browser picker."}</p><a href="${isMac ? `reel://meeting-link?url=${encodeURIComponent(state.browserRequest.url)}` : `${esc(WEB_BASE)}/record?mode=meeting`}">${isMac ? "Open in Reel" : "Capture manually"}</a> <button type="button" data-action="browser-dismiss">Dismiss</button></div>` : `<div class="mc-browser-card"><strong>Meeting requested by the browser extension</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${cloudRequest ? "This request must match an eligible meeting in your connected Google Calendar. Reel will not open this link." : "Reel will ask the meeting provider to admit its note taker. This page will not open the meeting link."}</p><label class="mc-check"><input type="checkbox" data-field="browser-attest"> I confirm the participants have agreed to recording this meeting.</label><div class="mc-actions"><button type="button" data-action="browser-join" ${!state.uid || state.busy || !(botAvailable || cloudRequest) ? "disabled" : ""}>${cloudRequest ? `Consent and request ${cloudRequestName} entry` : "Consent and request entry"}</button><button type="button" data-action="browser-dismiss" ${state.busy ? "disabled" : ""}>Dismiss</button></div></div>`;
     } else { browserHost.hidden = true; browserHost.innerHTML = ""; }
     for (const input of savedInputs) {
       const element = q(input.selector);
@@ -325,7 +326,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
   }
 
   async function act(button) {
-    if (state.busy || button.disabled) return;
+    if (state.disposed || state.busy || button.disabled) return;
     const action = button.dataset.action;
     const eventId = button.dataset.id;
     const selectedMode = q('[data-field="consent"]')?.value || "ask";
@@ -413,18 +414,20 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     finally { state.busy = false; render(); }
   }
 
-  container.addEventListener("click", (event) => {
+  const onClick = (event) => {
     const button = event.target.closest("button[data-action]");
     if (button && container.contains(button)) act(button);
-  });
-  container.addEventListener("change", (event) => {
+  };
+  const onChange = (event) => {
     const checkbox = event.target.closest("input[data-calendar-choice]");
     if (!checkbox || !state.picker) return;
     const selected = state.picker.selected;
     if (checkbox.checked) selected.add(checkbox.value);
     else selected.delete(checkbox.value);
     q('[data-action="save-calendars"]').disabled = !selected.size || selected.size > 25;
-  });
+  };
+  container.addEventListener("click", onClick);
+  container.addEventListener("change", onChange);
   const onVisibility = () => {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -446,6 +449,8 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       state.disposed = true;
       clearInterval(pollTimer);
       document.removeEventListener("visibilitychange", onVisibility);
+      container.removeEventListener("click", onClick);
+      container.removeEventListener("change", onChange);
       container.replaceChildren();
     },
   };

@@ -1,5 +1,6 @@
 """Calendar identity and recipient rules for Reel delivery."""
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import partial
 import hashlib
@@ -8,6 +9,7 @@ import logging
 import os
 import re
 import time
+from threading import local
 from unicodedata import category
 from uuid import NAMESPACE_URL, uuid5
 
@@ -670,13 +672,20 @@ def format_transcript(segments):
 class GCSStateStore:
     """GCS JSON API receipts, guarded by object generation preconditions."""
     def __init__(self, bucket, prefix='delivery', *, read_only=False):
-        import google.auth
-        from google.auth.transport.requests import AuthorizedSession
-        scope = 'https://www.googleapis.com/auth/devstorage.read_only' if read_only else 'https://www.googleapis.com/auth/devstorage.read_write'
-        credentials, _ = google.auth.default(scopes=[scope])
-        self.session = AuthorizedSession(credentials)
+        self._sessions = local()
+        self._scope = 'https://www.googleapis.com/auth/devstorage.read_only' if read_only else 'https://www.googleapis.com/auth/devstorage.read_write'
         self.bucket = bucket
         self.prefix = prefix.strip('/')
+
+    @property
+    def session(self):
+        # requests sessions and credential refresh state are not shared across workers.
+        if not hasattr(self._sessions, 'value'):
+            import google.auth
+            from google.auth.transport.requests import AuthorizedSession
+            credentials, _ = google.auth.default(scopes=[self._scope])
+            self._sessions.value = AuthorizedSession(credentials)
+        return self._sessions.value
 
     def _name(self, key):
         return f'{self.prefix}/{key}.json' if self.prefix else f'{key}.json'
@@ -765,8 +774,7 @@ def list_shared_notes(store, email):
         return []
     if not isinstance(index.get('meetings'), dict):
         raise DeliveryError('Invalid meeting index')
-    result = []
-    for meeting_id in index['meetings']:
+    def read_entry(meeting_id):
         if not re.fullmatch(r'reel_[0-9a-f]{64}', meeting_id):
             raise DeliveryError('Invalid meeting index entry')
         ids = index['meetings'][meeting_id]
@@ -775,7 +783,11 @@ def list_shared_notes(store, email):
         note, _ = store.load('notes/' + meeting_id)
         if note is None or email not in _validate_note(note, meeting_id)['recipients']:
             raise DeliveryError('Invalid meeting index entry')
-        result.append({**{k:v for k,v in note.items() if k not in ('segments', 'transcript_text')}, 'local_recording_ids':ids})
+        return {**{k:v for k,v in note.items() if k not in ('segments', 'transcript_text')}, 'local_recording_ids':ids}
+    # Each note still gets its own authoritative recipient check. Bound concurrency
+    # so a large index doesn't turn one request into unbounded storage traffic.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        result = list(pool.map(read_entry, index['meetings']))
     return sorted(result, key=lambda item:(item['started_at'], item['id']), reverse=True)
 
 

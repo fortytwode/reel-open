@@ -1,4 +1,5 @@
-import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, FB_CDN, CLOUD_CONFIG, EMU } from "./reel/firebase.js?v=20261121-public-signup";
+import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, sessionSnapshot, FB_CDN, CLOUD_CONFIG, EMU } from "./reel/firebase.js?v=20261121-public-signup";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261123-workspace1";
 import { organization, organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
 import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261105-parity2";
 
@@ -13,6 +14,7 @@ const pendingOrganization = new Set();
 const openManagement = new Set();
 let participantMeetings = [], participantLoading = false, participantError = "", participantLoadNumber = 0;
 let note = null, noteLoading = false, noteError = "", noteLoadNumber = 0;
+let calendar = null;
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
 const validUser = (u) => !!u;
@@ -45,6 +47,7 @@ function rememberRecording(id) {
   catch { /* Storage may be disabled; keep Recent working for this visit. */ }
 }
 const isRecent = () => location.hash === "#recent";
+const isCalendar = () => location.hash === "#calendar";
 const selectedNote = () => /^#meetings\/(reel_[a-f0-9]{64})$/.exec(location.hash)?.[1] || null;
 const isMeetings = () => location.hash === "#meetings" || !!selectedNote();
 const isArchived = () => location.hash === "#archive";
@@ -55,7 +58,7 @@ function libraryURL(hash) { const url = new URL(location.href); url.hash = hash;
 function organizationStatus() {
   const text = organizationError || organizationMessage;
   el("organization-status").textContent = text;
-  el("organization-status").hidden = !text || isMeetings();
+  el("organization-status").hidden = !text || isMeetings() || isCalendar();
   el("organization-status").classList.toggle("error", !!organizationError);
 }
 function renderFolders() {
@@ -90,30 +93,43 @@ async function savePreference(id, patch) {
 }
 function setLoading(value) {
   loading = value;
-  el("loading-grid").hidden = !value;
+  el("loading-grid").hidden = !value || isCalendar();
   el("recordings").setAttribute("aria-busy", String(value));
 }
 function updateView() {
   openManagement.clear();
   const recentView = isRecent();
   const meetingsView = isMeetings();
-  if (publicSignup && meetingsView) {
+  const calendarView = isCalendar();
+  if (publicSignup && (meetingsView || calendarView)) {
     location.replace(organization.webBase + "/notetaker");
     return;
   }
   const folder = folders.find((f) => f.id === selectedFolder());
-  const title = meetingsView ? "Meetings" : recentView ? "Recently viewed" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
+  const title = calendarView ? "Meeting calendar" : meetingsView ? "Meetings" : recentView ? "Recently viewed videos" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
   el("view-title").textContent = title;
   el("view-description").hidden = !recentView && !isArchived();
   el("view-description").textContent = isArchived() ? "Archived recordings are hidden from your other library views. Existing share links still work." : "Videos opened from this library on this browser.";
   el("meeting-description").hidden = !meetingsView;
   el("recordings").setAttribute("aria-label", meetingsView ? "Meetings" : "Screen recordings");
-  document.querySelector(".record-options").hidden = meetingsView;
-  el("record-meeting").hidden = !meetingsView;
-  el("library-footnote").hidden = meetingsView;
+  document.querySelector(".record-options").hidden = meetingsView || calendarView;
+  el("meeting-actions").hidden = !meetingsView;
+  el("library-footnote").hidden = meetingsView || calendarView;
+  el("meeting-calendar-panel").hidden = !calendarView || !validUser(currentUser);
+  el("loading-grid").hidden = !loading || calendarView;
+  el("recordings").hidden = calendarView;
+  document.querySelector(".toolbar").hidden = calendarView;
+  document.querySelector(".search").hidden = calendarView;
+  if (!calendarView && calendar) { calendar.dispose(); calendar = null; }
+  if (calendarView && validUser(currentUser) && !calendar) {
+    calendar = mountMeetingCalendar({ container: el("meeting-calendar-panel"), session: async () => {
+      const user = currentUser, generation = accountNumber, snapshot = sessionSnapshot(user);
+      return snapshot && { ...snapshot, isCurrent: () => currentUser?.uid === snapshot.uid && accountNumber === generation && auth.currentUser?.uid === snapshot.uid };
+    }});
+  }
   el("search").placeholder = meetingsView ? "Search meetings" : "Search recordings";
   document.title = `${title} · Reel`;
-  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
+  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !calendarView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView], ["nav-calendar", calendarView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
     const url = new URL(location.href); url.hash = id.slice(4) === "library" ? "library" : id.slice(4);
     el(id).href = publicSignup && id === "nav-meetings" ? organization.webBase + "/notetaker" : url.href;
     el(id).classList.toggle("active", selected);
@@ -176,11 +192,12 @@ window.addEventListener("message", (event) => {
 
 function render() {
   organizationStatus();
+  if (isCalendar() && validUser(currentUser)) { message(""); return; }
   if (!loading && !validUser(currentUser)) {
-    const subject = isMeetings() ? "meeting notes" : "uploaded recordings";
+    const subject = isMeetings() || isCalendar() ? "meeting notes" : "uploaded recordings";
     const accessMessage = rejectedAccount
       ? `Use ${googleAccountLabel} to see your ${subject}. Sign out to choose another account.`
-      : isMeetings()
+      : isMeetings() || isCalendar()
         ? "Sign in to see your meeting notes. Meetings recorded while signed out stay on that device."
         : "Sign in to see your uploaded recordings. Recordings saved on this device are available where you recorded them.";
     message(loadError || accessMessage, !!loadError);
@@ -523,6 +540,8 @@ try {
   if (EMU) fs.connectFirestoreEmulator(db, "127.0.0.1", 8080);
   observeReelAccount(am, auth, (user, candidate) => {
     ++accountNumber;
+    if (calendar) { calendar.dispose(); calendar = null; }
+    el("meeting-calendar-panel").hidden = true;
     closeSharedTitleEditor();
     openManagement.clear();
     stopListening();
@@ -538,7 +557,7 @@ try {
     el("result-count").textContent = allowed ? "Loading…" : ""; el("search").value = "";
     el("sign-in").hidden = !!candidate; el("sign-out").hidden = !candidate; el("refresh").hidden = !allowed; el("refresh").disabled = false;
     el("search").disabled = !allowed; el("sort").disabled = !allowed; el("account").textContent = user?.email || "";
-    if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else loadParticipantMeetings(); }
+    if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else loadParticipantMeetings(); if (isCalendar()) updateView(); }
     else render();
   });
 } catch (e) {
