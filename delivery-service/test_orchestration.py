@@ -448,6 +448,28 @@ class SharedNotesTests(OrchestrationTests):
     def get(self, path):
         return self.client.get(path, headers={'Authorization':'Bearer x'})
 
+    def test_meeting_index_reads_notes_concurrently_and_keeps_recipient_checks(self):
+        from threading import Barrier, BrokenBarrierError
+        from app import _index_key, list_shared_notes
+        ids = ['reel_' + c * 64 for c in 'ab']
+        self.store.items[_index_key('owner@rocketshiphq.com')] = ({'meetings': {i: [] for i in ids}}, 1)
+        for index, meeting_id in enumerate(ids):
+            self.store.items['notes/' + meeting_id] = ({'id': meeting_id, 'recipients': ['owner@rocketshiphq.com'],
+                'segments': [], 'transcript_text': '', 'started_at': f'2026-11-{index + 1:02d}T00:00:00Z'}, 1)
+        original = self.store.load
+        barrier = Barrier(2, timeout=2)
+        def load(key):
+            if key.startswith('notes/'):
+                try: barrier.wait()
+                except BrokenBarrierError: raise AssertionError('Note reads were serialized')
+            return original(key)
+        self.store.load = load
+        result = list_shared_notes(self.store, 'owner@rocketshiphq.com')
+        self.assertEqual([row['id'] for row in result], list(reversed(ids)))
+        self.store.items['notes/' + ids[0]][0]['recipients'] = ['other@rocketshiphq.com']
+        with self.assertRaises(DeliveryError):
+            list_shared_notes(self.store, 'owner@rocketshiphq.com')
+
     def test_authorization_snapshot_and_detail(self):
         # A declined invitee is still authorized; a forged payload attendee is not.
         self.event['attendees'].append({'email':'third@rocketshiphq.com','responseStatus':'needsAction'})
