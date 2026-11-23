@@ -57,6 +57,7 @@ dialog label.inline { flex-direction: row; align-items: center; gap: 6px; }
 :root { color-scheme:light; --bg:#f8f9fb; --panel:#fff; --text:#252a31; --muted:#687382; --line:#dfe3e9; --accent:#2165d5; --danger:#ef454a; }
 .bar { background:#fff; border-bottom:1px solid var(--line); }
 .bar .actions { flex-wrap:wrap; }
+.library { scroll-margin-top:80px; }
 .bar .button { color:var(--text); text-decoration:none; border:1px solid var(--line); padding:6px 12px; border-radius:8px; font-size:14px; }
 main { max-width:900px; padding-top:24px; }
 .recorder { max-width:680px; margin-inline:auto; padding:24px; }
@@ -79,6 +80,7 @@ main { max-width:900px; padding-top:24px; }
 #install-status:empty { display:none; }
 button:focus-visible,a:focus-visible,summary:focus-visible,select:focus-visible { outline:3px solid #3b78d0; outline-offset:3px; }
 @media(max-width:600px) { .bar { flex-wrap:wrap; gap:12px; } .recorder { padding:16px; } .grid { grid-template-columns:1fr 1fr; } }
+@media(max-width:600px) { .library { scroll-margin-top:160px; } }
 .brand .dot { background:var(--danger); }
 
 /* Meeting mode preserves the ordinary recorder's saved choices. */

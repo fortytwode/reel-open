@@ -50,6 +50,7 @@ const server = http.createServer(async (req, res) => {
   if (p === "/target") { res.writeHead(200, { "Content-Type": "text/html" }); res.end(TARGET); return; }
   if (p.startsWith("/v/")) p = "/v.html";
   else if (p === "/record") p = "/record.html";
+  else if (p === "/library") p = "/library.html";
   try {
     const body = await readFile(p === "/organization.json" ? ORG_CONFIG : path.join(WEB, p === "/" ? "index.html" : p));
     res.writeHead(200, { "Content-Type": TYPES[path.extname(p)] || "application/octet-stream" }); res.end(body);
@@ -108,7 +109,7 @@ if (!PROD) {
   const sdk = path.join(HERE, "node_modules/firebase");
   const { version } = JSON.parse(await readFile(path.join(sdk, "package.json"), "utf8"));
   const sdkOrigin = `https://www.gstatic.com/firebasejs/${version}/`;
-  const bundles = new Map(["firebase-app.js", "firebase-auth.js"].map(name => [sdkOrigin + name, path.join(sdk, name)]));
+  const bundles = new Map(["firebase-app.js", "firebase-auth.js", "firebase-firestore.js"].map(name => [sdkOrigin + name, path.join(sdk, name)]));
   await ctx.route(/^https?:\/\//, (route) => {
     const url = new URL(route.request().url());
     if (localOrigins.has(url.origin)) return route.continue();
@@ -335,6 +336,18 @@ try {
   }), 25000, 300);
   check("viewer plays the recording", plays, await viewer.locator("#status").innerText().catch(() => ""));
   check("viewer title and download", (await viewer.locator("#title").innerText()).startsWith("Recording – ") && await viewer.locator("#download").isVisible());
+  if (!PROD) {
+    const libraryURL = ORIGIN + "/library";
+    const recorderLibrary = await page.getByRole("link", { name: "Online library" }).evaluate((link) => link.href);
+    const viewerLibrary = await viewer.getByRole("link", { name: "Reel online library" }).evaluate((link) => link.href);
+    check("recorder and viewer link to the library on the signed-in origin", recorderLibrary === libraryURL && viewerLibrary === libraryURL);
+    const libraryPage = await ctx.newPage();
+    await libraryPage.goto(libraryURL + Q);
+    check("online Library reuses the recorder session and shows its uploaded clip",
+      await until(async () => (await libraryPage.locator("#account").innerText()) === `tester@${organization.allowedEmailDomain}` &&
+        (await libraryPage.locator("#recordings").innerText()).includes(m1.title)), await libraryPage.locator("#status").textContent());
+    await libraryPage.close();
+  }
   await viewer.close();
 
   // ---- 3. trim
