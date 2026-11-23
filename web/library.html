@@ -11,7 +11,7 @@
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js" crossorigin>
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js" crossorigin>
   <link rel="stylesheet" href="./library.css?v=20261110-notes1">
-  <script type="module" src="./library.js?v=20261121-public-signup"></script>
+  <script type="module" src="./library.js?v=20261123-local1"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -57,7 +57,7 @@
           <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
         </div>
         <div id="recordings" class="recordings" aria-label="Videos"></div>
-        <p id="library-footnote" class="footnote">Your library is private. People with a share link can watch that recording, subject to its password and expiry settings. Recordings saved only on your Mac or browser appear here after uploading.</p>
+        <p id="library-footnote" class="footnote">Find recordings saved on this device in <a id="local-browser-recordings" href="/record#local-recordings" data-recorder="#local-recordings">the browser recorder</a> or <a id="local-mac-recordings" href="reel://local-library">Reel for Mac</a>. Uploaded recordings appear in your private online library. Share links let others watch subject to your password and expiry settings.</p>
       </section>
     </main>
   </div>

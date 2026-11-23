@@ -10,13 +10,14 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/viewer.css">
   <link rel="stylesheet" href="/meeting-calendar.css?v=20261119-choice1">
-  <link rel="stylesheet" href="/record.css?v=20261029-meetings3">
+  <link rel="stylesheet" href="/record.css?v=20261123-local1">
 </head>
 <body>
   <header class="bar">
     <a class="brand" href="/record" aria-label="Reel Recorder"><span class="dot"></span>Reel Recorder</a>
     <div class="actions" id="account">
-      <a class="button" href="/library" data-library="" target="_blank" rel="noopener">Library</a>
+      <a class="button" href="#local-recordings">Local recordings</a>
+      <a class="button" href="/library" data-library="" target="_blank" rel="noopener">Online library</a>
       <button id="install-reel" type="button">Install Recorder</button>
       <span id="user" class="muted small"></span>
       <button id="sign-in" type="button" class="primary" hidden>Sign in with Google</button>
@@ -161,7 +162,7 @@
       </div>
     </section>
 
-    <section class="library">
+    <section class="library" id="local-recordings">
       <div class="lib-head"><h2>Your recordings</h2><span class="muted small">Stored in this browser; uploaded ones are also on the web.</span></div>
       <ol id="list" class="rec-list"></ol>
       <p id="empty" class="muted">No recordings yet.</p>

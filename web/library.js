@@ -8,6 +8,7 @@ const el = (id) => document.getElementById(id);
 const status = el("status");
 let auth, am, fs, db, currentUser, entries = [], meetings = [], meetingShareIDs = new Set(), recent = [], loading = true, meetingLoading = false, loadError = "", meetingError = "", loadNumber = 0, meetingLoadNumber = 0, stopListening = () => {};
 let preferences = new Map(), folders = [], organizationReady = false, organizationError = "", organizationMessage = "", creatingFolder = false, accountNumber = 0;
+let rejectedAccount = false;
 const pendingOrganization = new Set();
 const openManagement = new Set();
 let participantMeetings = [], participantLoading = false, participantError = "", participantLoadNumber = 0;
@@ -175,6 +176,16 @@ window.addEventListener("message", (event) => {
 
 function render() {
   organizationStatus();
+  if (!loading && !validUser(currentUser)) {
+    const subject = isMeetings() ? "meeting notes" : "uploaded recordings";
+    const accessMessage = rejectedAccount
+      ? `Use ${googleAccountLabel} to see your ${subject}. Sign out to choose another account.`
+      : isMeetings()
+        ? "Sign in to see your meeting notes. Meetings recorded while signed out stay on that device."
+        : "Sign in to see your uploaded recordings. Recordings saved on this device are available where you recorded them.";
+    message(loadError || accessMessage, !!loadError);
+    return;
+  }
   if (isMeetings()) return renderMeetings();
   const list = el("recordings");
   list.replaceChildren();
@@ -336,7 +347,7 @@ function renderMeetings() {
 function renderNote() {
   const list = el("recordings");
   el("result-count").textContent = "";
-  if (!validUser(currentUser)) { message(`Sign in with ${googleAccountLabel} to see meeting notes.`); return; }
+  if (!validUser(currentUser)) return;
   if (noteLoading) { message("Loading meeting notes…"); return; }
   if (noteError) { message(noteError, true); return; }
   if (!note) return;
@@ -520,12 +531,19 @@ try {
     preferences = new Map(); folders = []; organizationReady = false; organizationError = ""; organizationMessage = ""; pendingOrganization.clear(); creatingFolder = false;
     el("folder-form").hidden = true; el("folder-name").value = ""; el("folder-form").querySelector('button[type="submit"]').disabled = false; renderFolders(); organizationStatus();
     if (selectedFolder()) { el("view-title").textContent = "Folder"; el("video-tab").textContent = "Folder"; document.title = "Folder · Reel"; }
-    setLoading(validUser(user));
-    el("result-count").textContent = isMeetings() ? "0 meetings" : "0 videos"; el("search").value = "";
     const allowed = validUser(user);
+    rejectedAccount = !!candidate && !allowed;
+    setLoading(allowed);
+    el("result-count").parentElement.hidden = !allowed;
+    el("result-count").textContent = allowed ? "Loading…" : ""; el("search").value = "";
     el("sign-in").hidden = !!candidate; el("sign-out").hidden = !candidate; el("refresh").hidden = !allowed; el("refresh").disabled = false;
     el("search").disabled = !allowed; el("sort").disabled = !allowed; el("account").textContent = user?.email || "";
     if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else loadParticipantMeetings(); }
-    else message(candidate ? `Use ${googleAccountLabel} to view your library. Sign out to choose another account.` : isMeetings() ? `Sign in with ${googleAccountLabel} to see meeting details. Meetings recorded while signed out stay on that device and won't sync to this portal.` : `Sign in with ${googleAccountLabel} to see your recordings.`);
+    else render();
   });
-} catch (e) { setLoading(false); el("result-count").textContent = "Unavailable"; message("Couldn't connect to Reel. Reload this page to try again. " + e.message, true); }
+} catch (e) {
+  setLoading(false);
+  el("result-count").parentElement.hidden = true;
+  loadError = "Couldn't connect to Reel. Reload this page to try again. " + e.message;
+  render();
+}

@@ -35,7 +35,7 @@ textarea { width: 100%; resize: vertical; }
 .player-wrap { background: #000; border-radius: 12px; overflow: hidden; position: relative; min-height: 200px; }
 video { width: 100%; display: block; max-height: 78vh; background: #000; }
 .controls-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-top: 8px; }
-.speed { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+.speed { position: relative; margin-left: auto; }
 select { font: inherit; font-size: 14px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
 .status { color: #fff; padding: 64px 24px; text-align: center; font-size: 16px; }
 
@@ -123,13 +123,13 @@ body.embed-mode { background:#000; min-height:100vh; }
 .viewer-page .brand-section { font-size:14px; font-weight:500; border-left:1px solid var(--line); padding-left:14px; margin-left:6px; color:var(--muted); }
 .viewer-page .actions { gap:10px; }
 .viewer-page button,.viewer-page .button { font-weight:550; padding:8px 13px; }
-.viewer-page button:focus-visible,.viewer-page a:focus-visible,.viewer-page select:focus-visible,.viewer-page input:focus-visible,.viewer-page textarea:focus-visible,.viewer-page li:focus-visible { outline:3px solid #3c6bdc; outline-offset:3px; }
+.viewer-page button:focus-visible,.viewer-page a:focus-visible,.viewer-page summary:focus-visible,.viewer-page input:focus-visible,.viewer-page textarea:focus-visible,.viewer-page li:focus-visible { outline:3px solid #3c6bdc; outline-offset:3px; }
 .viewer-page main { max-width:1600px; padding:28px 36px 16px; }
-.viewer-page .head { margin-bottom:24px; }
+.viewer-page .head { margin-bottom:18px; }
 .viewer-page .head h1 { font-size:28px; font-weight:700; margin-bottom:8px; letter-spacing:-.035em; }
 .viewer-page .head p { font-size:14px; }
 .viewer-page .layout { grid-template-columns:minmax(0,1fr) 360px; gap:28px; margin-top:0; }
-.viewer-page .player-wrap { aspect-ratio:16/9; min-height:0; background:#17191e; border-radius:14px; }
+.viewer-page .player-wrap { aspect-ratio:16/9; max-height:max(160px, calc(100dvh - 260px)); min-height:0; background:#17191e; border-radius:14px; }
 .viewer-page #captions-toggle { position:absolute; z-index:3; top:12px; right:12px; }
 .viewer-page .player-wrap video { position:absolute; inset:0; width:100%; height:100%; max-height:none; object-fit:contain; }
 .viewer-page .status { position:absolute; inset:0; display:grid; place-content:center; padding:24px; color:#edeef2; }
@@ -139,13 +139,20 @@ body.embed-mode { background:#000; min-height:100vh; }
 .play-caption { position:relative; background:#17191edb; padding:5px 12px; border-radius:20px; font-size:13px; }
 .play-cover:hover .play-symbol { background:white; color:var(--accent); }
 .viewer-page .play-cover:focus-visible { outline-offset:-5px; }
-.viewer-page .controls-row { justify-content:flex-start; gap:14px; margin-top:14px; padding:10px 0; }
+.viewer-page .controls-row { justify-content:flex-start; gap:8px; margin-top:8px; padding:5px; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
 .viewer-page .reactbar { gap:3px; }
-.viewer-page .reactbar button { border-color:transparent; background:transparent; font-size:22px; padding:5px 7px; }
+.viewer-page .reactbar button { border-color:transparent; background:transparent; font-size:19px; padding:5px 6px; }
 .viewer-page .reactbar button:hover { background:var(--hl); }
 .viewer-page .reactbar button span:empty { display:none; }
-.viewer-page .comment-shortcut { border:1px solid var(--line); background:white; }
-.viewer-page .speed select { padding:6px; }
+.viewer-page .comment-shortcut { padding:6px 10px; }
+.speed summary { display:flex; align-items:center; justify-content:center; gap:8px; min-width:64px; padding:6px 9px; border:1px solid var(--line); border-radius:8px; cursor:pointer; font-weight:600; font-variant-numeric:tabular-nums; list-style:none; }
+.speed summary::-webkit-details-marker { display:none; }
+.speed-chevron { width:6px; height:6px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:translateY(-2px) rotate(45deg); }
+.speed[open] .speed-chevron { transform:translateY(1px) rotate(225deg); }
+.speed-options { display:grid; position:absolute; z-index:4; right:0; bottom:calc(100% + 6px); width:112px; gap:2px; padding:4px; border:1px solid var(--line); border-radius:10px; background:var(--panel); box-shadow:0 4px 16px #0002; }
+.speed:not([open]) .speed-options { display:none; }
+.viewer-page .speed-options button { text-align:left; border:0; padding:5px 10px; }
+.speed-options button:hover,.speed-options button[aria-pressed="true"] { background:var(--hl); }
 .viewer-page .strip { height:24px; border:0; border-radius:0; background:transparent; margin-top:5px; border-bottom:2px solid var(--line); }
 .viewer-page .marker { padding:0; font-size:15px; }
 .viewer-page .panel { height:min(660px,calc(100dvh - 190px)); min-height:360px; max-height:none; border-radius:12px; box-shadow:0 2px 8px #24262b03; }
@@ -180,12 +187,16 @@ body.embed-mode { background:#000; min-height:100vh; }
   .viewer-page .brand-section { display:none; }
   .play-symbol { width:64px; height:64px; font-size:24px; }
   .viewer-page .controls-row { gap:8px; }
-  .viewer-page .speed { margin-left:auto; }
+  .viewer-page .player-wrap { max-height:max(140px, calc(100dvh - 310px)); }
+}
+@media(max-width:420px) {
+  .viewer-page .reactbar { gap:0; }
+  .viewer-page .reactbar button { padding-inline:4px; }
 }
 .viewer-page.embed-mode { background:#000; }
 .viewer-page.embed-mode main { padding:0; max-width:none; }
 .viewer-page.embed-mode .layout { display:block; }
-.viewer-page.embed-mode .player-wrap { aspect-ratio:auto; height:100vh; border-radius:0; }
+.viewer-page.embed-mode .player-wrap { aspect-ratio:auto; height:100vh; max-height:none; border-radius:0; }
 .viewer-page.embed-mode #playback-error { position:fixed; z-index:3; left:16px; right:16px; bottom:48px; margin:0; padding:10px 14px; border-radius:8px; background:#fff; box-shadow:0 2px 16px #0004; }
 
 .shared-title-dialog { box-sizing: border-box; max-width: 520px; width: calc(100% - 32px); border: 1px solid #ccc; border-radius: 12px; padding: 24px; }
