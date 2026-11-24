@@ -86,6 +86,19 @@ class MonitorDepartureTests(unittest.IsolatedAsyncioTestCase):
         count.assert_not_awaited()
 
 
+class ParticipantCountTests(unittest.IsolatedAsyncioTestCase):
+    async def test_larger_of_the_two_readings_wins_and_bad_readings_are_unknown(self):
+        page = MagicMock()
+        for reading, expected in [([1, 0], 1), ([1, 4], 4), ([3, 2], 3), ([0, 0], 0),
+                                  (2, None), ([], None), ([True, 1], None), ([-1, 2], None), (None, None)]:
+            page.evaluate = AsyncMock(return_value=reading)
+            with self.subTest(reading=reading):
+                self.assertEqual(await providers.participant_count(page, 'meet'), expected)
+        page.evaluate = AsyncMock(side_effect=RuntimeError('page closed'))
+        self.assertIsNone(await providers.participant_count(page, 'meet'))
+        self.assertIsNone(await providers.participant_count(page, 'teams'))
+
+
 class EntryHoldTests(unittest.IsolatedAsyncioTestCase):
     async def test_early_recorder_waits_at_the_entry_page_until_the_start(self):
         self.now = 0

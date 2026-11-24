@@ -158,19 +158,34 @@ PARTICIPANT_COUNT = """() => {
     for (const tile of document.querySelectorAll('[data-participant-id]')) {
         ids.add(tile.getAttribute('data-participant-id'));
     }
-    return ids.size;
+    // The People control carries the full count even when tiles are not drawn.
+    let listed = 0;
+    for (const button of document.querySelectorAll('button')) {
+        const label = (button.getAttribute('aria-label') || '') + ' ' + (button.textContent || '');
+        if (!/people/i.test(label)) continue;
+        const number = /\\d+/.exec(label);
+        if (number) listed = Math.max(listed, parseInt(number[0], 10));
+    }
+    return [ids.size, listed];
 }"""
 
 
 async def participant_count(page, provider):
-    """People shown in the call including this recorder, or None when unknown."""
+    """People in the call including this recorder, or None when unknown.
+
+    Two independent readings are combined by taking the larger, so a layout
+    that hides one of them can only make the recorder stay, never leave.
+    """
     if provider != 'meet':
         return None
     try:
-        value = await page.evaluate(PARTICIPANT_COUNT)
+        values = await page.evaluate(PARTICIPANT_COUNT)
     except Exception:
         return None
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+    if (not isinstance(values, list) or not values
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values)):
+        return None
+    return max(values)
 
 
 async def prepare_and_join(page, p, callback, stopped, diagnostic=None, *, authenticated_google=False,
