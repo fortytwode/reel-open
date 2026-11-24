@@ -62,12 +62,14 @@ enum LocalMeetingJoin {
     /// Passive evidence that the person is still in a Google Meet call in another Chrome
     /// window. Reads window titles only, never page content: an in-call Meet tab and its
     /// picture-in-picture window are both titled "Meet - …".
-    static func personAppearsInMeetCall(excluding windowID: CGWindowID) -> Bool {
+    /// Another Chrome window is showing this same meeting. A different call, such as the
+    /// person's next meeting, must never cause a rejoin of this one.
+    static func personAppearsInMeetCall(_ meeting: CalendarMeeting, excluding windowID: CGWindowID) -> Bool {
         guard let chrome = NSRunningApplication.runningApplications(withBundleIdentifier: "com.google.Chrome").first,
               let windows = chromeWindows(pid: chrome.processIdentifier) else { return false }
         return windows.contains { info in
             (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value != windowID &&
-                ((info[kCGWindowName as String] as? String) ?? "").hasPrefix("Meet - ")
+                meeting.matchesMeetWindowTitle((info[kCGWindowName as String] as? String) ?? "")
         }
     }
 

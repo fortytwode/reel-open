@@ -778,7 +778,7 @@ final class MeetingJoinCoordinator: ObservableObject {
                     // the call, rejoin beside them and keep the same recording.
                     if automatic, !coordinated, active == false, now < deadline, recoveries < 3,
                        meeting.platform == .googleMeet, meeting.end.timeIntervalSince(now) > 120,
-                       LocalMeetingJoin.personAppearsInMeetCall(excluding: windowID) {
+                       LocalMeetingJoin.personAppearsInMeetCall(meeting, excluding: windowID) {
                         recoveries += 1
                         log.notice("Call left Reel's window while the meeting continues; rejoining attempt=\(recoveries, privacy: .public)")
                         status = "Reel was moved out of the call. Rejoining."

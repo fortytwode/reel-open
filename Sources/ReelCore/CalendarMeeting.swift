@@ -99,6 +99,16 @@ public struct CalendarMeeting: Codable, Equatable, Sendable, Identifiable {
     public var ownerDeclined: Bool
     public var deliveryCalendar: MeetingCalendarReference?
 
+    /// Whether a browser window title is Google Meet showing this meeting: Meet titles its
+    /// tab with the calendar title, or with the meeting code when the call has no title.
+    public func matchesMeetWindowTitle(_ windowTitle: String) -> Bool {
+        guard platform == .googleMeet, let range = windowTitle.range(of: "Meet - ") else { return false }
+        let shown = windowTitle[range.upperBound...].lowercased()
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let code = joinURL.lastPathComponent.lowercased()
+        return (!name.isEmpty && shown.hasPrefix(name)) || (code.count >= 10 && shown.hasPrefix(code))
+    }
+
     /// Shared calendar copies and routing metadata identify an occurrence without its title or query.
     public var occurrenceIdentity: String {
         (joinURL.host?.lowercased() ?? "") + joinURL.path + ":" + String(start.timeIntervalSince1970)

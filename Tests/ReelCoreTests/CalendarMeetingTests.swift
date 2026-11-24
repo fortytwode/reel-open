@@ -22,6 +22,19 @@ final class CalendarMeetingTests: XCTestCase {
             joinURL: link.url, platform: link.platform)
     }
 
+    func testOnlyAWindowShowingTheSameMeetingCountsAsThePersonStillBeingInIt() {
+        let titled = routingMeeting("https://meet.google.com/abc-defg-hij")
+        XCTAssertTrue(titled.matchesMeetWindowTitle("Meet - Calendar title"))
+        XCTAssertTrue(titled.matchesMeetWindowTitle("Meet - calendar title - Google Chrome"))
+        XCTAssertTrue(titled.matchesMeetWindowTitle("Meet - abc-defg-hij"))
+        // The person's next call must not make Reel rejoin this one.
+        XCTAssertFalse(titled.matchesMeetWindowTitle("Meet - Weekly sync"))
+        XCTAssertFalse(titled.matchesMeetWindowTitle("Meet - xyz-abcd-efg"))
+        XCTAssertFalse(titled.matchesMeetWindowTitle("Calendar title - Google Docs"))
+        XCTAssertFalse(titled.matchesMeetWindowTitle(""))
+        XCTAssertFalse(routingMeeting(teams).matchesMeetWindowTitle("Meet - Calendar title"))
+    }
+
     private func routingEvent(_ meeting: CalendarMeeting, capture: String = "cloud") -> [String: Any] {
         ["id": "server-event", "title": "Different server title", "start": ISO8601DateFormatter().string(from: meeting.start),
          "end": ISO8601DateFormatter().string(from: meeting.end), "join_url": meeting.joinURL.absoluteString,
