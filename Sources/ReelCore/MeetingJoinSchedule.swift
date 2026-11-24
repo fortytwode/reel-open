@@ -59,6 +59,9 @@ public struct MeetingJoinSchedule {
         entries[key] = entry
     }
 
+    /// True once no further automatic attempt will be made for this occurrence.
+    public func isTerminal(key: String) -> Bool { entries[key]?.terminal ?? false }
+
     public mutating func complete(key: String) {
         var entry = entries[key, default: Entry()]
         entry.completed = true

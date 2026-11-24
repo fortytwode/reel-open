@@ -76,4 +76,19 @@ final class MeetingJoinScheduleTests: XCTestCase {
         XCTAssertTrue(schedule.shouldAttempt(key: "waiting", start: start, end: end, now: now))
         XCTAssertFalse(schedule.shouldAttempt(key: "waiting", start: start, end: end, now: start.addingTimeInterval(301)))
     }
+
+    func testTerminalIsReportedOnlyWhenNoAttemptRemains() {
+        var schedule = MeetingJoinSchedule()
+        let start = Date(timeIntervalSince1970: 1_000)
+        let end = start.addingTimeInterval(1_800)
+        XCTAssertFalse(schedule.isTerminal(key: "a"))
+        schedule.begin(key: "a", now: start)
+        schedule.finish(key: "a", now: start, retryable: true)
+        XCTAssertFalse(schedule.isTerminal(key: "a"))
+        XCTAssertTrue(schedule.shouldAttempt(key: "a", start: start, end: end, now: start.addingTimeInterval(31)))
+        schedule.begin(key: "a", now: start.addingTimeInterval(31))
+        schedule.finish(key: "a", now: start.addingTimeInterval(32), retryable: false)
+        XCTAssertTrue(schedule.isTerminal(key: "a"))
+        XCTAssertFalse(schedule.shouldAttempt(key: "a", start: start, end: end, now: start.addingTimeInterval(90)))
+    }
 }

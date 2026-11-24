@@ -414,18 +414,26 @@ final class CalendarMeetingTests: XCTestCase {
     func testCallWatchdogBoundsKnownEndAndUnknownStates() {
         var watchdog = MeetingCallWatchdog()
         let start = Date(timeIntervalSince1970: 0)
+        let limit = MeetingCallWatchdog.unknownTolerance
         XCTAssertFalse(watchdog.shouldStop(active: nil, now: start))
-        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(29)))
-        XCTAssertTrue(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(30)))
-        XCTAssertFalse(watchdog.shouldStop(active: true, now: start.addingTimeInterval(31)))
-        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(32)))
-        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(39)))
-        XCTAssertTrue(watchdog.shouldStop(active: false, now: start.addingTimeInterval(40)))
-        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(41)))
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(limit - 1)))
+        XCTAssertTrue(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(limit)))
+        XCTAssertFalse(watchdog.shouldStop(active: true, now: start.addingTimeInterval(limit + 1)))
+        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(limit + 2)))
+        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(limit + 9)))
+        XCTAssertTrue(watchdog.shouldStop(active: false, now: start.addingTimeInterval(limit + 10)))
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(limit + 11)))
         var alternating = MeetingCallWatchdog()
         XCTAssertFalse(alternating.shouldStop(active: nil, now: start))
-        XCTAssertFalse(alternating.shouldStop(active: false, now: start.addingTimeInterval(26)))
-        XCTAssertTrue(alternating.shouldStop(active: nil, now: start.addingTimeInterval(30)))
+        XCTAssertFalse(alternating.shouldStop(active: false, now: start.addingTimeInterval(limit - 4)))
+        XCTAssertTrue(alternating.shouldStop(active: nil, now: start.addingTimeInterval(limit)))
+    }
+
+    func testSlowChromeReadsDoNotEndACallWithinTheOldThirtySecondBound() {
+        var watchdog = MeetingCallWatchdog()
+        let start = Date(timeIntervalSince1970: 0)
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start))
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(60)))
     }
 
     func testObservedTeamsPageRequiresExactIdentity() throws {

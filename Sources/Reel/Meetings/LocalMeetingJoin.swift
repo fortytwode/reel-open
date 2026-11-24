@@ -10,6 +10,8 @@ enum LocalMeetingJoin {
     private static var ownedCalls: [CGWindowID: (AXUIElement, MeetingLink, pid_t, AXUIElement)] = [:]
     private static var zoomNoticeAttempted: Set<CGWindowID> = []
     private static let log = Logger(subsystem: Log.subsystem, category: "meeting_join")
+    /// How long an uncoordinated join keeps waiting in a lobby for the host.
+    private static let lobbyWait: TimeInterval = 10 * 60
 
     private static func manual(_ code: String) -> Outcome {
         log.notice("Manual meeting entry: \(code, privacy: .public)")
@@ -46,7 +48,7 @@ enum LocalMeetingJoin {
         zoomNoticeAttempted.remove(windowID)
         guard let (window, link, pid, tab) = ownedCalls.removeValue(forKey: windowID) else { return }
         if !closeOwnedTab(window: window, tab: tab, link: link, id: windowID, pid: pid, selectIfNeeded: true) {
-            log.info("Meeting tab cleanup unavailable")
+            log.notice("Meeting tab cleanup unavailable")
         }
     }
 
@@ -119,7 +121,7 @@ enum LocalMeetingJoin {
         // Chromium supports this assistive-technology request, but describes the
         // attribute as undocumented; failure leaves all identity checks in force.
         let enhancedAX = AXUIElementSetAttributeValue(application, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        if enhancedAX != .success { log.info("Chrome enhanced accessibility request unavailable code=\(enhancedAX.rawValue)") }
+        if enhancedAX != .success { log.notice("Chrome enhanced accessibility request unavailable code=\(enhancedAX.rawValue)") }
         guard let baseline = windowSnapshot(application: application, pid: chrome.processIdentifier) else {
             throw windowFailure("window_snapshot_unavailable")
         }
@@ -151,7 +153,7 @@ enum LocalMeetingJoin {
                 return !previousIDs.contains(id) && (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
             }
             guard newAX.count <= 1 else {
-                log.info("Meeting window lookup: ambiguous newAX=\(newAX.count) newCG=\(newCG.count) matchingCG=not_checked")
+                log.notice("Meeting window lookup: ambiguous newAX=\(newAX.count) newCG=\(newCG.count) matchingCG=not_checked")
                 throw windowFailure("created_window_ambiguous")
             }
             if let window = newAX.first {
@@ -169,7 +171,7 @@ enum LocalMeetingJoin {
                 }
                 let matchingCG = newCG.filter { boundsMatch(frame, info: $0) }
                 guard matchingCG.count <= 1 else {
-                    log.info("Meeting window lookup: ambiguous newAX=\(newAX.count) newCG=\(newCG.count) matchingCG=\(matchingCG.count)")
+                    log.notice("Meeting window lookup: ambiguous newAX=\(newAX.count) newCG=\(newCG.count) matchingCG=\(matchingCG.count)")
                     throw windowFailure("created_window_ambiguous")
                 }
                 if let info = matchingCG.first,
@@ -184,7 +186,7 @@ enum LocalMeetingJoin {
         guard let window = dedicatedWindow, let id = dedicatedID else { throw windowFailure("created_window_unavailable") }
         zoomNoticeAttempted.remove(id)
         defer { if ownedCalls[id] == nil { zoomNoticeAttempted.remove(id) } }
-        log.info("Meeting window lookup: bound unique new window")
+        log.notice("Meeting window lookup: bound unique new window")
         var windowClosingForHop = false
         var ownedTab: AXUIElement?
         var tabValidated = false
@@ -234,12 +236,16 @@ enum LocalMeetingJoin {
             try await Task.sleep(for: .milliseconds(100))
         }
         guard let previousTabs = stableTabs else {
-            log.info("Meeting tab baseline unavailable: page=unreadable_or_unstable")
+            log.notice("Meeting tab baseline unavailable: page=unreadable_or_unstable")
             return manual("tab_snapshot_unavailable")
         }
-        log.info("Meeting tab baseline: prior=\(previousTabs.count) page=\(stablePage, privacy: .public)")
+        log.notice("Meeting tab baseline: prior=\(previousTabs.count) page=\(stablePage, privacy: .public)")
+        // This join created the window moments ago, so its single tab holds only Chrome's
+        // new-window page. Extensions, policies and search providers replace that page with
+        // their own address and Chrome still navigates it in place, so the tab is reusable
+        // whatever it shows. Ownership is still proven below by the meeting address.
         let reusableTab: AXUIElement?
-        if stablePage == "known_ntp", previousTabs.count == 1,
+        if stablePage != "expected", previousTabs.count == 1,
            let selected = selectedBrowserTab(window), CFEqual(previousTabs[0], selected) { reusableTab = selected }
         else { reusableTab = nil }
         previousTabsForCleanup = previousTabs
@@ -254,11 +260,11 @@ enum LocalMeetingJoin {
                 let missing = previousTabs.filter { prior in !tabs.contains(where: { CFEqual($0, prior) }) }
                 let safeReplacement = reusableTab != nil && previousTabs.count == 1 && tabs.count == 1 && missing.count == 1 && added.count == 1
                 guard missing.isEmpty || safeReplacement else {
-                    log.info("Meeting tab changed: prior=\(previousTabs.count) current=\(tabs.count) added=\(added.count) missing=\(missing.count) page=\(stablePage, privacy: .public)")
+                    log.notice("Meeting tab changed: prior=\(previousTabs.count) current=\(tabs.count) added=\(added.count) missing=\(missing.count) page=\(stablePage, privacy: .public)")
                     return manual("tab_snapshot_changed")
                 }
                 guard added.count <= 1 else {
-                    log.info("Meeting tab ambiguous: prior=\(previousTabs.count) current=\(tabs.count) added=\(added.count) missing=\(missing.count) page=\(stablePage, privacy: .public)")
+                    log.notice("Meeting tab ambiguous: prior=\(previousTabs.count) current=\(tabs.count) added=\(added.count) missing=\(missing.count) page=\(stablePage, privacy: .public)")
                     return manual("tab_snapshot_ambiguous")
                 }
                 if let tab = added.first, let selected = selectedBrowserTab(window), CFEqual(tab, selected) {
@@ -278,7 +284,8 @@ enum LocalMeetingJoin {
             try await Task.sleep(for: .milliseconds(100))
         }
         guard tabValidated, let ownedTab else { return manual("meeting_tab_unavailable") }
-        let deadline = Date().addingTimeInterval(90)
+        var deadline = Date().addingTimeInterval(90)
+        var unreadablePolls = 0
         var requestedAdmission = false
         var mediaOffConfirmed = false
         var sawAdmissionLobby = false
@@ -288,10 +295,20 @@ enum LocalMeetingJoin {
         while Date() < deadline {
             try Task.checkCancellation()
             guard AXIsProcessTrusted() else { throw JoinError.accessibilityPermissionRequired }
-            guard elements(application, kAXWindowsAttribute).contains(where: { CFEqual($0, window) }) else {
+            // Chrome answers slowly while a meeting page loads. Only a definite answer that the
+            // window or tab changed ends the attempt; repeated unreadable polls end it too.
+            guard let openWindows = attribute(application, kAXWindowsAttribute) as? [AXUIElement],
+                  let currentTab = selectedBrowserTab(window) else {
+                unreadablePolls += 1
+                guard unreadablePolls <= 5 else { return manual("meeting_window_unreadable") }
+                try await Task.sleep(for: .seconds(1))
+                continue
+            }
+            unreadablePolls = 0
+            guard openWindows.contains(where: { CFEqual($0, window) }) else {
                 return manual("window_not_owned")
             }
-            guard let currentTab = selectedBrowserTab(window), CFEqual(currentTab, ownedTab) else {
+            guard CFEqual(currentTab, ownedTab) else {
                 return manual("meeting_tab_not_selected")
             }
             let nodes = descendants(window)
@@ -331,7 +348,7 @@ enum LocalMeetingJoin {
                         try await Task.sleep(for: .milliseconds(100))
                     }
                     guard disappeared else { return manual("standalone_close_unconfirmed") }
-                    log.info("Zoom standalone navigation: original tab closed")
+                    log.notice("Zoom standalone navigation: original tab closed")
                     return try await joinDedicated(expected: link, entryURL: target, allowStandaloneHop: false,
                                                    closeOnFailure: closeOnFailure, onStatus: onStatus)
                 }
@@ -353,7 +370,7 @@ enum LocalMeetingJoin {
                 let diagnosticState = "\(nodes.count):\(controls.count):\(noMediaButton != nil):\(callActive):\(mediaOffConfirmed)"
                 if diagnosticState != lastDiagnosticState {
                     lastDiagnosticState = diagnosticState
-                    log.info("Join controls changed: nodes=\(nodes.count, privacy: .public) controls=\(controls.count, privacy: .public) noMedia=\(noMediaButton != nil, privacy: .public) active=\(callActive, privacy: .public) mediaOff=\(mediaOffConfirmed, privacy: .public)")
+                    log.notice("Join controls changed: nodes=\(nodes.count, privacy: .public) controls=\(controls.count, privacy: .public) noMedia=\(noMediaButton != nil, privacy: .public) active=\(callActive, privacy: .public) mediaOff=\(mediaOffConfirmed, privacy: .public)")
                 }
                 // Never accept an active call while known inputs are on, even if an earlier
                 // no-media continuation succeeded.
@@ -401,7 +418,7 @@ enum LocalMeetingJoin {
                             let result = AXUIElementSetAttributeValue(currentCandidates[0], kAXFocusedAttribute as CFString, kCFBooleanTrue)
                             try await Task.sleep(for: .milliseconds(350))
                             let frontmostUnchanged = NSWorkspace.shared.frontmostApplication?.processIdentifier == frontmostBefore
-                            log.info("Zoom accessibility focus attempt: code=\(result.rawValue, privacy: .public) frontmostUnchanged=\(frontmostUnchanged, privacy: .public)")
+                            log.notice("Zoom accessibility focus attempt: code=\(result.rawValue, privacy: .public) frontmostUnchanged=\(frontmostUnchanged, privacy: .public)")
                             continue
                         }
                     }
@@ -423,7 +440,11 @@ enum LocalMeetingJoin {
                 if labels.contains(where: isDenialLabel) { throw JoinError.admissionDenied }
                 let inLobby = labels.contains(where: isAdmissionLabel)
                 if inLobby {
-                    if !sawAdmissionLobby { onStatus?("Waiting for host admission") }
+                    if !sawAdmissionLobby {
+                        onStatus?("Waiting for host admission")
+                        // A coordinated attempt keeps its short bound so another Mac can try.
+                        if !closeOnFailure { deadline = max(deadline, Date().addingTimeInterval(lobbyWait)) }
+                    }
                     sawAdmissionLobby = true
                     requestedAdmission = true
                 }
@@ -753,7 +774,7 @@ enum LocalMeetingJoin {
               let currentTab = selectedBrowserTab(window), CFEqual(currentTab, tab) else { return false }
         zoomNoticeAttempted.insert(id)
         let result = AXUIElementPerformAction(currentButton, kAXPressAction as CFString)
-        log.info("Zoom transcript notice dismissal: code=\(result.rawValue, privacy: .public)")
+        log.notice("Zoom transcript notice dismissal: code=\(result.rawValue, privacy: .public)")
         return true
     }
 

@@ -16,7 +16,9 @@ final class MeetingJoinCoordinator: ObservableObject {
     @Published private(set) var meetings: [CalendarMeeting] = []
     @Published var selectedID: String?
     @Published var consent = false {
-        didSet { if !consent { joinTask?.cancel() } }
+        // Per-meeting consent governs manual joins only. Clearing it, or re-clearing it while
+        // browsing meetings, must not cancel an automatic join that runs on standing consent.
+        didSet { if oldValue, !consent, !automaticJoinInFlight { joinTask?.cancel() } }
     }
     @Published private(set) var status = ""
     @Published private(set) var busy = false
@@ -41,6 +43,7 @@ final class MeetingJoinCoordinator: ObservableObject {
     private var captureWatch: Task<Void, Never>?
     private var cloudIDs: [String: String] = [:]
     private var desktopRouting: DesktopCalendarRouting?
+    private var automaticJoinInFlight = false
     // After the server advertises claims, a failed refresh must not restore uncoordinated joins.
     private var desktopClaimsRequired = OrganizationState.defaults.bool(forKey: "meetingCalendar.desktopClaimsRequired")
     private var routingRevision = 0
@@ -308,7 +311,8 @@ final class MeetingJoinCoordinator: ObservableObject {
         var seen = Set<String>()
         meetings = found.filter { $0.end > Date() && seen.insert(Self.key($0)).inserted }.sorted { $0.start < $1.start }
         if let selectedID, !meetings.contains(where: { $0.id == selectedID }) {
-            joinTask?.cancel(); self.selectedID = nil; consent = false
+            if !automaticJoinInFlight { joinTask?.cancel() }
+            self.selectedID = nil; consent = false
         }
         await updateReminders(scope: scope)
         guard await CloudAuth.shared.current?.userID == owner, refreshScope == scope else { return }
@@ -350,6 +354,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         guard confirmed, !busy, AppModel.shared.phase == .idle else { return }
         guard AppModel.shared.existingMeeting(forOccurrence: meeting.id) == nil else { status = "This meeting is already in your Reel library."; return }
         busy = true; accessibilitySettingsURL = nil; status = "Opening meeting"
+        automaticJoinInFlight = automatic
         log.notice("Meeting entry started; automatic=\(automatic, privacy: .public)")
         let consentRevision = automaticConsentRevision
         let accountGeneration = AppModel.shared.accountGeneration
@@ -359,14 +364,19 @@ final class MeetingJoinCoordinator: ObservableObject {
             var retryable = false
             var waitingForRecorder = false
             var desktopClaim: DesktopClaim?
+            // Set once an attempt fails for a reason the person can act on.
+            var reportFailure = false
             defer {
                 if !captureHandedOff, let joinedWindowID { LocalMeetingJoin.closeOwned(windowID: joinedWindowID) }
                 if !captureHandedOff, let desktopClaim { releaseDesktopClaim(desktopClaim) }
                 if automatic && !captureHandedOff {
                     if waitingForRecorder { schedule.deferForRecorder(key: Self.key(meeting), now: Date()) }
-                    else { schedule.finish(key: Self.key(meeting), now: Date(), retryable: retryable) }
+                    else {
+                        schedule.finish(key: Self.key(meeting), now: Date(), retryable: retryable)
+                        if reportFailure, schedule.isTerminal(key: Self.key(meeting)) { notifyMissedJoin(meeting, reason: status) }
+                    }
                 }
-                busy = false; joinTask = nil
+                busy = false; joinTask = nil; automaticJoinInFlight = false
             }
             let owner = await CloudAuth.shared.current?.userID
             do {
@@ -392,6 +402,8 @@ final class MeetingJoinCoordinator: ObservableObject {
                     let routing = routingRevision != previousRevision ? desktopRouting : nil
                     guard routing != nil || meeting.platform == .zoom else {
                         status = "Cloud routing could not be verified. Refresh meetings before joining Meet or Teams on this Mac."
+                        // A single failed or overlapping refresh is transient; nothing was opened.
+                        retryable = automatic; reportFailure = true
                         return
                     }
                     guard DesktopCalendarRouting.allowsLocal(meeting, routing: routing) else {
@@ -406,7 +418,7 @@ final class MeetingJoinCoordinator: ObservableObject {
                     // Ask the API that captures; CG preflight can disagree with it.
                     do { _ = try await ScreenCapture.shareableContent() }
                     catch {
-                        retryable = true
+                        retryable = true; reportFailure = true
                         status = "Automatic recording cannot read screen content. Check Reel’s Screen & System Audio Recording access. Reel will retry within five minutes."
                         return
                     }
@@ -446,6 +458,7 @@ final class MeetingJoinCoordinator: ObservableObject {
                 }
                 await markCloud(meeting, state: "requesting_entry", expectedOwner: owner)
                 try Task.checkCancellation()
+                reportFailure = true
                 guard AppModel.shared.accountGeneration == accountGeneration,
                       await captureAuthorized(meeting, expectedOwner: owner, automatic: automatic,
                                               consentRevision: consentRevision) else { return }
@@ -543,8 +556,9 @@ final class MeetingJoinCoordinator: ObservableObject {
                     status = "Meeting entry was not confirmed. Join manually and choose the meeting window in Reel."
                     await markCloud(meeting, state: "failed", expectedOwner: owner)
                 }
-            } catch is CancellationError { status = "Meeting setup cancelled." }
+            } catch is CancellationError { status = "Meeting setup cancelled."; reportFailure = false }
             catch {
+                reportFailure = true
                 if let joinError = error as? LocalMeetingJoin.JoinError {
                     switch joinError {
                     // No meeting URL has been opened when dedicated-window setup fails,
@@ -564,6 +578,15 @@ final class MeetingJoinCoordinator: ObservableObject {
     }
 
     func cancel() { joinTask?.cancel() }
+
+    /// An automatic join that gives up must say so; the status line is only visible in Reel.
+    private func notifyMissedJoin(_ meeting: CalendarMeeting, reason: String) {
+        log.notice("Automatic join gave up; notifying")
+        var url = URLComponents(); url.scheme = "reel"; url.host = "join-meeting"
+        url.queryItems = [URLQueryItem(name: "id", value: Self.key(meeting))]
+        Notifier.post(title: "Reel is not recording “\(meeting.title)”",
+                      body: reason.isEmpty ? "Open Reel to join and record this meeting." : reason, url: url.url)
+    }
 
     private func verifiedDesktopEventID(for meeting: CalendarMeeting) -> String? {
         guard desktopRouting?.requiresDesktopClaims == true else { return nil }
@@ -685,6 +708,7 @@ final class MeetingJoinCoordinator: ObservableObject {
                     if !coordinated {
                         if automatic { schedule.finish(key: Self.key(meeting), now: Date(), retryable: false) }
                         status = AppModel.shared.lastError ?? "Capture did not start. Check Reel's recording permissions."
+                        if automatic { notifyMissedJoin(meeting, reason: status) }
                         await markCloud(meeting, state: "failed", expectedOwner: expectedOwner)
                     }
                     return
