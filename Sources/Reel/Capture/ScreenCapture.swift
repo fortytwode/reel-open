@@ -58,6 +58,19 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     private var target: Target?
 
+    /// Moves a window recording to another window without interrupting the file or its audio.
+    func retarget(window: SCWindow) async -> Bool {
+        guard let stream, case .window = target else { return false }
+        do {
+            try await stream.updateContentFilter(SCContentFilter(desktopIndependentWindow: window))
+            target = .window(window)
+            return true
+        } catch {
+            Log.capture.error("retarget: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
     /// Re-applies the exclusion once all of Reel's recording windows are on screen.
     func refreshExclusion() async {
         guard let stream, let target else { return }

@@ -579,6 +579,26 @@ final class MeetingJoinCoordinator: ObservableObject {
 
     func cancel() { joinTask?.cancel() }
 
+    /// Joins the meeting again in a fresh window and moves the active recording onto it.
+    /// The old window stays open until then because closing a captured window ends capture.
+    private func rejoinForCapture(_ meeting: CalendarMeeting, recordingID: String) async -> CGWindowID? {
+        do {
+            let result = try await LocalMeetingJoin.join(url: meeting.joinURL, consentConfirmed: true,
+                                                         closeOnFailure: true) { self.status = $0 }
+            guard case .joined(let id) = result else { return nil }
+            guard RecorderController.shared.currentRecordingID == recordingID,
+                  let window = try await ScreenCapture.shareableContent().windows.first(where: { $0.windowID == id }),
+                  await RecorderController.shared.retargetMeeting(window: window) else {
+                LocalMeetingJoin.closeOwned(windowID: id)
+                return nil
+            }
+            return id
+        } catch {
+            log.error("Rejoin failed")
+            return nil
+        }
+    }
+
     /// An automatic join that gives up must say so; the status line is only visible in Reel.
     private func notifyMissedJoin(_ meeting: CalendarMeeting, reason: String) {
         log.notice("Automatic join gave up; notifying")
@@ -677,10 +697,12 @@ final class MeetingJoinCoordinator: ObservableObject {
         return true
     }
 
-    private func watchCapture(_ meeting: CalendarMeeting, windowID: CGWindowID, expectedOwner: String?,
+    private func watchCapture(_ meeting: CalendarMeeting, windowID initialWindowID: CGWindowID, expectedOwner: String?,
                               automatic: Bool, consentRevision: Int, coordinated: Bool) {
         captureWatch?.cancel()
         captureWatch = Task {
+            // Replaced when Reel follows the meeting into a new window after being moved out.
+            var windowID = initialWindowID
             defer { LocalMeetingJoin.forget(windowID: windowID) }
             var captureStarted = false
             defer {
@@ -737,6 +759,7 @@ final class MeetingJoinCoordinator: ObservableObject {
             status = "Joined and recording the meeting window locally."
             let deadline = min(meeting.end.addingTimeInterval(300), Date().addingTimeInterval(3 * 3600))
             var watchdog = MeetingCallWatchdog()
+            var recoveries = 0
             while !Task.isCancelled, RecorderController.shared.currentRecordingID == recordingID,
                   AppModel.shared.phase == .recording || AppModel.shared.phase == .paused {
                 let authorized = await captureAuthorized(meeting, expectedOwner: expectedOwner, automatic: automatic,
@@ -750,6 +773,27 @@ final class MeetingJoinCoordinator: ObservableObject {
                 let active = LocalMeetingJoin.isStillInCall(windowID: windowID)
                 let now = Date()
                 if now >= deadline || watchdog.shouldStop(active: active, now: now) {
+                    // Reel joins with the person's own Google account, so choosing "Switch here"
+                    // in their window moves the call away from Reel's. While they are still in
+                    // the call, rejoin beside them and keep the same recording.
+                    if automatic, !coordinated, active == false, now < deadline, recoveries < 3,
+                       meeting.platform == .googleMeet, meeting.end.timeIntervalSince(now) > 120,
+                       LocalMeetingJoin.personAppearsInMeetCall(excluding: windowID) {
+                        recoveries += 1
+                        log.notice("Call left Reel's window while the meeting continues; rejoining attempt=\(recoveries, privacy: .public)")
+                        status = "Reel was moved out of the call. Rejoining."
+                        if let replacement = await rejoinForCapture(meeting, recordingID: recordingID) {
+                            LocalMeetingJoin.forget(windowID: windowID)
+                            windowID = replacement
+                            watchdog = MeetingCallWatchdog()
+                            status = "Rejoined and recording the meeting window locally."
+                            log.notice("Rejoined; recording continues in the new window")
+                            continue
+                        }
+                        log.notice("Rejoin unavailable; stopping the recording")
+                        Notifier.post(title: "Reel left “\(meeting.title)” early",
+                                      body: "Reel could not rejoin. Open Reel to record the rest of this meeting.", url: nil)
+                    }
                     RecorderController.shared.stop()
                     if automatic { LocalMeetingJoin.closeOwned(windowID: windowID) }
                     // Capture is already stopped. Preserve joined→completed ordering
