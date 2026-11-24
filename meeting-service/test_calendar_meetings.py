@@ -811,3 +811,35 @@ def test_public_reserved_join_cannot_use_new_calendar_approval(setup, monkeypatc
     service._dispatch(OWNER, reserved)
     assert joined == []
     assert service._current_status(OWNER, occurrence["id"]) == "failed"
+
+
+def test_recorder_is_dispatched_ahead_of_the_start_but_not_earlier(setup):
+    service, _, _, scheduler, joined, clock = setup
+    connect(service)
+    service.set_consent_mode(CLAIMS, "approved", participant_consent_attested=True,
+                             scope_revision=service.settings(CLAIMS)["scope_revision"])
+    service.sync(CLAIMS)
+    task = scheduler.tasks[0]
+    clock["now"] += timedelta(minutes=6)  # four minutes before the start
+    assert service.dispatch_callback(CLAIMS, task["event"], task["start"]) == "scheduled"
+    assert joined == []
+    clock["now"] += timedelta(minutes=1)  # three minutes before the start
+    assert service.dispatch_callback(CLAIMS, task["event"], task["start"]) == "requesting_entry"
+    assert len(joined) == 1
+
+
+def test_occurrence_queued_before_early_dispatch_gets_one_earlier_task(setup):
+    service, store, _, scheduler, _, _ = setup
+    connect(service)
+    service.sync(CLAIMS)
+    assert len(scheduler.tasks) == 1
+    key = next(key for key in store.data if key.startswith("calendar/"))
+    state, generation = store.load(key)
+    (saved,) = state["events"].values()
+    assert saved["task_lead"] == 180
+    del saved["task_lead"]  # as stored by the previous release
+    store.cas(key, state, generation)
+    service.sync(CLAIMS)
+    service.sync(CLAIMS)
+    assert len(scheduler.tasks) == 2
+    assert scheduler.tasks[0] == scheduler.tasks[1]

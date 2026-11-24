@@ -8,7 +8,7 @@ import os
 import re
 import time
 from urllib.parse import urlsplit
-from policy import admission_decision
+from policy import admission_decision, departure_decision
 try:
     from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 except ImportError:  # Pure unit tests do not install Chromium/Playwright.
@@ -153,7 +153,43 @@ async def observe(page, provider):
                 waiting=bool(WAITING[provider].search(text)), in_call=await visible(page, selectors[provider]))
 
 
-async def prepare_and_join(page, p, callback, stopped, diagnostic=None, *, authenticated_google=False):
+PARTICIPANT_COUNT = """() => {
+    const ids = new Set();
+    for (const tile of document.querySelectorAll('[data-participant-id]')) {
+        ids.add(tile.getAttribute('data-participant-id'));
+    }
+    // The People control carries the full count even when tiles are not drawn.
+    let listed = 0;
+    for (const button of document.querySelectorAll('button')) {
+        const label = (button.getAttribute('aria-label') || '') + ' ' + (button.textContent || '');
+        if (!/people/i.test(label)) continue;
+        const number = /\\d+/.exec(label);
+        if (number) listed = Math.max(listed, parseInt(number[0], 10));
+    }
+    return [ids.size, listed];
+}"""
+
+
+async def participant_count(page, provider):
+    """People in the call including this recorder, or None when unknown.
+
+    Two independent readings are combined by taking the larger, so a layout
+    that hides one of them can only make the recorder stay, never leave.
+    """
+    if provider != 'meet':
+        return None
+    try:
+        values = await page.evaluate(PARTICIPANT_COUNT)
+    except Exception:
+        return None
+    if (not isinstance(values, list) or not values
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values)):
+        return None
+    return max(values)
+
+
+async def prepare_and_join(page, p, callback, stopped, diagnostic=None, *, authenticated_google=False,
+                           join_not_before=None):
     provider = p['provider']
     await callback('requesting_entry')
     started = time.monotonic()
@@ -220,6 +256,10 @@ async def prepare_and_join(page, p, callback, stopped, diagnostic=None, *, authe
             if last_status != verdict:
                 await callback(verdict)
                 last_status = verdict
+        elif not clicked_join and join_not_before is not None and time.monotonic() < join_not_before:
+            # Started ahead of the meeting: hold on the entry page so the
+            # recorder arrives at the start instead of minutes before it.
+            pass
         elif not clicked_join:
             if provider == 'teams':
                 await click_first(page, ['button:has-text("Continue on this browser")', 'button:has-text("Continue in this browser")', 'button:has-text("Continue without audio or video")', 'a:has-text("Continue on this browser")'])
@@ -243,9 +283,20 @@ async def prepare_and_join(page, p, callback, stopped, diagnostic=None, *, authe
     raise RuntimeError('execution_stopped')
 
 
-async def monitor(page, provider, duration, stopped, ffmpeg, check_media=None):
+async def monitor(page, provider, duration, stopped, ffmpeg, check_media=None, *,
+                  silent_seconds=None, scheduled_end=None):
+    """Watch a recording until it should stop.
+
+    silent_seconds() reports how long the captured audio has been quiet and
+    scheduled_end is the monotonic time of the calendar end. With both, the
+    recording follows the people: it continues past the end while there is
+    sound and stops once the room is empty or quiet.
+    """
     started = time.monotonic()
     missing_since = None
+    others_seen = False
+    alone_since = None
+    last_presence_log = started
     while not stopped() and time.monotonic() - started < duration:
         if ffmpeg.poll() is not None:
             raise RuntimeError('recorder_exited')
@@ -263,6 +314,26 @@ async def monitor(page, provider, duration, stopped, ffmpeg, check_media=None):
             missing_since = missing_since or time.monotonic()
             if time.monotonic() - missing_since > 30:
                 raise RuntimeError('meeting_connection_lost')
+        if silent_seconds is not None:
+            count = await participant_count(page, provider)
+            checked = time.monotonic()
+            if count is None:
+                alone_since = None
+            elif count > 1:
+                others_seen, alone_since = True, None
+            else:
+                alone_since = alone_since or checked
+            quiet = silent_seconds()
+            past_end = scheduled_end is not None and checked >= scheduled_end
+            if checked - last_presence_log >= 60:
+                last_presence_log = checked
+                # Counts only: never names, captions or page text.
+                print(json.dumps({'status': 'presence', 'participants': count, 'others_seen': others_seen,
+                                  'silent_seconds': int(quiet), 'past_end': past_end}), flush=True)
+            leave = departure_decision(others_seen=others_seen, silent_seconds=quiet, past_end=past_end,
+                                       alone_seconds=checked - alone_since if alone_since else 0)
+            if leave:
+                return leave
         if provider == 'zoom':
             # Join only the receiving browser audio; microphone stays muted.
             await click_first(page, ['button:has-text("Join Audio by Computer")', 'button:has-text("Join Audio by Computer Audio")'])

@@ -85,7 +85,7 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
             if not (stall_callback or stall_monitor):
                 clock[0] += timedelta(seconds=seconds)
 
-        async def monitor(page, provider, duration, *args):
+        async def monitor(page, provider, duration, *args, **kwargs):
             durations.append(duration)
             if stall_monitor:
                 await asyncio.Event().wait()

@@ -1,4 +1,4 @@
-"""Pure validation and admission decisions; no cloud/browser dependencies."""
+"""Pure validation, admission and departure decisions; no cloud/browser dependencies."""
 import hashlib
 import re
 import uuid
@@ -56,17 +56,21 @@ def validate_payload(p, callback_origin):
         value = p.setdefault(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
             raise ValueError('invalid_' + key)
-    if 'capture_deadline' in p:
-        value = p['capture_deadline']
+    # scheduled_end lets the worker tell an overrunning meeting from an empty
+    # room; join_not_before lets it start up early without entering early.
+    for key in ('capture_deadline', 'scheduled_end', 'join_not_before'):
+        if key not in p:
+            continue
+        value = p[key]
         if not isinstance(value, str) or not re.fullmatch(
                 r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)', value):
-            raise ValueError('invalid_capture_deadline')
+            raise ValueError('invalid_' + key)
         try:
-            deadline = datetime.fromisoformat(value.replace('Z', '+00:00'))
-            if deadline.utcoffset() is None:
+            moment = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            if moment.utcoffset() is None:
                 raise ValueError
         except ValueError:
-            raise ValueError('invalid_capture_deadline') from None
+            raise ValueError('invalid_' + key) from None
     p['meeting_url'] = meeting_url(p['provider'], p['meeting_url'])
     return p
 
@@ -84,3 +88,28 @@ def admission_decision(*, denied=False, blocked=False, waiting=False, in_call=Fa
     if in_call:
         return 'joined'
     return 'requesting_entry'
+
+
+# Seconds of evidence required before the worker leaves on its own.
+EMPTY_ROOM_SECONDS = 60          # after the scheduled end, alone and quiet
+EARLY_EMPTY_ROOM_SECONDS = 300   # before the scheduled end, alone and quiet
+SILENT_ROOM_SECONDS = 300        # after the scheduled end, quiet whoever is listed
+
+
+def departure_decision(*, others_seen=False, alone_seconds=0, silent_seconds=0, past_end=False):
+    """Why a healthy recording should stop now, or None to keep recording.
+
+    Sound always keeps the recording going. A participant count is trusted only
+    after it has shown another person, which proves the count works in this
+    meeting's layout; until then only silence past the scheduled end counts.
+    """
+    if past_end:
+        if others_seen and alone_seconds >= EMPTY_ROOM_SECONDS and silent_seconds >= EMPTY_ROOM_SECONDS:
+            return 'room_empty'
+        if silent_seconds >= SILENT_ROOM_SECONDS:
+            return 'meeting_silent'
+        return None
+    if (others_seen and alone_seconds >= EARLY_EMPTY_ROOM_SECONDS
+            and silent_seconds >= EARLY_EMPTY_ROOM_SECONDS):
+        return 'room_empty'
+    return None

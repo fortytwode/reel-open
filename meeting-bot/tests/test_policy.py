@@ -1,7 +1,7 @@
 import copy
 import hashlib
 import unittest
-from policy import admission_decision, meeting_url, validate_payload
+from policy import admission_decision, departure_decision, meeting_url, validate_payload
 
 
 class PolicyTests(unittest.TestCase):
@@ -31,6 +31,41 @@ class PolicyTests(unittest.TestCase):
             payload['capture_deadline'] = value
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, '^invalid_capture_deadline$'):
                 validate_payload(payload, 'https://service.example')
+
+    def test_optional_schedule_times_require_exact_timezone_timestamps(self):
+        for key in ('scheduled_end', 'join_not_before'):
+            payload = self.payload()
+            payload[key] = '2026-11-17T14:09:21+00:00'
+            self.assertEqual(validate_payload(payload, 'https://service.example')[key], '2026-11-17T14:09:21+00:00')
+            for value in [None, 12, '2026-11-17T14:09:21', '2026-11-17']:
+                payload = self.payload()
+                payload[key] = value
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, '^invalid_' + key + '$'):
+                    validate_payload(payload, 'https://service.example')
+
+    def test_recording_follows_people_not_the_calendar(self):
+        cases = [
+            # Sound keeps an overrunning meeting recording, however long.
+            (dict(others_seen=True, alone_seconds=0, silent_seconds=0, past_end=True), None),
+            (dict(others_seen=True, alone_seconds=900, silent_seconds=10, past_end=True), None),
+            # After the end, an empty quiet room is left after a minute.
+            (dict(others_seen=True, alone_seconds=59, silent_seconds=200, past_end=True), None),
+            (dict(others_seen=True, alone_seconds=60, silent_seconds=60, past_end=True), 'room_empty'),
+            # A count that never showed anyone is not trusted; silence still ends it.
+            (dict(others_seen=False, alone_seconds=600, silent_seconds=299, past_end=True), None),
+            (dict(others_seen=False, alone_seconds=0, silent_seconds=300, past_end=True), 'meeting_silent'),
+            (dict(others_seen=True, alone_seconds=0, silent_seconds=300, past_end=True), 'meeting_silent'),
+            # Before the end, only a room that emptied and stayed quiet is left.
+            (dict(others_seen=True, alone_seconds=299, silent_seconds=900, past_end=False), None),
+            (dict(others_seen=True, alone_seconds=300, silent_seconds=299, past_end=False), None),
+            (dict(others_seen=True, alone_seconds=300, silent_seconds=300, past_end=False), 'room_empty'),
+            # Nobody has arrived yet, or people are thinking quietly: stay.
+            (dict(others_seen=False, alone_seconds=3000, silent_seconds=3000, past_end=False), None),
+            (dict(others_seen=True, alone_seconds=0, silent_seconds=3000, past_end=False), None),
+        ]
+        for evidence, expected in cases:
+            with self.subTest(**evidence):
+                self.assertEqual(departure_decision(**evidence), expected)
 
     def test_owner_isolation_and_required_consent(self):
         for update in [dict(owner_id='other-owner'), dict(consent={'confirmed': False}),
