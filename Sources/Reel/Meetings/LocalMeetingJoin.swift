@@ -18,6 +18,13 @@ enum LocalMeetingJoin {
         return .manualInteractionRequired
     }
 
+    /// The tab strip moved while Reel was opening the meeting, usually because the person
+    /// opened the same meeting at that moment. A fresh window shortly after is safe to try.
+    private static func browserBusy(_ code: String) -> JoinError {
+        log.notice("Chrome tabs changed during meeting entry: \(code, privacy: .public)")
+        return .browserBusy
+    }
+
     private static func windowFailure(_ code: String) -> JoinError {
         log.error("Chrome meeting window unavailable: \(code, privacy: .public)")
         return .dedicatedWindowUnavailable
@@ -78,7 +85,7 @@ enum LocalMeetingJoin {
 
     enum JoinError: LocalizedError {
         case consentRequired, invalidMeetingURL, chromeUnavailable, accessibilityPermissionRequired
-        case dedicatedWindowUnavailable, admissionDenied
+        case dedicatedWindowUnavailable, admissionDenied, browserBusy
 
         var errorDescription: String? {
             switch self {
@@ -87,6 +94,7 @@ enum LocalMeetingJoin {
             case .chromeUnavailable: return "Google Chrome is required to join with your signed-in browser profile."
             case .accessibilityPermissionRequired: return "Allow Reel in System Settings → Privacy & Security → Accessibility, then try again."
             case .dedicatedWindowUnavailable: return "Chrome was not ready to open a dedicated meeting window."
+            case .browserBusy: return "Chrome was busy opening tabs when Reel tried to join."
             case .admissionDenied: return "The meeting did not admit you. Check access with the organizer before trying again."
             }
         }
@@ -249,7 +257,7 @@ enum LocalMeetingJoin {
         }
         guard let previousTabs = stableTabs else {
             log.notice("Meeting tab baseline unavailable: page=unreadable_or_unstable")
-            return manual("tab_snapshot_unavailable")
+            throw browserBusy("tab_snapshot_unavailable")
         }
         log.notice("Meeting tab baseline: prior=\(previousTabs.count) page=\(stablePage, privacy: .public)")
         // This join created the window moments ago, so its single tab holds only Chrome's
@@ -273,14 +281,14 @@ enum LocalMeetingJoin {
                 let safeReplacement = reusableTab != nil && previousTabs.count == 1 && tabs.count == 1 && missing.count == 1 && added.count == 1
                 guard missing.isEmpty || safeReplacement else {
                     log.notice("Meeting tab changed: prior=\(previousTabs.count) current=\(tabs.count) added=\(added.count) missing=\(missing.count) page=\(stablePage, privacy: .public)")
-                    return manual("tab_snapshot_changed")
+                    throw browserBusy("tab_snapshot_changed")
                 }
                 guard added.count <= 1 else {
                     log.notice("Meeting tab ambiguous: prior=\(previousTabs.count) current=\(tabs.count) added=\(added.count) missing=\(missing.count) page=\(stablePage, privacy: .public)")
-                    return manual("tab_snapshot_ambiguous")
+                    throw browserBusy("tab_snapshot_ambiguous")
                 }
                 if let tab = added.first, let selected = selectedBrowserTab(window), CFEqual(tab, selected) {
-                    if let ownedTab, !CFEqual(ownedTab, tab) { return manual("tab_snapshot_changed") }
+                    if let ownedTab, !CFEqual(ownedTab, tab) { throw browserBusy("tab_snapshot_changed") }
                     ownedTab = tab
                 } else if added.isEmpty, let reusableTab, let selected = selectedBrowserTab(window), CFEqual(reusableTab, selected),
                           meetAddressCheck(window, expected: link) == .match {

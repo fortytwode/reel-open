@@ -563,7 +563,7 @@ final class MeetingJoinCoordinator: ObservableObject {
                     switch joinError {
                     // No meeting URL has been opened when dedicated-window setup fails,
                     // so the existing bounded scheduler can safely retry it.
-                    case .accessibilityPermissionRequired, .chromeUnavailable, .dedicatedWindowUnavailable: retryable = true
+                    case .accessibilityPermissionRequired, .chromeUnavailable, .dedicatedWindowUnavailable, .browserBusy: retryable = true
                     default: break
                     }
                 }
