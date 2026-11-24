@@ -55,6 +55,9 @@ final class RecordingSession: @unchecked Sendable {
     let segmentsDirectory: URL
     let overlays: OverlayStore
     private let screen = ScreenCapture()
+
+    /// Keeps the same recording while following the meeting into a replacement window.
+    func retarget(window: SCWindow) async -> Bool { await screen.retarget(window: window) }
     private var mic: MicCapture?
     private(set) var writer: SegmentedWriter!
     private let compositor = Compositor()

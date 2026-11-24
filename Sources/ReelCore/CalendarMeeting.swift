@@ -69,6 +69,7 @@ public enum MeetingCallControls {
 public struct MeetingCallWatchdog {
     private var absentSince: Date?
     private var endedSince: Date?
+    public static let unknownTolerance: TimeInterval = 120
     public init() {}
     public mutating func shouldStop(active: Bool?, now: Date) -> Bool {
         if active == true { absentSince = nil; endedSince = nil; return false }
@@ -76,7 +77,9 @@ public struct MeetingCallWatchdog {
         if active == false {
             if endedSince == nil { endedSince = now }
         } else { endedSince = nil }
-        return now.timeIntervalSince(absentSince!) >= 30 ||
+        // "Unknown" usually means Chrome was slow to answer, not that the call ended, and a
+        // truncated recording costs more than a long one. A confirmed end still stops in 8s.
+        return now.timeIntervalSince(absentSince!) >= Self.unknownTolerance ||
             (endedSince.map { now.timeIntervalSince($0) >= 8 } ?? false)
     }
 }
@@ -95,6 +98,16 @@ public struct CalendarMeeting: Codable, Equatable, Sendable, Identifiable {
     public var isPrivate: Bool
     public var ownerDeclined: Bool
     public var deliveryCalendar: MeetingCalendarReference?
+
+    /// Whether a browser window title is Google Meet showing this meeting: Meet titles its
+    /// tab with the calendar title, or with the meeting code when the call has no title.
+    public func matchesMeetWindowTitle(_ windowTitle: String) -> Bool {
+        guard platform == .googleMeet, let range = windowTitle.range(of: "Meet - ") else { return false }
+        let shown = windowTitle[range.upperBound...].lowercased()
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let code = joinURL.lastPathComponent.lowercased()
+        return (!name.isEmpty && shown.hasPrefix(name)) || (code.count >= 10 && shown.hasPrefix(code))
+    }
 
     /// Shared calendar copies and routing metadata identify an occurrence without its title or query.
     public var occurrenceIdentity: String {

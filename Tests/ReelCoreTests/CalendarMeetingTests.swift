@@ -22,6 +22,19 @@ final class CalendarMeetingTests: XCTestCase {
             joinURL: link.url, platform: link.platform)
     }
 
+    func testOnlyAWindowShowingTheSameMeetingCountsAsThePersonStillBeingInIt() {
+        let titled = routingMeeting("https://meet.google.com/abc-defg-hij")
+        XCTAssertTrue(titled.matchesMeetWindowTitle("Meet - Calendar title"))
+        XCTAssertTrue(titled.matchesMeetWindowTitle("Meet - calendar title - Google Chrome"))
+        XCTAssertTrue(titled.matchesMeetWindowTitle("Meet - abc-defg-hij"))
+        // The person's next call must not make Reel rejoin this one.
+        XCTAssertFalse(titled.matchesMeetWindowTitle("Meet - Weekly sync"))
+        XCTAssertFalse(titled.matchesMeetWindowTitle("Meet - xyz-abcd-efg"))
+        XCTAssertFalse(titled.matchesMeetWindowTitle("Calendar title - Google Docs"))
+        XCTAssertFalse(titled.matchesMeetWindowTitle(""))
+        XCTAssertFalse(routingMeeting(teams).matchesMeetWindowTitle("Meet - Calendar title"))
+    }
+
     private func routingEvent(_ meeting: CalendarMeeting, capture: String = "cloud") -> [String: Any] {
         ["id": "server-event", "title": "Different server title", "start": ISO8601DateFormatter().string(from: meeting.start),
          "end": ISO8601DateFormatter().string(from: meeting.end), "join_url": meeting.joinURL.absoluteString,
@@ -414,18 +427,26 @@ final class CalendarMeetingTests: XCTestCase {
     func testCallWatchdogBoundsKnownEndAndUnknownStates() {
         var watchdog = MeetingCallWatchdog()
         let start = Date(timeIntervalSince1970: 0)
+        let limit = MeetingCallWatchdog.unknownTolerance
         XCTAssertFalse(watchdog.shouldStop(active: nil, now: start))
-        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(29)))
-        XCTAssertTrue(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(30)))
-        XCTAssertFalse(watchdog.shouldStop(active: true, now: start.addingTimeInterval(31)))
-        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(32)))
-        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(39)))
-        XCTAssertTrue(watchdog.shouldStop(active: false, now: start.addingTimeInterval(40)))
-        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(41)))
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(limit - 1)))
+        XCTAssertTrue(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(limit)))
+        XCTAssertFalse(watchdog.shouldStop(active: true, now: start.addingTimeInterval(limit + 1)))
+        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(limit + 2)))
+        XCTAssertFalse(watchdog.shouldStop(active: false, now: start.addingTimeInterval(limit + 9)))
+        XCTAssertTrue(watchdog.shouldStop(active: false, now: start.addingTimeInterval(limit + 10)))
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(limit + 11)))
         var alternating = MeetingCallWatchdog()
         XCTAssertFalse(alternating.shouldStop(active: nil, now: start))
-        XCTAssertFalse(alternating.shouldStop(active: false, now: start.addingTimeInterval(26)))
-        XCTAssertTrue(alternating.shouldStop(active: nil, now: start.addingTimeInterval(30)))
+        XCTAssertFalse(alternating.shouldStop(active: false, now: start.addingTimeInterval(limit - 4)))
+        XCTAssertTrue(alternating.shouldStop(active: nil, now: start.addingTimeInterval(limit)))
+    }
+
+    func testSlowChromeReadsDoNotEndACallWithinTheOldThirtySecondBound() {
+        var watchdog = MeetingCallWatchdog()
+        let start = Date(timeIntervalSince1970: 0)
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start))
+        XCTAssertFalse(watchdog.shouldStop(active: nil, now: start.addingTimeInterval(60)))
     }
 
     func testObservedTeamsPageRequiresExactIdentity() throws {

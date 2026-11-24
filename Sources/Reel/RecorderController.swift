@@ -22,6 +22,12 @@ final class RecorderController {
     private var pending: Recording?
     private var localSaveTail: Task<Void, Never>?
     var currentRecordingID: String? { pending?.id }
+
+    /// Points the active window recording at a replacement meeting window.
+    func retargetMeeting(window: SCWindow) async -> Bool {
+        guard let session, model.phase == .recording || model.phase == .paused else { return false }
+        return await session.retarget(window: window)
+    }
     private(set) var overlays = OverlayStore()
     /// Set by the CLI verification path to observe completion.
     var onFinished: ((Recording?) -> Void)?
