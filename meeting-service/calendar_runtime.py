@@ -12,8 +12,9 @@ from urllib.parse import urlsplit
 
 from flask import jsonify, redirect, request
 
-from calendar_meetings import (CalendarMeetingError, CalendarMeetings, CalendarProviderError, CalendarSelectionChanged,
-                               GoogleCalendarFactory, canonical_join_url, cloud_capture_enabled, cloud_requires_calendar,
+from calendar_meetings import (DISPATCH_LEAD_SECONDS, ENTRY_LEAD_SECONDS, CalendarMeetingError, CalendarMeetings,
+                               CalendarProviderError, CalendarSelectionChanged, GoogleCalendarFactory,
+                               canonical_join_url, cloud_capture_enabled, cloud_requires_calendar,
                                effective_cloud_providers)
 from reel_organization import is_internal_email, meeting_domain_enabled, organization_domain, public_account_access, trusted_origins
 
@@ -34,6 +35,9 @@ CLOUD_FAILURE_CODES = {
                             "recorder_start_failed", "recording_start_failed", "recording_start_timeout",
                             "recording_monitor_failed", "recording_monitor_timeout", "execution_stopped"},
 }
+
+# How long a cloud recording may follow a meeting past its scheduled end.
+OVERRUN_ALLOWANCE = timedelta(hours=2)
 
 
 def digest(value):
@@ -125,11 +129,15 @@ class CloudTasks:
 
     def schedule(self, owner_hash, event_id, occurrence_start, task_generation=None):
         queue = os.environ["CALENDAR_TASK_QUEUE"]
-        name = queue + "/tasks/reel-" + digest(owner_hash + event_id + occurrence_start + (task_generation or ""))
+        lead = DISPATCH_LEAD_SECONDS
+        name = queue + "/tasks/reel-" + digest(owner_hash + event_id + occurrence_start + (task_generation or "")
+                                               + ":lead" + str(lead))
+        dispatch_at = datetime.fromisoformat(occurrence_start.replace("Z", "+00:00")) - timedelta(seconds=lead)
         body = {"owner_hash": owner_hash, "event_id": event_id, "start": occurrence_start}
         if task_generation:
             body["task_generation"] = task_generation
-        task = {"name": name, "scheduleTime": occurrence_start, "httpRequest": {
+        task = {"name": name, "scheduleTime": dispatch_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                "httpRequest": {
             "url": os.environ["MEETING_SERVICE_URL"] + "/internal/calendar/due",
             "httpMethod": "POST", "headers": {"Content-Type": "application/json"},
             "body": base64.b64encode(json.dumps(body).encode()).decode(),
@@ -307,8 +315,13 @@ class BotDispatcher:
         token = secrets.token_urlsafe(48)
         now = self.clock()
         end = datetime.fromisoformat(event["end"].replace("Z", "+00:00"))
-        capture_deadline = min(end + timedelta(minutes=5), now + timedelta(hours=3))
-        max_duration = max(60, min(10800, int((end - now).total_seconds()) + 300))
+        start = datetime.fromisoformat(event["start"].replace("Z", "+00:00"))
+        # Other recorders may take over this occurrence shortly after its end.
+        claim_deadline = min(end + timedelta(minutes=5), now + timedelta(hours=3))
+        # The recorder itself may follow an overrunning meeting; it leaves on
+        # its own once the room is empty or quiet.
+        capture_deadline = min(end + OVERRUN_ALLOWANCE, now + timedelta(hours=3))
+        max_duration = max(60, min(10800, int((end - now + OVERRUN_ALLOWANCE).total_seconds())))
         url = canonical_join_url(event["join_url"])[0]
         parsed = urlsplit(url)
         host = parsed.hostname
@@ -317,7 +330,7 @@ class BotDispatcher:
         if shared:
             shared_key = shared_cloud_capture_key(saved)
             claim = {"execution_id": execution, "owner_hash": digest(owner), "event_id": event["id"],
-                     "capture_deadline": capture_deadline.isoformat()}
+                     "capture_deadline": claim_deadline.isoformat()}
             try:
                 # This permanent occurrence claim consumes the sole cloud attempt,
                 # including a lost Cloud Run response or an interrupted dispatcher.
@@ -350,7 +363,8 @@ class BotDispatcher:
                    "consent": {"confirmed": True}, "callback_url": os.environ["MEETING_SERVICE_URL"] + "/internal/bot/status",
                    "callback_token": token, "output_bucket": os.environ["BOT_BUCKET"], "output_prefix": prefix,
                    "max_duration_seconds": max_duration, "admission_timeout_seconds": 900,
-                   "capture_deadline": capture_deadline.isoformat()}
+                   "capture_deadline": capture_deadline.isoformat(), "scheduled_end": end.isoformat(),
+                   "join_not_before": (start - timedelta(seconds=ENTRY_LEAD_SECONDS)).isoformat()}
         attendees = saved["participant_roster"] if shared else event["attendees"]
         record = {"execution_id": execution, "owner_id": owner_uid, "owner_email": owner,
                   "provider": provider,

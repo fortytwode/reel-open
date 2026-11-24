@@ -27,6 +27,12 @@ class CalendarSelectionChanged(CalendarMeetingError):
     status = 409
 
 
+# The cloud recorder takes one to two minutes to start. Dispatch it this far
+# ahead and let it wait at the entry page until just before the start.
+DISPATCH_LEAD_SECONDS = 180
+ENTRY_LEAD_SECONDS = 20
+
+
 def owner_identity(claims):
     """Accept only a server-verified identity authorized by deployment policy."""
     email = claims.get("email", "").strip().lower() if isinstance(claims, dict) else ""
@@ -487,7 +493,11 @@ class CalendarMeetings:
                 else:
                     old.pop("attendee_names", None)
                 current_event = existing.get(identity)
-                if current_event and current_event.get("status") == "scheduled" and not current_event.get("task_name"):
+                # Occurrences queued before early dispatch existed get one earlier
+                # task; the original is ignored once the occurrence is attempted.
+                if current_event and current_event.get("status") == "scheduled" and (
+                        not current_event.get("task_name")
+                        or current_event.get("task_lead") != DISPATCH_LEAD_SECONDS):
                     scheduled.append((identity, current_event["start"], current_event.get("task_generation")))
             return True, scheduled
         scheduled = self._mutate(owner, update)
@@ -509,6 +519,7 @@ class CalendarMeetings:
         if not event or event.get("status") != "scheduled" or event.get("task_generation") != task_generation:
             return False, None
         event["task_name"] = name
+        event["task_lead"] = DISPATCH_LEAD_SECONDS
         return True, None
 
     def list_due(self, claims):
@@ -622,7 +633,7 @@ class CalendarMeetings:
             if (event.get("status") != "scheduled" or event.get("attempted")
                     or not latest_config.get("enabled")
                     or event.get("calendar_id") not in latest_config.get("calendar_ids", [])
-                    or _parse_time({"dateTime": event["start"]}) > now + timedelta(seconds=30)):
+                    or _parse_time({"dateTime": event["start"]}) > now + timedelta(seconds=DISPATCH_LEAD_SECONDS + 30)):
                 if (event.get("status") == "scheduled" and
                         (not latest_config.get("enabled") or event.get("calendar_id") not in latest_config.get("calendar_ids", []))):
                     event.update(status="cancelled", join_url="", passcode="")

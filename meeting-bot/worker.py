@@ -1,4 +1,5 @@
 """One private payload, one guest attempt, one owner-scoped artifact set."""
+import array
 import asyncio
 import json
 import os
@@ -24,6 +25,7 @@ SAFE_DETAILS = {
     'recorder_start_failed', 'callback_unavailable', 'display_unavailable',
     'transcription_failed', 'transcription_timeout', 'artifact_upload_failed',
     'meeting_ended', 'duration_limit', 'runtime_failure', 'capture_deadline_expired',
+    'room_empty', 'meeting_silent',
     'media_start_failed', 'driver_start_failed', 'browser_launch_failed', 'context_create_failed',
     'guest_join_failed', 'recording_start_failed', 'recording_monitor_failed',
     'media_start_timeout', 'driver_start_timeout', 'browser_launch_timeout', 'context_create_timeout',
@@ -293,6 +295,44 @@ class RecordingProgress:
             raise RuntimeError('media_stalled')
 
 
+class AudioActivity:
+    """How long the recorded meeting audio has been quiet, from the growing WAV."""
+    THRESHOLD = 400  # of 32767; far above an idle call, far below quiet speech
+    HEADER_BYTES = 4096
+    MAX_READ_BYTES = 16000 * 2 * 30
+
+    def __init__(self, root):
+        self.file = root / 'system-audio.wav'
+        self.offset = self.HEADER_BYTES
+        self.last_sound = time.monotonic()
+
+    def silent_seconds(self):
+        checked_at = time.monotonic()
+        try:
+            size = self.file.stat().st_size
+            end = size - size % 2
+            start = max(self.offset, end - self.MAX_READ_BYTES)
+            start -= start % 2
+            if end > start:
+                with self.file.open('rb') as audio:
+                    audio.seek(start)
+                    samples = array.array('h', audio.read(end - start))
+                self.offset = end
+                if samples and max(max(samples), -min(samples)) >= self.THRESHOLD:
+                    self.last_sound = checked_at
+        except (OSError, ValueError):
+            # An unreadable sample is not evidence of silence.
+            self.last_sound = checked_at
+        return checked_at - self.last_sound
+
+
+def seconds_until(payload, key):
+    if key not in payload:
+        return None
+    moment = datetime.fromisoformat(payload[key].replace('Z', '+00:00'))
+    return (moment - datetime.now(timezone.utc)).total_seconds()
+
+
 async def wait_for_recording(recording, progress):
     deadline = time.monotonic() + 12
     while not STOPPED:
@@ -389,10 +429,12 @@ async def execute(run, root):
                 # This timer includes admission and callbacks, so a slow status
                 # request cannot leave the recorder running beyond server expiry.
                 timer = asyncio.timeout(remaining)
+                hold = seconds_until(run.p, 'join_not_before')
                 try:
                     async with timer:
                         await prepare_and_join(page, join_payload, run.callback, lambda: STOPPED,
-                                               diagnostic=run.diagnostic, authenticated_google=google_state is not None)
+                                               diagnostic=run.diagnostic, authenticated_google=google_state is not None,
+                                               join_not_before=time.monotonic() + hold if hold and hold > 0 else None)
                         capture_remaining(run.p)
                         stage = 'recording_start'
                         recording = start_recording(root)
@@ -414,7 +456,11 @@ async def execute(run, root):
                         duration = max(0, run.p['max_duration_seconds'] - (time.monotonic() - recording_started))
                         if remaining is not None:
                             duration = min(remaining, duration)
-                        reason = await monitor(page, run.p['provider'], duration, lambda: STOPPED, recording, progress.ensure_growing)
+                        until_end = seconds_until(run.p, 'scheduled_end')
+                        reason = await monitor(
+                            page, run.p['provider'], duration, lambda: STOPPED, recording, progress.ensure_growing,
+                            silent_seconds=AudioActivity(root).silent_seconds,
+                            scheduled_end=time.monotonic() + until_end if until_end is not None else None)
                         if reason == 'execution_stopped':
                             raise RuntimeError(reason)
                 except (TimeoutError, RuntimeError) as error:

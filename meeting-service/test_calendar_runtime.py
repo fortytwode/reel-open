@@ -612,8 +612,11 @@ def test_dispatcher_emits_teams_compatible_display_name(monkeypatch, hybrid, eve
     monkeypatch.setattr(runtime, "cloud_session", lambda: Session())
     runtime.BotDispatcher(store, clock=lambda: dispatch_now)(owner, event)
 
-    assert uploaded[0]["capture_deadline"] == (dispatch_now + timedelta(minutes=min(event_minutes + 5, 180))).isoformat()
-    assert uploaded[0]["max_duration_seconds"] == min((event_minutes + 5) * 60, 10800)
+    # The recorder may follow an overrun for two hours, within three hours overall.
+    assert uploaded[0]["capture_deadline"] == (dispatch_now + timedelta(minutes=min(event_minutes + 120, 180))).isoformat()
+    assert uploaded[0]["max_duration_seconds"] == min((event_minutes + 120) * 60, 10800)
+    assert uploaded[0]["scheduled_end"] == event["end"]
+    assert uploaded[0]["join_not_before"] == (dispatch_now - timedelta(seconds=20)).isoformat()
     assert "attendee_names" not in uploaded[0]
     record, _ = store.load("executions/" + uploaded[0]["execution_id"])
     assert record["attendee_names"] == {owner: "Meeting Owner"}
@@ -1324,6 +1327,8 @@ def test_rearmed_cloud_task_uses_a_fresh_idempotent_name_and_callback(monkeypatc
     monkeypatch.setattr(runtime, "cloud_session", lambda: SimpleNamespace(post=post))
     request = ("owner", "event", "2026-11-19T18:00:00Z")
     assert runtime.CloudTasks().schedule(*request) != runtime.CloudTasks().schedule(*request, "rearmed")
+    # The recorder is dispatched ahead of the start so it is ready on time.
+    assert {task["scheduleTime"] for task in submitted} == {"2026-11-19T17:57:00Z"}
     assert runtime.CloudTasks().schedule(*request, "rearmed") == submitted[-2]["name"]
     bodies = [json.loads(base64.b64decode(task["httpRequest"]["body"])) for task in submitted]
     assert "task_generation" not in bodies[0] and bodies[1]["task_generation"] == "rearmed"
