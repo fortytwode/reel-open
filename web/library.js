@@ -29,7 +29,8 @@ const openManagement = new Set();
 let participantMeetings = [], participantLoading = false, participantError = "", participantLoadNumber = 0;
 let note = null, noteLoading = false, noteError = "", noteLoadNumber = 0;
 let calendar = null;
-let upcomingEvents = [], upcomingLoading = false, upcomingLoadNumber = 0, showAllUpcoming = false, noteTab = "Summary";
+let upcomingEvents = [], upcomingLoading = false, upcomingLoaded = false, upcomingLoadNumber = 0, showAllUpcoming = false, noteTab = "Summary";
+let pastRange = "any", pastPerson = "", noteSearch = "";
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
 const validUser = (u) => !!u;
@@ -439,14 +440,23 @@ const captureStates = {
 };
 function eventRow(event, now) {
   const start = new Date(event.start), end = new Date(event.end);
-  const live = start <= now && end > now;
+  const live = start <= now && end > now, minutes = Math.round((start - now) / 60000);
   const row = node("a", "nt-row nt-upcoming" + (live ? " nt-live" : ""));
   row.href = libraryURL("calendar");
   row.append(node("span", "nt-time", `${timeOf(start)} – ${timeOf(end)}`));
-  const main = node("span", "nt-main"); main.append(node("strong", "", event.title));
+  const main = node("span", "nt-main"); const title = node("strong", "", event.title);
+  if (live) title.prepend(node("span", "nt-now", "Now"));
+  else if (minutes > 0 && minutes <= 60) title.append(node("span", "nt-soon", `In ${minutes} min`));
+  main.append(title);
   const [label, tone] = captureStates[event.status] || [event.status, "nt-chip-off"];
-  row.append(main, peopleChips(event.attendees), node("span", `nt-chip ${tone}`, live && event.status === "scheduled" ? "Starting" : label));
+  row.append(main, peopleChips(event.attendees), node("span", `nt-chip ${tone}`, label));
   return row;
+}
+function filterControl(label, value, options, change) {
+  const select = node("select", "nt-filter"); select.setAttribute("aria-label", label);
+  for (const [key, text] of options) { const option = node("option", "", text); option.value = key; select.append(option); }
+  select.value = value; select.addEventListener("change", () => change(select.value));
+  return select;
 }
 function renderMeetings() {
   const list = el("recordings"); list.replaceChildren();
@@ -457,34 +467,49 @@ function renderMeetings() {
   const combined = [...participantMeetings, ...meetings.filter((m) => !ownIDs.has(m.id))];
   const term = el("search").value.trim().toLocaleLowerCase();
   const matches = (m) => !term || [m.title, m.summary, ...(Array.isArray(m.attendees) ? m.attendees : [])].some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(term));
-  const filtered = combined.filter(matches).sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
+  const since = pastRange === "today" ? new Date().setHours(0, 0, 0, 0) : pastRange === "7" ? Date.now() - 7 * 864e5 : pastRange === "30" ? Date.now() - 30 * 864e5 : 0;
+  const withPerson = (m) => !pastPerson || (Array.isArray(m.attendees) && m.attendees.includes(pastPerson));
+  const filtered = combined.filter((m) => matches(m) && withPerson(m) && Date.parse(m.started_at) >= since).sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
   const busy = meetingLoading || participantLoading;
   el("result-count").textContent = busy ? "Loading…" : term ? `${filtered.length} of ${combined.length} meetings` : `${combined.length} meetings`;
 
   const now = new Date();
-  const upcoming = upcomingEvents.filter((e) => new Date(e.end) > now && e.status !== "completed" && matches(e)).sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
-  if (upcoming.length || upcomingLoading) {
+  const horizon = new Date(now); horizon.setDate(now.getDate() + 2); horizon.setHours(0, 0, 0, 0);
+  const future = upcomingEvents.filter((e) => new Date(e.end) > now && e.status !== "completed" && matches(e)).sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+  const soon = future.filter((e) => new Date(e.start) < horizon);
+  const upcoming = term ? future : soon.length ? soon : future.slice(0, 3);
+  {
     const section = node("section", "nt-section"); section.setAttribute("aria-label", "Coming up");
     const heading = node("div", "nt-section-head"); heading.append(node("h2", "", "Coming up"));
     const manage = node("a", "nt-link", "Calendar and joining"); manage.href = libraryURL("calendar"); heading.append(manage);
     section.append(heading);
-    if (!upcoming.length) section.append(node("p", "nt-empty", "Loading your calendar…"));
-    const shown = showAllUpcoming || term ? upcoming : upcoming.slice(0, 5);
+    if (!upcoming.length) section.append(node("p", "nt-empty", upcomingLoading || !upcomingLoaded ? "Loading your calendar…"
+      : term ? "No upcoming meetings match your search." : future.length ? "No more meetings today or tomorrow." : "No upcoming meetings. Check that your calendar is connected under Calendar and joining."));
+    const shown = showAllUpcoming || term ? upcoming : upcoming.slice(0, 3);
     let day = "";
     for (const event of shown) {
       const label = dayLabel(new Date(event.start));
       if (label !== day) { day = label; section.append(node("h3", "nt-day", label)); }
       section.append(eventRow(event, now));
     }
-    if (shown.length < upcoming.length) {
-      const more = node("button", "nt-more-button secondary", `Show all ${upcoming.length} upcoming`); more.type = "button";
-      more.addEventListener("click", () => { showAllUpcoming = true; render(); }); section.append(more);
+    if (upcoming.length > 3 && !term) {
+      const more = node("button", "nt-more-button secondary", showAllUpcoming ? "Show less" : `Show ${upcoming.length - 3} more`); more.type = "button";
+      more.addEventListener("click", () => { showAllUpcoming = !showAllUpcoming; render(); }); section.append(more);
     }
     list.append(section);
   }
 
   const past = node("section", "nt-section"); past.setAttribute("aria-label", "Past meetings");
-  const pastHead = node("div", "nt-section-head"); pastHead.append(node("h2", "", "Past meetings")); past.append(pastHead);
+  const pastHead = node("div", "nt-section-head"); pastHead.append(node("h2", "", "Past meetings"));
+  const counts = new Map();
+  for (const m of combined) for (const person of new Set(Array.isArray(m.attendees) ? m.attendees : [])) if (typeof person === "string" && person) counts.set(person, (counts.get(person) || 0) + 1);
+  const people = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([person]) => [person, personName(person)]);
+  if (pastPerson && !counts.has(pastPerson)) pastPerson = "";
+  const filters = node("div", "nt-filters");
+  filters.append(
+    filterControl("Filter by date", pastRange, [["any", "Any time"], ["today", "Today"], ["7", "Last 7 days"], ["30", "Last 30 days"]], (value) => { pastRange = value; render(); }),
+    filterControl("Filter by attendee", pastPerson, [["", "Everyone"], ...people], (value) => { pastPerson = value; render(); }));
+  pastHead.append(filters); past.append(pastHead);
   let pastDay = "";
   for (const m of filtered) {
     const started = new Date(m.started_at);
@@ -497,11 +522,12 @@ function renderMeetings() {
     const preview = m.participantNote ? summaryPreview(m.summary) : "Recorded on this Mac. Open Reel Notetaker to read it.";
     if (preview) main.append(node("span", "nt-preview", preview));
     const ready = m.participantNote && String(m.summary || "").trim();
+    if (m.participantNote && !ready) main.append(node("span", "nt-preview", "No summary yet"));
     row.append(main, peopleChips(m.attendees), node("span", "nt-length", lengthLabel(m.duration_seconds)));
     if (!ready) row.append(node("span", "nt-chip nt-chip-off", m.participantNote ? "No notes" : "On this Mac"));
     past.append(row);
   }
-  if (!filtered.length && !busy) past.append(node("p", "nt-empty", term ? "No meetings match your search." : "No meeting notes yet. Notes appear here after Reel Notetaker records a call you were invited to."));
+  if (!filtered.length && !busy) past.append(node("p", "nt-empty", term || pastPerson || pastRange !== "any" ? "No meetings match. Try a different search or filter." : "No meeting notes yet. Notes appear here after Reel Notetaker records a call you were invited to."));
   list.append(past);
   if (meetingError || participantError) message([meetingError, participantError].filter(Boolean).join(" "), true);
   else message(busy && !combined.length ? "Loading meetings…" : "");
@@ -535,6 +561,20 @@ async function copyText(button, text) {
   catch { button.textContent = "Couldn't copy"; }
   setTimeout(() => { button.textContent = label; }, 1600);
 }
+const taskKey = (id) => organizationStorageKey(`reel-tasks:${currentUser?.uid}:${id}`);
+function doneTasks(id) { try { const value = JSON.parse(localStorage.getItem(taskKey(id)) || "[]"); return new Set(Array.isArray(value) ? value : []); } catch { return new Set(); } }
+function saveTasks(id, done) { try { localStorage.setItem(taskKey(id), JSON.stringify([...done])); } catch { /* ticks then last only for this visit */ } }
+function noteMarkdown(blocks, people, meta, transcriptText) {
+  const lines = [`# ${note.title}`, "", meta];
+  if (people.length) lines.push("", `Attendees: ${people.map(personName).join(", ")}`);
+  for (const block of blocks) {
+    if (block.type === "heading") lines.push("", `## ${block.text}`, "");
+    else if (block.type === "para") lines.push(block.text, "");
+    else lines.push(`${block.type === "todo" ? "- [ ]" : "-"} ${block.label ? `**${block.label}:** ` : ""}${block.text}`);
+  }
+  if (transcriptText) lines.push("", "## Transcript", "", transcriptText);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
 function renderNote() {
   const list = el("recordings"); list.classList.add("nt-home");
   el("result-count").textContent = "";
@@ -548,27 +588,36 @@ function renderNote() {
   const started = new Date(note.started_at);
   const meta = Number.isNaN(started.getTime()) ? "Date unavailable" : `${dayLabel(started)}, ${started.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })} · ${timeOf(started)} · ${lengthLabel(note.duration_seconds)}`;
   const head = node("header", "nt-note-head"); head.append(node("h2", "", note.title), node("p", "nt-meta", meta));
-  const people = [...new Set((Array.isArray(note.attendees) ? note.attendees : []).filter((value) => typeof value === "string" && value))];
+  const unique = (value) => [...new Set((Array.isArray(value) ? value : []).filter((item) => typeof item === "string" && item))];
+  const people = unique(note.attendees), recipients = unique(note.recipients);
   if (people.length) {
     const chips = node("div", "nt-attendees");
     for (const person of people) { const chip = node("span", "nt-person", personName(person)); chip.title = person; chips.append(chip); }
     head.append(chips);
   }
+  if (recipients.length) { const shared = node("p", "nt-shared", `Notes shared with ${recipients.length === 1 ? "1 person" : `${recipients.length} people`}`); shared.title = recipients.join(", "); head.append(shared); }
   const transcriptText = typeof note.transcript_text === "string" && note.transcript_text ? note.transcript_text
     : Array.isArray(note.segments) ? note.segments.map((s) => s.text || "").join("\n") : "";
   const summaryText = typeof note.summary === "string" ? note.summary : "";
+  const blocks = summaryBlocks(summaryText);
+  const tasks = blocks.filter((block) => block.type === "todo").map((block) => block.text);
   const actions = node("div", "nt-actions");
   const action = (label, run) => { const button = node("button", "secondary", label); button.type = "button"; button.addEventListener("click", () => run(button)); actions.append(button); };
   if (summaryText) action("Copy summary", (button) => copyText(button, `${note.title}\n\n${summaryText}`));
   if (transcriptText) action("Copy transcript", (button) => copyText(button, transcriptText));
+  action("Copy as Markdown", (button) => copyText(button, noteMarkdown(blocks, people, meta, transcriptText)));
   action("Copy link", (button) => copyText(button, location.href));
   const notion = validNotionURL(note.notes_url) || validNotionURL(note.notion_url);
   if (notion) { const link = node("a", "button secondary", "Open in Notion"); link.href = notion.href; link.target = "_blank"; link.rel = "noopener noreferrer"; actions.append(link); }
 
+  const bar = node("div", "nt-tabbar");
   const tabs = node("div", "nt-tabs"); tabs.setAttribute("role", "tablist");
+  const find = node("input", "nt-find"); find.type = "search"; find.id = "note-search"; find.placeholder = "Search this note…"; find.setAttribute("aria-label", "Search this note"); find.value = noteSearch;
+  bar.append(tabs, find);
   const panels = {};
   const summary = node("section", "nt-panel"); panels.Summary = summary;
-  const blocks = summaryBlocks(summaryText);
+  const words = summaryText.split(/\s+/).filter(Boolean).length;
+  if (words) summary.append(node("p", "nt-read", `${Math.max(1, Math.round(words / 200))} min read`));
   if (!blocks.length) summary.append(node("p", "nt-empty", "No summary for this meeting. There may have been no speech to summarise."));
   let listNode = null;
   for (const block of blocks) {
@@ -581,16 +630,41 @@ function renderNote() {
     listNode = null;
     summary.append(node(block.type === "heading" ? "h3" : "p", "", block.text));
   }
+  const taskName = `Action items${tasks.length ? ` (${tasks.length})` : ""}`;
+  const taskPanel = node("section", "nt-panel"); panels[taskName] = taskPanel;
+  if (!tasks.length) taskPanel.append(node("p", "nt-empty", "No action items were recorded for this meeting."));
+  else {
+    const done = doneTasks(note.id), progress = node("p", "nt-read"), checklist = node("ul", "nt-checklist");
+    const count = () => { progress.textContent = `${tasks.filter((task) => done.has(task)).length} of ${tasks.length} done. Ticks are saved in this browser only.`; };
+    tasks.forEach((task, index) => {
+      const item = node("li"), box = node("input"), label = node("label", "", task);
+      box.type = "checkbox"; box.id = `note-task-${index}`; box.checked = done.has(task); label.htmlFor = box.id;
+      box.addEventListener("change", () => { if (box.checked) done.add(task); else done.delete(task); saveTasks(note.id, done); item.classList.toggle("done", box.checked); count(); });
+      item.classList.toggle("done", box.checked); item.append(box, label); checklist.append(item);
+    });
+    count(); taskPanel.append(progress, checklist);
+  }
   const transcript = node("section", "nt-panel"); panels.Transcript = transcript;
   transcript.append(transcriptBlocks() || node("p", transcriptText ? "nt-plain" : "nt-empty", transcriptText || "Transcript unavailable."));
+  const names = Object.keys(panels);
+  const applySearch = () => {
+    const needle = noteSearch.trim().toLocaleLowerCase(); let hits = 0;
+    for (const panel of Object.values(panels)) for (const block of panel.querySelectorAll("p:not(.nt-read):not(.nt-empty), li, h3")) {
+      const hit = !needle || block.textContent.toLocaleLowerCase().includes(needle);
+      block.hidden = !hit && block.tagName !== "H3"; if (hit && needle && !panel.hidden) hits++;
+    }
+    find.title = needle ? `${hits} matching passages in this tab` : "";
+  };
   const show = (name) => {
-    noteTab = name;
+    noteTab = name.startsWith("Action items") ? "Action items" : name;
     for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== name;
     for (const tab of tabs.children) { const on = tab.textContent === name; tab.classList.toggle("active", on); tab.setAttribute("aria-selected", String(on)); }
+    applySearch();
   };
-  for (const name of Object.keys(panels)) { const tab = node("button", "nt-tab", name); tab.type = "button"; tab.setAttribute("role", "tab"); tab.addEventListener("click", () => show(name)); tabs.append(tab); }
-  article.append(back, head, actions, tabs, summary, transcript); list.append(article);
-  show(panels[noteTab] ? noteTab : "Summary");
+  for (const name of names) { const tab = node("button", "nt-tab", name); tab.type = "button"; tab.setAttribute("role", "tab"); tab.addEventListener("click", () => show(name)); tabs.append(tab); }
+  find.addEventListener("input", () => { noteSearch = find.value; applySearch(); });
+  article.append(back, head, actions, bar, ...Object.values(panels)); list.append(article);
+  show(names.find((name) => name === noteTab || (noteTab === "Action items" && name.startsWith("Action items"))) || "Summary");
 }
 async function loadUpcoming() {
   if (publicSignup || !validUser(currentUser) || !organization?.meetingServiceURL) return;
@@ -605,12 +679,12 @@ async function loadUpcoming() {
     upcomingEvents = (Array.isArray(data.meetings) ? data.meetings : []).filter((e) => e && typeof e.title === "string"
       && !Number.isNaN(Date.parse(e.start)) && !Number.isNaN(Date.parse(e.end)) && typeof e.status === "string");
   } catch { if (number === upcomingLoadNumber && currentUser?.uid === uid) upcomingEvents = []; }
-  if (number === upcomingLoadNumber && currentUser?.uid === uid) { upcomingLoading = false; if (isMeetings() && !selectedNote()) render(); }
+  if (number === upcomingLoadNumber && currentUser?.uid === uid) { upcomingLoading = false; upcomingLoaded = true; if (isMeetings() && !selectedNote()) render(); }
 }
 async function loadNote() {
   const id = selectedNote(); if (publicSignup || !id || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++noteLoadNumber;
-  note = null; noteError = ""; noteLoading = true; render();
+  note = null; noteError = ""; noteLoading = true; noteSearch = ""; render();
   const current = () => number === noteLoadNumber && currentUser?.uid === uid && auth.currentUser?.uid === uid && selectedNote() === id;
   try {
     const token = await user.getIdToken(); if (!current()) return;
@@ -771,7 +845,7 @@ try {
     openManagement.clear();
     stopListening();
     closePlayer();
-    currentUser = user; ++loadNumber; ++meetingLoadNumber; ++upcomingLoadNumber; upcomingEvents = []; upcomingLoading = false; showAllUpcoming = false; ++participantLoadNumber; ++noteLoadNumber; participantMeetings = []; participantLoading = false; participantError = ""; note = null; noteLoading = false; noteError = ""; loadError = ""; meetingError = ""; entries = []; meetings = []; meetingShareIDs = new Set(); meetingLoading = false; recent = validUser(user) ? readRecent(user.uid) : []; el("recordings").replaceChildren();
+    currentUser = user; ++loadNumber; ++meetingLoadNumber; ++upcomingLoadNumber; upcomingEvents = []; upcomingLoading = false; upcomingLoaded = false; showAllUpcoming = false; pastPerson = ""; pastRange = "any"; ++participantLoadNumber; ++noteLoadNumber; participantMeetings = []; participantLoading = false; participantError = ""; note = null; noteLoading = false; noteError = ""; loadError = ""; meetingError = ""; entries = []; meetings = []; meetingShareIDs = new Set(); meetingLoading = false; recent = validUser(user) ? readRecent(user.uid) : []; el("recordings").replaceChildren();
     preferences = new Map(); folders = []; organizationReady = false; organizationError = ""; organizationMessage = ""; pendingOrganization.clear(); creatingFolder = false;
     el("folder-form").hidden = true; el("folder-name").value = ""; el("folder-form").querySelector('button[type="submit"]').disabled = false; renderFolders(); organizationStatus();
     if (selectedFolder()) { el("view-title").textContent = "Folder"; el("video-tab").textContent = "Folder"; document.title = `Folder · ${productName()}`; }

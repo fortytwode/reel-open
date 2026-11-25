@@ -261,7 +261,9 @@ html[data-product="notetaker"] .page-content { max-width: 980px; }
 .nt-person { padding: 3px 10px; border: 1px solid #e3e6e9; border-radius: 999px; color: #485059; font-size: 12px; }
 .nt-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
 .nt-actions :is(button,.button) { font-size: 12px; }
-.nt-tabs { display: flex; gap: 22px; margin: 0 0 20px; border-bottom: 1px solid #e8eaed; }
+.nt-tabbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 20px; border-bottom: 1px solid #e8eaed; }
+.nt-tabs { display: flex; gap: 22px; }
+.nt-find { width: 190px; max-width: 45%; padding: 5px 9px; border: 1px solid #e3e6e9; border-radius: 7px; font: inherit; font-size: 12px; }
 .nt-tab { padding: 9px 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: #6f7680; font-size: 13px; font-weight: 600; cursor: pointer; }
 .nt-tab.active { border-color: #1f8a70; color: #20242b; }
 .nt-panel { font-size: 15px; line-height: 1.65; color: #2b3038; }
@@ -286,3 +288,14 @@ html[data-product="notetaker"] .page-content { max-width: 980px; }
 html[data-product="notetaker"][data-note] :is(.heading-row,.toolbar) { display: none !important; }
 .nt-timed { display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 10px; margin: 0 0 12px; }
 .nt-timed .nt-stamp { padding-top: .35em; }
+.nt-now, .nt-soon { margin: 0 8px 0 0; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
+.nt-now { background: #d8382c; color: #fff; }
+.nt-soon { margin: 0 0 0 8px; background: #fff3d6; color: #8a5a00; }
+.nt-filters { display: flex; gap: 8px; }
+.nt-filter { max-width: 150px; padding: 4px 6px; border: 1px solid #e3e6e9; border-radius: 7px; background: #fff; color: #485059; font: inherit; font-size: 12px; }
+.nt-shared { margin: -8px 0 16px; color: #7b818a; font-size: 12px; }
+.nt-read { margin: 0 0 14px !important; color: #8a9099; font-size: 12px; }
+.nt-checklist { margin: 0; padding: 0; list-style: none; }
+.nt-checklist li { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 10px; }
+.nt-checklist input { width: 16px; height: 16px; margin-top: .3em; accent-color: #1f8a70; }
+.nt-checklist li.done label { color: #9aa0a8; text-decoration: line-through; }
