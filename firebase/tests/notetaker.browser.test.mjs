@@ -142,10 +142,11 @@ test('team deployments open the full Notetaker workspace and keep deep links', a
   const browser = await chromium.launch(launchOptions);
   try {
     const page = await browser.newPage();
-    const example = JSON.parse(await readFile(new URL('../../organization.example.json', import.meta.url), 'utf8'));
-    await page.route('**/organization.json', route => route.fulfill({ json: example }));
-    await page.route('https://**', route => route.abort());
     const origin = `http://127.0.0.1:${server.address().port}`;
+    const example = JSON.parse(await readFile(new URL('../../organization.example.json', import.meta.url), 'utf8'));
+    // Library and Notetaker on one origin: Notetaker is its own page.
+    await page.route('**/organization.json', route => route.fulfill({ json: { ...example, webBase: origin, notesBaseURL: origin + '/library' } }));
+    await page.route('https://**', route => route.abort());
     await page.goto(`${origin}/notetaker#calendar-meeting=event-1`);
     await page.waitForURL(`${origin}/notetaker-meetings#calendar-meeting=event-1`);
     await page.locator('#nav-meetings').waitFor();
@@ -156,7 +157,16 @@ test('team deployments open the full Notetaker workspace and keep deep links', a
     await page.waitForURL(`${origin}/notetaker-meetings`);
     await page.locator('#nav-meetings[aria-current="page"]').waitFor();
     assert.equal(await page.title(), 'Meetings · Reel Notetaker');
-    assert.equal(await page.locator('#other-product').getAttribute('href'), example.notesBaseURL);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), origin + '/library');
+    // Library proxied on another origin: Notetaker opens there, where people are already signed in.
+    await page.unroute('**/organization.json');
+    await page.unroute('https://**');
+    const hub = 'https://hub.northwind.example/reel';
+    await page.route('**/organization.json', route => route.fulfill({ json: { ...example, notesBaseURL: hub } }));
+    await page.route(hub, route => route.fulfill({ contentType: 'text/html', body: '<title>proxied</title>' }));
+    await page.goto('about:blank');
+    await page.goto(`${origin}/notetaker#meetings/reel_${'a'.repeat(64)}`);
+    await page.waitForURL(`${hub}#meetings/reel_${'a'.repeat(64)}`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
 

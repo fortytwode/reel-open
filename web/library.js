@@ -70,6 +70,13 @@ const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).ori
 const proxied = !fixedNotetaker && !!organization && sameOrigin(location.href, organization.notesBaseURL) && !sameOrigin(location.href, organization.webBase);
 const meetingHash = () => /^#(?:meetings(?:\/.*)?|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
 let notetaker = fixedNotetaker || (proxied && meetingHash());
+// Where the library is served from another origin, open Notetaker there too so
+// people sign in once for both products.
+if (fixedNotetaker && organization?.notesBaseURL && organization.webBase && !publicSignup
+    && sameOrigin(organization.notesBaseURL, organization.notesBaseURL)
+    && !sameOrigin(organization.webBase, organization.notesBaseURL) && !sameOrigin(location.href, organization.notesBaseURL)) {
+  location.replace(organization.notesBaseURL + (location.hash || "#meetings"));
+}
 const productName = () => notetaker ? "Reel Notetaker" : "Reel Recorder";
 const notetakerURL = (hash = "") => !organization ? "/notetaker-meetings" + hash
   : publicSignup ? organization.webBase + "/notetaker"
