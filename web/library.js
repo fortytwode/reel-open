@@ -91,6 +91,8 @@ function showProduct() {
   document.querySelector(".library-label").textContent = notetaker ? "MEETINGS" : "LIBRARY";
   document.querySelector(".workspace small").textContent = notetaker ? "Meeting notes" : "Personal library";
   document.querySelector(".breadcrumb").firstChild.textContent = notetaker ? "Notetaker " : "Library ";
+  document.querySelector(".personal-library strong").textContent = notetaker ? "Your meetings" : "Personal library";
+  document.querySelector(".personal-library small").textContent = notetaker ? "Private to you and attendees" : "Private to you";
   const other = el("other-product");
   other.href = notetaker ? recorderURL() : notetakerURL();
   other.firstChild.textContent = notetaker ? "Reel Recorder " : "Reel Notetaker ";
