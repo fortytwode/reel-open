@@ -421,8 +421,41 @@ def _parse_join_end(event):
         return datetime.min.replace(tzinfo=UTC)
 
 
+class _RequestReadCache:
+    """Within one request, read each state object once. Writes go to the store and forget the cached copy."""
+
+    def __init__(self, store):
+        self._store = store
+        self._cache = {}
+
+    def load(self, key, **kwargs):
+        import copy
+        if key not in self._cache:
+            self._cache[key] = self._store.load(key, **kwargs)
+        state, generation = self._cache[key]
+        return copy.deepcopy(state), generation
+
+    def cas(self, key, *args, **kwargs):
+        self._cache.pop(key, None)
+        return self._store.cas(key, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
 def install_calendar_routes(app, claims_for_request, store_for_request, deliver_notes,
                             *, calendar_factory=None, scheduler=None, dispatcher_factory=None):
+    raw_store_for_request = store_for_request
+
+    def store_for_request():
+        """One read cache per request, shared by every helper in that request."""
+        from flask import g, has_request_context
+        if not has_request_context():
+            return raw_store_for_request()
+        cache = getattr(g, "_calendar_read_cache", None)
+        if cache is None:
+            cache = g._calendar_read_cache = _RequestReadCache(raw_store_for_request())
+        return cache
     def public_oauth():
         from public_calendar_oauth import PublicCalendarOAuth
         return PublicCalendarOAuth(store_for_request())
