@@ -83,7 +83,11 @@ class FolderPromptMcpTests(WorkspaceTests):
     def test_mcp_reads_only_what_the_token_owner_can_open_until_revoked(self):
         status, data = self.call('owner', 'POST', 'mcp-tokens', {'create': 'Claude on my laptop'})
         token = data['created']['token']
-        self.assertTrue(token.startswith('reel_mcp_') and data['endpoint'].endswith('/mcp'))
+        self.assertTrue(token.startswith('reel_mcp_') and data['endpoint'] == 'http://localhost/mcp')
+        hosted = self.client.post('/delivery/mcp-tokens', json={'create': 'Desktop'}, base_url='http://reel-delivery.example.run.app',
+                                  headers={'Authorization': 'Bearer token'}).get_json()
+        self.assertEqual(hosted['endpoint'], 'https://reel-delivery.example.run.app/mcp')
+        self.call('owner', 'POST', 'mcp-tokens', {'revoke': hosted['created']['id']})
         self.assertNotIn('reel_mcp_', json.dumps(self.call('owner', 'GET', 'mcp-tokens')[1]))
         self.assertEqual(self.mcp(None, 'tools/list')[0], 401)
         self.assertEqual(self.mcp('reel_mcp_wrong', 'tools/list')[0], 401)
