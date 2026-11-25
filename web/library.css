@@ -366,3 +366,4 @@ html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls sele
 html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls .mc-check { flex: 1 1 100%; display: flex; align-items: flex-start; gap: 8px; white-space: normal; color: #485059; font-size: 13px; }
 html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls button { flex: 0 0 auto; }
 html[data-product="notetaker"] #meeting-calendar-panel .mc-card { max-width: 760px; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls .mc-check input { width: auto; min-width: 0; margin: 3px 0 0; flex: 0 0 auto; }
