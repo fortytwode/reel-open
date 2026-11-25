@@ -13,6 +13,12 @@ For online features, both products can share a self-hosted deployment and accoun
 
 The installer saves recordings on your Mac without an account. For share links or online Notetaker features, follow the [self-hosting guide](docs/self-hosting.md). The browser-based Notetaker is available at `/notetaker` on your deployment.
 
+## Install Reel Notetaker for Mac
+
+[Download the signed Reel Notetaker installer](https://github.com/rocketshiphq/reel-open/releases/tag/notetaker-v1.2.31). Open the disk image and drag **Reel Notetaker** to **Applications**. It supports Apple silicon and Intel Macs running macOS 15 or later and installs alongside Reel Recorder.
+
+The Mac app records a meeting window you choose. Notes, calendar joining and cloud meetings need a deployment from the [self-hosting guide](docs/self-hosting.md).
+
 ## Run locally
 
 **macOS.** Build with Xcode 26 or newer. Reel runs on macOS 15 or later as a menu bar app. Grant screen recording, camera and microphone permissions when macOS prompts for them.
