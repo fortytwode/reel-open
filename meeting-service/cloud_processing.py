@@ -35,6 +35,14 @@ def caption_context(bucket, record, duration):
         return None
 
 
+def caption_led(transcript):
+    """True when every transcript part is a named caption turn rather than split ASR text."""
+    parts = transcript.get('segments') or []
+    return (transcript.get('speaker_coverage') == 1.0 and bool(parts)
+            and transcript.get('text') == '\n'.join(part.get('text', '') for part in parts)
+            and all(part.get('speaker_match') == 'caption_text_match' for part in parts))
+
+
 def attributed_transcript(segments, captions):
     from speaker_alignment import align_speakers
     transcript = align_speakers(segments, captions)
@@ -289,6 +297,10 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                 text = '\n'.join(segment['text'] for segment in segments)
                 speaker_context = ({'speaker_turns': transcript['segments']}
                     if transcript.get('speaker_attribution') in ('platform_captions', 'partial') else {})
+                if caption_led(transcript):
+                    # The transcript is the meeting's own named captions: summarise that text,
+                    # so every turn the summariser sees carries its speaker.
+                    text = transcript['text']
                 summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: summarize_text(
                     text, record['title'][:200], record['attendees'], attendee_names=attendee_names, **speaker_context))
                 # Old immutable summaries lack this decision; hold them for review.

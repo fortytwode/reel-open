@@ -278,3 +278,15 @@ def test_a_repeat_long_after_the_line_is_kept_as_new_speech():
     result = align('Short chunk.', caption(10, 20, line, 'Ava'), caption(30, 45, LONG_BEN, 'Ben'),
                    caption(900, 910, line, 'Ava'), caption(911, 930, LONG_AVA, 'Ava'), duration=1000)
     assert result['text'].count('revisit the pricing page') == 2
+
+
+def test_caption_led_transcripts_give_the_summariser_named_dialogue():
+    from cloud_processing import caption_led
+    from speech import _dialogue
+    led = align('Short chunk.', caption(60, 75, LONG_AVA, 'Ava'), caption(76, 90, LONG_BEN, 'Ben'))
+    assert caption_led(led)
+    turns = _dialogue(led['text'], led['segments'])
+    assert [turn['speaker_name'] for turn in turns] == ['Ava', 'Ben']
+    matched = align(' '.join([LONG_AVA, LONG_BEN, 'After that the group agreed to pause the older videos and revisit pricing in January']),
+                    caption(60, 75, LONG_AVA, 'Ava'))
+    assert not caption_led(matched)
