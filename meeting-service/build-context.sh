@@ -18,7 +18,7 @@ reel_repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 reel_commit="$(git -C "$reel_repo" rev-parse --verify "$reel_ref^{commit}")"
 paths=(reel_organization.py deployment-adapter/README.md delivery-service/requirements.txt
   delivery-service/app.py delivery-service/providers.py delivery-service/standalone_providers.py delivery-service/slack_recaps.py
-  delivery-service/workspace.py)
+  delivery-service/workspace.py delivery-service/assistant.py)
 paths+=(meeting-service/Dockerfile meeting-service/app.py meeting-service/speech.py
   meeting-service/calendar_meetings.py meeting-service/calendar_runtime.py meeting-service/public_calendar_oauth.py
   meeting-service/cloud_processing.py meeting-service/speaker_alignment.py meeting-service/requirements.txt)
@@ -48,6 +48,6 @@ if [[ -n "$adapter_repo" ]]; then
   printf 'PRIVATE_ADAPTER_GIT_SHA=%s\n' "$adapter_commit" >> "$destination/PROVENANCE"
 fi
 mkdir -p "$destination/canonical_delivery"
-for name in app providers standalone_providers slack_recaps workspace; do
+for name in app providers standalone_providers slack_recaps workspace assistant; do
   mv "$destination/delivery-service/$name.py" "$destination/canonical_delivery/$name.py"
 done

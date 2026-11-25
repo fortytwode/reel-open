@@ -18,7 +18,7 @@ reel_repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 reel_commit="$(git -C "$reel_repo" rev-parse --verify "$reel_ref^{commit}")"
 paths=(reel_organization.py deployment-adapter/README.md delivery-service/requirements.txt
   delivery-service/app.py delivery-service/providers.py delivery-service/standalone_providers.py)
-paths+=(delivery-service/slack_recaps.py delivery-service/workspace.py delivery-service/main.py delivery-service/Dockerfile)
+paths+=(delivery-service/slack_recaps.py delivery-service/workspace.py delivery-service/assistant.py delivery-service/main.py delivery-service/Dockerfile)
 for path in "${paths[@]}"; do
   git -C "$reel_repo" cat-file -e "$reel_commit:$path"
 done

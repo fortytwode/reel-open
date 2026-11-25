@@ -1539,3 +1539,23 @@ def test_partial_recovery_is_owner_only_and_repeated_requests_share_the_queue(se
     assert queued == [saved["execution_id"]] and len(launches) == 1
     owner = client.get("/calendar/settings", headers=headers).json["events"][0]
     assert owner["recovery_status"] == "processing" and owner["status"] == "failed"
+
+
+def test_join_link_is_given_only_to_the_owner_one_meeting_at_a_time(setup):
+    client, store, claims, calls, tasks = setup
+    post(client, "/calendar/connect", {"calendar_ids": ["primary"]})
+    key = "calendar/" + hashlib.sha256(claims["email"].encode()).hexdigest()
+    state, _ = store.load(key)
+    event_id = next(iter(state["events"]))
+    # The listing never carries meeting links; joining fetches one on request.
+    assert "abc-defg-hij" not in json.dumps(client.get("/calendar/meetings", headers={"Authorization": "Bearer firebase"}).json)
+    response = client.get(f"/calendar/meetings/{event_id}/join", headers={"Authorization": "Bearer firebase"})
+    assert response.status_code == 200 and response.json["url"] == "https://meet.google.com/abc-defg-hij"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert client.get("/calendar/meetings/" + "0" * 64 + "/join", headers={"Authorization": "Bearer firebase"}).status_code == 404
+    assert client.get("/calendar/meetings/not-an-id/join", headers={"Authorization": "Bearer firebase"}).status_code == 404
+    assert client.get(f"/calendar/meetings/{event_id}/join").status_code == 401
+    state, generation = store.load(key)
+    state["events"][event_id]["status"] = "cancelled"
+    store.cas(key, state, generation)
+    assert client.get(f"/calendar/meetings/{event_id}/join", headers={"Authorization": "Bearer firebase"}).status_code == 404
