@@ -90,7 +90,9 @@ def test_summary_full_input_and_structured_output(setup):
     transcript = 'Beginning ' + 'x' * 190000 + ' final decision'
     response = client.post('/summary', json={'text': transcript, 'title': 'Planning', 'attendees': ['a@example.com']}, headers={'Authorization': 'Bearer token'})
     assert response.status_code == 200
-    assert response.json['summary'] == 'Outcome\nDecision: proceed.\n\nAction items\n• Owner unconfirmed: Follow up'
+    # Nobody took the task in the transcript, so it goes to whoever recorded the meeting.
+    assert response.json['summary'].startswith('Outcome\nDecision: proceed.\n\nAction items\n• ')
+    assert 'Owner unconfirmed' not in response.json['summary']
     body = json.loads(requests[0].content)
     assert json.loads(body['input'])['transcript'] == transcript
     assert body['store'] is False and body['reasoning']['effort'] == 'medium'
@@ -450,3 +452,16 @@ def test_the_speaker_owns_a_commitment_in_their_own_words(text, expected):
     context = attendee_context(['ana@rocketshiphq.com', 'bo@rocketshiphq.com'], {'ana@rocketshiphq.com': 'Ana Skopelja'})
     dialogue = _dialogue(text, [speaker_turn(text, 'Ana Skopelja')])
     assert _grounded_owner('Ana Skopelja', text, text, context, 'Look into the YouTube access blocker', dialogue) == expected
+
+
+def test_every_action_item_gets_an_owner_when_asked(monkeypatch):
+    from speech import _likely_owner
+    context = attendee_context(['ana@rocketshiphq.com', 'bo@rocketshiphq.com'], {'ana@rocketshiphq.com': 'Ana Skopelja'})
+    text = 'We should probably refresh the creatives next week.'
+    dialogue = _dialogue(text, [speaker_turn(text, 'Bo Novak')])
+    # The invited person the model named wins; then the speaker of the quote; then the name given; then the meeting owner.
+    assert _likely_owner('Ana', 'refresh the creatives', text, context, dialogue, 'Shamanth') == 'Ana Skopelja'
+    assert _likely_owner('', 'refresh the creatives', text, context, dialogue, 'Shamanth') == 'Bo Novak'
+    assert _likely_owner('The client', '', text, context, [], 'Shamanth') == 'The client'
+    assert _likely_owner('', '', text, context, [], 'Shamanth') == 'Shamanth'
+    assert _likely_owner('<b>x</b>', '', text, context, [], '') == 'Meeting owner'

@@ -36,6 +36,16 @@ def caption_context(bucket, record, duration):
         return None
 
 
+def owner_display_name(email, names):
+    """The meeting owner's name, used for a task nobody else clearly took."""
+    if not isinstance(email, str) or '@' not in email:
+        return ''
+    named = (names or {}).get(email) if isinstance(names, dict) else None
+    if isinstance(named, str) and named.strip():
+        return named.strip()
+    return ' '.join(part.capitalize() for part in re.split(r'[._+\-]+', email.split('@', 1)[0]) if part)
+
+
 def speaker_name_hints(attendees, attendee_names, segments):
     """Add the names people showed on the call to invited emails they unambiguously belong to.
 
@@ -328,7 +338,8 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                     text = transcript['text']
                     summary_names = speaker_name_hints(record['attendees'], attendee_names, transcript['segments'])
                 summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: summarize_text(
-                    text, record['title'][:200], record['attendees'], attendee_names=summary_names, **speaker_context))
+                    text, record['title'][:200], record['attendees'], attendee_names=summary_names,
+                    default_owner=owner_display_name(owner, summary_names), **speaker_context))
                 # Old immutable summaries lack this decision; hold them for review.
                 from speech import acknowledgement_only
                 record['has_meeting_content'] = (False if acknowledgement_only(text) else

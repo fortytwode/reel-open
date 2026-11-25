@@ -259,7 +259,33 @@ def _grounded_owner(owner, evidence, text, context, task='', dialogue=()):
     return ''
 
 
-def summarize_text(text, title='', attendees=None, transport=None, *, attendee_names=None, speaker_turns=None):
+def _likely_owner(proposed, evidence, text, context, dialogue, default_owner):
+    """Best owner when the strict check can't confirm one: the invited person the model named,
+    the named speaker of the quoted words, the name the model gave, then the meeting's owner."""
+    people = _owner_aliases(context)
+    key = _name_key(proposed or '')
+    matches = [label for label, aliases in people if key and key in aliases]
+    if len(matches) == 1:
+        return matches[0]
+    if evidence and dialogue:
+        excerpt = ' '.join(evidence.split()).casefold()
+        transcript = ' '.join(text.split()).casefold()
+        position = transcript.find(excerpt)
+        turn = next((turn for turn in dialogue if position >= 0 and turn['text_start'] <= position
+                     and position + len(excerpt) <= turn['text_end'] and turn.get('speaker_name')), None)
+        if turn:
+            return turn['speaker_name']
+    proposed = ' '.join(str(proposed or '').split())
+    if 2 <= len(proposed) <= 60 and not re.search(r'[<>@\x00-\x1f\x7f]', proposed):
+        return proposed
+    return default_owner or 'Meeting owner'
+
+
+def summarize_text(text, title='', attendees=None, transport=None, *, attendee_names=None, speaker_turns=None,
+                   default_owner=None):
+    """default_owner set (even to ''): every action item gets an owner. A confirmed owner wins;
+    otherwise the most likely person, falling back to whoever's meeting this was."""
+    every_owner = default_owner is not None
     """Validate meeting content and return structured notes from the provider."""
     attendees = [] if attendees is None else attendees
     if (not short_string(text, 200000) or not text.strip() or not short_string(title, 200)
@@ -298,6 +324,9 @@ def summarize_text(text, title='', attendees=None, transport=None, *, attendee_n
                 'action_items': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
                   'required': ['owner', 'task', 'due', 'evidence'],
                   'properties': {k: {'type': 'string'} for k in ('owner', 'task', 'due', 'evidence')}}}}}
+    if every_owner:
+        attribution_instructions += ('Every action item must still name an owner: when no one is confirmed, give the person '
+                                     'most clearly responsible (who was asked, who volunteered, or who raised it). Never leave owner empty. ')
     body = {'model': model, 'store': False, 'reasoning': {'effort': 'medium'}, 'max_output_tokens': 8000,
             'instructions': (
                 'Set has_meeting_content to false only when highly confident the transcript contains no meaningful utterance, question, decision, or action. '
@@ -338,7 +367,9 @@ def summarize_text(text, title='', attendees=None, transport=None, *, attendee_n
             raise ValueError()
     except (AttributeError, KeyError, TypeError, ValueError):
         raise SpeechError('Speech provider returned an invalid response', 502)
-    actions = [{'owner': _grounded_owner(a['owner'], a['evidence'], text, context, a['task'], dialogue), 'task': a['task'], 'due': a['due']}
+    actions = [{'owner': _grounded_owner(a['owner'], a['evidence'], text, context, a['task'], dialogue)
+                         or (_likely_owner(a['owner'], a['evidence'], text, context, dialogue, default_owner) if every_owner else ''),
+                'task': a['task'], 'due': a['due']}
                for a in notes['action_items']]
     def line(value):
         return ' '.join(value.split())
@@ -354,11 +385,21 @@ def summarize_text(text, title='', attendees=None, transport=None, *, attendee_n
             'has_meeting_content': notes['has_meeting_content'], 'engine': f'OpenAI {model}'}
 
 
+def _person_name(claims):
+    """The signed-in person who recorded the meeting: the owner of a task nobody else took."""
+    claims = claims if isinstance(claims, dict) else {}
+    name = claims.get('name')
+    if isinstance(name, str) and name.strip() and len(name) <= 80 and not re.search(r'[<>@\x00-\x1f]', name):
+        return name.strip()
+    email = str(claims.get('email') or '')
+    return ' '.join(part.capitalize() for part in re.split(r'[._+\-]+', email.split('@', 1)[0]) if part) if '@' in email else ''
+
+
 def install_speech_routes(app, authenticated_claims, cors, transport=None):
     def preflight():
         if request.method == 'OPTIONS':
             return ('', 204) if cors() else (jsonify(error='Origin not allowed'), 403)
-        authenticated_claims()
+        request.reel_claims = authenticated_claims()
         return None
 
     @app.errorhandler(SpeechError)
@@ -398,7 +439,7 @@ def install_speech_routes(app, authenticated_claims, cors, transport=None):
         if not isinstance(payload, dict) or set(payload) - {'text', 'title', 'attendees', 'attendee_names'} or 'text' not in payload:
             raise SpeechError('Invalid summary fields')
         result = summarize_text(payload['text'], payload.get('title', ''), payload.get('attendees', []), transport,
-                                attendee_names=payload.get('attendee_names'))
+                                attendee_names=payload.get('attendee_names'), default_owner=_person_name(getattr(request, 'reel_claims', None)))
         if not result['has_meeting_content'] or acknowledgement_only(payload['text']):
             response = jsonify(error='Meeting transcript requires review before notes are delivered.', code='meeting_review_required')
             response.headers['Cache-Control'] = 'no-store'
