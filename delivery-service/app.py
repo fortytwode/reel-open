@@ -717,7 +717,10 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
         email, note, body = workspace_request(meeting_id, edit=True)
         my_notes = note['workspace']['my_notes'] if body.get('include_my_notes') is True else ''
         try:
-            text = assistant.regenerate_summary(note, str(body.get('template', 'standard')), str(body.get('language', '')), my_notes)
+            # A task nobody else took goes to the person asking for the rewrite.
+            asker = ' '.join(part.capitalize() for part in re.split(r'[._+\-]+', email.split('@', 1)[0]) if part)
+            text = assistant.regenerate_summary(note, str(body.get('template', 'standard')), str(body.get('language', '')), my_notes,
+                                                meeting_owner=asker)
         except assistant.AssistantError as exc:
             return jsonify(error=str(exc)), exc.status
         workspace.set_summary(note_store(), meeting_id, 'notetaker', text, int(clock()),

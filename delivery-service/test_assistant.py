@@ -36,7 +36,7 @@ class AssistantUnitTests(unittest.TestCase):
         note = {'title': 'Weekly', 'attendees': ['ana@rocketshiphq.com'], 'transcript_text': 'Ana: I will send the report by Friday.'}
         text = assistant.regenerate_summary(note, 'client', 'es', 'Ask about pricing', transport=openai(NOTES, seen))
         self.assertTrue(text.startswith('Outcome\nBudgets hold for December.'))
-        self.assertIn('Action items\n• Ana: Send the report (due: Friday)\n• Owner unconfirmed: Book the review', text)
+        self.assertIn('Action items\n• Ana: Send the report (due: Friday)\n• Meeting owner: Book the review', text)
         self.assertIn('Decisions\n• Pause the older videos', text)
         self.assertNotIn('Open questions', text)
         sent = seen[0]
@@ -144,3 +144,19 @@ class AssistantRouteTests(WorkspaceTests):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_rewritten_tasks_always_have_an_owner():
+    import httpx, json as _json
+    notes = {'summary': 'Done.', 'key_points': [], 'decisions': [], 'open_questions': [],
+             'action_items': [{'owner': '', 'task': 'Send the deck', 'due': ''}]}
+    def handler(request):
+        body = _json.loads(request.content)
+        assert 'Never leave owner empty' in body['instructions']
+        return httpx.Response(200, json={'status': 'completed', 'output': [{'type': 'message', 'content': [
+            {'type': 'output_text', 'text': _json.dumps(notes)}]}]})
+    import os
+    os.environ.setdefault('OPENAI_API_KEY', 'test')
+    from assistant import regenerate_summary
+    text = regenerate_summary({'transcript_text': 'We will send the deck.'}, transport=httpx.MockTransport(handler), meeting_owner='Shamanth')
+    assert 'Shamanth: Send the deck' in text and 'Owner unconfirmed' not in text
