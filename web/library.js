@@ -270,6 +270,7 @@ function render() {
   if (isMeetings()) return renderMeetings();
   const list = el("recordings");
   list.classList.remove("nt-home");
+  document.documentElement.removeAttribute("data-note");
   list.replaceChildren();
   const term = el("search").value.trim().toLocaleLowerCase();
   const visits = new Map(recent.map((v) => [v.id, v.openedAt]));
@@ -449,6 +450,7 @@ function eventRow(event, now) {
 }
 function renderMeetings() {
   const list = el("recordings"); list.replaceChildren();
+  document.documentElement.toggleAttribute("data-note", !!selectedNote());
   if (selectedNote()) return renderNote();
   list.classList.add("nt-home");
   const ownIDs = new Set(participantMeetings.flatMap((m) => Array.isArray(m.local_recording_ids) ? m.local_recording_ids : []));
@@ -504,18 +506,26 @@ function renderMeetings() {
   if (meetingError || participantError) message([meetingError, participantError].filter(Boolean).join(" "), true);
   else message(busy && !combined.length ? "Loading meetings…" : "");
 }
+// speaker_attribution on a segment says how well speakers were identified, not who
+// spoke. Names, when the service has them, come as "Name: text" lines in transcript_text.
 function transcriptBlocks() {
+  const wrap = node("div", "nt-transcript");
+  const lines = typeof note.transcript_text === "string" ? note.transcript_text.split("\n").map((line) => line.trim()).filter(Boolean) : [];
+  const named = lines.map((line) => /^([A-Z][^:]{1,40}):\s+(.+)$/.exec(line));
+  if (lines.length > 1 && named.filter(Boolean).length >= lines.length * 0.6) {
+    let last = null, block = null;
+    lines.forEach((line, index) => {
+      const speaker = named[index]?.[1] || last || "Speaker", text = named[index]?.[2] || line;
+      if (speaker !== last) { last = speaker; block = node("div", "nt-turn"); const head = node("div", "nt-turn-head"); head.append(node("strong", "", speaker)); block.append(head); wrap.append(block); }
+      block.append(node("p", "", text));
+    });
+    return wrap;
+  }
   if (!Array.isArray(note.segments) || !note.segments.length) return null;
-  const wrap = node("div", "nt-transcript"); let last = null, block = null;
   for (const segment of note.segments) {
-    const speaker = typeof segment.speaker_attribution === "string" && segment.speaker_attribution.trim() ? segment.speaker_attribution.trim() : "Speaker";
-    if (speaker !== last) {
-      last = speaker; block = node("div", "nt-turn");
-      const head = node("div", "nt-turn-head"); head.append(node("strong", "", speaker));
-      if (Number.isFinite(segment.start)) head.append(node("span", "nt-stamp", duration(segment.start)));
-      block.append(head); wrap.append(block);
-    }
-    block.append(node("p", "", segment.text || ""));
+    const block = node("div", "nt-turn nt-timed");
+    block.append(node("span", "nt-stamp", Number.isFinite(segment.start) ? duration(segment.start) : ""), node("p", "", segment.text || ""));
+    wrap.append(block);
   }
   return wrap;
 }

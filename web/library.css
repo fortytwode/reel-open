@@ -283,3 +283,6 @@ html[data-product="notetaker"] .page-content { max-width: 980px; }
   .nt-time { grid-column: 1 / -1; }
   .nt-people, .nt-length { display: none; }
 }
+html[data-product="notetaker"][data-note] :is(.heading-row,.toolbar) { display: none !important; }
+.nt-timed { display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 10px; margin: 0 0 12px; }
+.nt-timed .nt-stamp { padding-top: .35em; }
