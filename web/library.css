@@ -299,3 +299,25 @@ html[data-product="notetaker"][data-note] :is(.heading-row,.toolbar) { display: 
 .nt-checklist li { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 10px; }
 .nt-checklist input { width: 16px; height: 16px; margin-top: .3em; accent-color: #1f8a70; }
 .nt-checklist li.done label { color: #9aa0a8; text-decoration: line-through; }
+.nt-conflict { background: #fde6e3; color: #a8322a; }
+.nt-maybe { background: #e8ecf5; color: #3d4f7a; }
+.nt-done { background: #e3f3ee; color: #17705c; }
+.nt-filters { flex-wrap: wrap; justify-content: flex-end; }
+.nt-inline-form { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.nt-inline-form input { flex: 1 1 220px; min-width: 0; padding: 6px 9px; border: 1px solid #dfe3e6; border-radius: 7px; font: inherit; font-size: 13px; }
+.nt-banner { margin: 0 0 14px; padding: 8px 12px; border-radius: 8px; background: #eef3f1; color: #2f4a42; font-size: 12.5px; }
+.nt-share { margin: 0 0 18px; padding: 14px 16px; border: 1px solid #e3e6e9; border-radius: 10px; background: #fafbfa; }
+.nt-share h3 { margin: 0 0 10px; font-size: 14px; }
+.nt-share-list { margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.nt-share-list li { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid #eef0f2; }
+.nt-share-list li span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nt-role { color: #8a9099; font-size: 11.5px; white-space: nowrap; }
+.nt-visibility { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 12.5px; color: #485059; }
+.nt-visibility .nt-filter { max-width: none; }
+.nt-editor { display: block; width: 100%; min-height: 260px; margin: 0 0 10px; padding: 10px 12px; border: 1px solid #dfe3e6; border-radius: 8px; font: inherit; font-size: 14px; line-height: 1.55; resize: vertical; box-sizing: border-box; }
+.nt-text-button { padding: 0; border: 0; background: none; color: #1f7a66; font: inherit; font-size: 12px; cursor: pointer; }
+.nt-text-button:hover { text-decoration: underline; }
+.nt-checklist li .nt-text-button, .nt-checklist li .nt-role { margin-left: auto; }
+.nt-checklist label { flex: 1; min-width: 0; }
+.nt-actions .nt-filter { max-width: 170px; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-events { max-height: 520px; overflow-y: auto; border-top: 1px solid #eef0f2; }
