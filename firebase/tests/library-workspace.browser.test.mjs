@@ -194,3 +194,54 @@ test('workspace loads against the existing team Hosting auth modules', async () 
     assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
+
+test('Notetaker joins an upcoming call on request and answers questions with sources', async () => {
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const browser = await chromium.launch({ headless:true, executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+  try {
+    const page = await browser.newPage();
+    await page.route('**/reel/firebase.js*', route => route.fulfill({ contentType:'text/javascript', body:`
+      export const FB_CDN='https://sdk.example.test/', CLOUD_CONFIG={firestoreDatabase:'reel'}, EMU=false, googleAccountLabel='a work account';
+      const user={uid:'owner',email:'owner@rocketshiphq.com',emailVerified:true,getIdToken:async()=> 'token'};
+      const auth={currentUser:user}; const am={signOut:async()=>{}, signInWithPopup:async()=>{}};
+      export const loadAuth=async()=>({auth,am}); export const observeReelAccount=(_am,_auth,cb)=>{cb(user,user)};
+      export const sessionSnapshot=u=>u&&({uid:u.uid,email:u.email,getIdToken:()=>u.getIdToken()}); export const googleSignInProvider=()=>({});
+    ` }));
+    await page.route('https://sdk.example.test/firebase-firestore.js', route => route.fulfill({contentType:'text/javascript',body:`
+      export const getFirestore=()=>({}); export const collection=(...x)=>x; export const query=x=>x;
+      export const orderBy=()=>null; export const onSnapshot=(_q,cb)=>{queueMicrotask(()=>cb({docs:[]}));return ()=>{}};
+    `}));
+    const soon = new Date(Date.now() + 5 * 60000), later = new Date(Date.now() + 35 * 60000);
+    const eventId = 'e'.repeat(64);
+    const joins = [];
+    await page.route('https://meetings.example.test/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === `/calendar/meetings/${eventId}/join`) { joins.push(route.request().headers().authorization); return route.fulfill({json:{url:'https://meet.example.test/abc'}}); }
+      return route.fulfill({json:{meetings:[{id:eventId,title:'Client sync',start:soon.toISOString(),end:later.toISOString(),status:'scheduled',attendees:['ana@rocketshiphq.com'],response:'tentative'}],
+        events:[],config:{enabled:true,calendar_ids:['primary']},capabilities:{calendar:true}}});
+    });
+    const note = {id:'reel_'+'a'.repeat(64),title:'Peak weekly',started_at:'2026-11-25T10:00:00Z',attendees:['ana@rocketshiphq.com'],summary:'Outcome\nBudgets hold.',duration_seconds:1800};
+    const asked = [];
+    await page.route('https://delivery.example.test/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/delivery/ask') { asked.push(route.request().postDataJSON()); return route.fulfill({json:{answer:'Budgets hold for December.\n- Revisit in January',citations:[{id:note.id,title:'Peak weekly',started_at:note.started_at}]}}); }
+      if (url.pathname === '/delivery/search') return route.fulfill({json:{results:[]}});
+      if (url.pathname === '/delivery/folders') return route.fulfill({json:{folders:[]}});
+      return route.fulfill({json:{meetings:[note],next_cursor:null}});
+    });
+    await page.context().route('https://meet.example.test/**', route => route.fulfill({contentType:'text/html', body:'<title>meeting</title>'}));
+    await page.goto(`http://127.0.0.1:${server.address().port}/reel/notetaker#meetings`);
+    const join = page.getByRole('button', { name: 'Join' });
+    await join.waitFor();
+    assert.equal(await page.locator('.nt-maybe').first().textContent(), 'Maybe');
+    const [tab] = await Promise.all([page.context().waitForEvent('page'), join.click()]);
+    await tab.waitForURL('https://meet.example.test/abc');
+    assert.deepEqual(joins, ['Bearer token']);
+    await page.getByRole('button', { name: 'What did we decide about budgets recently?' }).click();
+    await page.locator('.nt-answer li').waitFor();
+    assert.deepEqual(asked, [{ question: 'What did we decide about budgets recently?' }]);
+    assert.equal(await page.locator('.nt-answer p').first().textContent(), 'Budgets hold for December.');
+    assert.equal(await page.locator('.nt-answer li').textContent(), 'Revisit in January');
+    assert.equal(await page.locator('.nt-answer a').getAttribute('href'), `http://127.0.0.1:${server.address().port}/reel/notetaker#meetings/${note.id}`);
+  } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+});

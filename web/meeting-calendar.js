@@ -77,7 +77,7 @@ function readFragmentRequest() {
   return { url: request.url, title: typeof request.title === "string" ? request.title.slice(0, 180) : "" };
 }
 
-export function mountMeetingCalendar({ container, session, onError, onSelectionChange, calendarResult } = {}) {
+export function mountMeetingCalendar({ container, session, onError, onSelectionChange, calendarResult, compact = false } = {}) {
   if (!container || typeof session !== "function") throw new TypeError("container and session are required");
   const state = { uid: null, config: null, events: [], history: [], cursor: null, firstHistoryCursor: null, loadedHistory: false, due: [], capabilities: null, busy: false, error: "", download: null, browserRequest: null, disposed: false, picker: null };
   let pollTimer = null;
@@ -166,6 +166,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
   function render() {
     if (state.disposed) return;
     const consentKey = JSON.stringify([state.uid, state.config?.enabled, state.config?.scope_revision, state.config?.consent_mode]);
+    const wasOpen = !!container.querySelector("details.mc-recent[open]");
     const savedInputs = [...container.querySelectorAll('input[type="checkbox"]:not([data-calendar-choice]),select')]
       .filter(el => consentKey === state.renderedConsentKey || !["consent", "standing-attest"].includes(el.dataset.field))
       .map(el => ({
@@ -245,13 +246,17 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
 
     const events = [...state.events, ...state.history.filter(item => !state.events.some(event => event.id === item.id))];
     const dueById = new Map((state.due || []).map((event) => [event.id, event]));
-    const rows = [...events];
+    let rows = [...events];
     for (const due of state.due || []) if (!rows.some((event) => event.id === due.id)) rows.push(due);
+    // Compact: this screen holds settings; meetings themselves live on the Meetings page.
+    // Keep only the last two weeks of real recordings, newest first, behind a fold.
+    if (compact) rows = rows.filter((event) => event.status !== "cancelled" && Date.parse(event.start) > Date.now() - 14 * 864e5
+      && Date.parse(event.start) < Date.now()).sort((a, b) => Date.parse(b.start) - Date.parse(a.start));
     if (!rows.length) {
       const emptyText = publicSignup && !connected ? "" : "No calendar meetings to show. Sync to refresh.";
       q("[data-events]").innerHTML = emptyText ? `<p class="mc-empty">${emptyText}</p>` : "";
     }
-    else q("[data-events]").innerHTML = `<h3>Meetings</h3><ul class="mc-list">${rows.map((event) => {
+    else q("[data-events]").innerHTML = `${compact ? `<details class="mc-recent"><summary>Recordings from the last two weeks (${rows.length}): downloads, Notion and recovery</summary>` : "<h3>Meetings</h3>"}<ul class="mc-list">${rows.map((event) => {
       const failed = event.status === "failed";
       const recoveryStatus = failed && Object.hasOwn(RECOVERY_STATUSES, event.recovery_status)
         ? RECOVERY_STATUSES[event.recovery_status] : "";
@@ -274,7 +279,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const detailText = failure || (event.notion_status === "calendar_selection_required" ? event.detail : "");
       const detail = detailText ? `<span class="mc-status">${esc(detailText)}</span>` : "";
       return `<li class="mc-event"><div class="mc-event-copy"><strong>${esc(event.title || "Untitled meeting")}</strong><time>${esc(dateText(event.start))}</time><span class="mc-status mc-status-${esc(event.status || "unknown")}">${esc(statusText(event.status))}</span>${detail}${recoveryStatus ? `<span class="mc-status">${esc(recoveryStatus)}</span>` : ""}<div class="mc-actions">${downloads}${recovery}${notion}${desktopJoin}</div></div>${actionable ? `<div class="mc-event-actions"><label class="mc-check"><input type="checkbox" data-attest="${esc(event.id)}"> I confirm participants agreed to recording</label><button type="button" data-action="approve" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Approve and join</button><button type="button" data-action="decline" data-id="${esc(event.id)}" ${state.busy ? "disabled" : ""}>Decline</button></div>` : ""}</li>`;
-    }).join("")}</ul>${state.cursor ? `<button type="button" data-action="earlier-recordings" ${state.busy ? "disabled" : ""}>Earlier recordings</button>` : ""}`;
+    }).join("")}</ul>${compact ? "</details>" : ""}${state.cursor ? `<button type="button" data-action="earlier-recordings" ${state.busy ? "disabled" : ""}>Earlier recordings</button>` : ""}`;
 
     const browserHost = q("[data-browser]");
     if (state.browserRequest) {
@@ -283,6 +288,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const cloudRequestName = cloudRequest === "google_meet" ? "Google Meet" : "Teams";
       browserHost.innerHTML = desktop && !cloudRequest ? `<div class="mc-browser-card"><strong>Meeting requested by the browser</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${isMac ? "Open this meeting link in Reel to continue." : "Open manual capture in Reel, then choose the meeting from your browser picker."}</p><a href="${isMac ? `reel://meeting-link?url=${encodeURIComponent(state.browserRequest.url)}` : `${esc(WEB_BASE)}/record?mode=meeting`}">${isMac ? "Open in Reel" : "Capture manually"}</a> <button type="button" data-action="browser-dismiss">Dismiss</button></div>` : `<div class="mc-browser-card"><strong>Meeting requested by the browser extension</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${cloudRequest ? "This request must match an eligible meeting in your connected Google Calendar. Reel will not open this link." : "Reel will ask the meeting provider to admit its note taker. This page will not open the meeting link."}</p><label class="mc-check"><input type="checkbox" data-field="browser-attest"> I confirm the participants have agreed to recording this meeting.</label><div class="mc-actions"><button type="button" data-action="browser-join" ${!state.uid || state.busy || !(botAvailable || cloudRequest) ? "disabled" : ""}>${cloudRequest ? `Consent and request ${cloudRequestName} entry` : "Consent and request entry"}</button><button type="button" data-action="browser-dismiss" ${state.busy ? "disabled" : ""}>Dismiss</button></div></div>`;
     } else { browserHost.hidden = true; browserHost.innerHTML = ""; }
+    if (compact && wasOpen) { const fold = q("details.mc-recent"); if (fold) fold.open = true; }
     for (const input of savedInputs) {
       const element = q(input.selector);
       if (!element) continue;
