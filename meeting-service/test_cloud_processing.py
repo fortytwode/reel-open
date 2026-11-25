@@ -209,7 +209,7 @@ def test_attendee_hints_use_execution_snapshot_or_legacy_calendar_context(setup,
         keywords.extend(hints)
         return {'text': 'A clear decision'}
 
-    def summarize(text, title, attendees, *, attendee_names):
+    def summarize(text, title, attendees, *, attendee_names, default_owner=None):
         summary_calls.append((attendees, attendee_names))
         return {'summary': 'The decision', 'has_meeting_content': True}
 
