@@ -296,6 +296,42 @@ class CanonicalProviders:
     def find_notion(self, meeting_id):
         return self.canonical._find_existing_notion_call(meeting_id)
 
+    def one_on_one_route(self, title, attendees):
+        """The teammate's own 1:1 database, using the same rules as the Fireflies flow, or None."""
+        canonical = self.canonical
+        if not canonical._get_active_team_members(raise_on_error=True):
+            raise ProviderPending('Team members could not be read to classify a 1:1')
+        member = canonical._detect_1on1_member(title, attendees)
+        if not member:
+            return None
+        try:
+            _, source_id = canonical._resolve_one_on_one_db(member)
+        except RuntimeError:
+            return None  # No 1:1 database recorded for this person; the private Call database is used.
+        return {'kind': 'one_on_one', 'data_source_id': source_id}
+
+    def one_on_one_filed(self, route, title, started_at):
+        """Whether that 1:1 database already holds a page for this meeting (same title, same day)."""
+        from datetime import timedelta
+        canonical = self.canonical
+        day = datetime.fromisoformat(started_at.replace('Z', '+00:00')).date()
+        body = {'page_size': 25, 'filter': {'and': [
+            {'property': 'Call Date', 'date': {'on_or_after': (day - timedelta(days=1)).isoformat()}},
+            {'property': 'Call Date', 'date': {'on_or_before': (day + timedelta(days=1)).isoformat()}}]}}
+        response = canonical.requests.post(
+            f"{canonical.NOTION_API_BASE}/data_sources/{route['data_source_id']}/query",
+            headers=canonical._notion_headers(canonical.NOTION_MOVE_API_VERSION), json=body,
+            timeout=canonical.NOTION_REQUEST_TIMEOUT_SECONDS)
+        if response.status_code != 200:
+            raise ProviderPending('The 1:1 database could not be read')
+        wanted = ' '.join(title.split()).casefold()
+        for page in response.json().get('results') or []:
+            name = ''.join(part.get('plain_text', '') for part in
+                           ((page.get('properties') or {}).get('Name') or {}).get('title') or [])
+            if ' '.join(name.split()).casefold() == wanted and not page.get('in_trash') and not page.get('archived'):
+                return True
+        return False
+
     def create_notion(self, meeting_id, payload, attendees, transcript):
         outcome = {}
         token = _notion_create_response.set(outcome)
@@ -360,7 +396,11 @@ class CanonicalProviders:
             expected_parent = route['data_source_id']
         current, parent = canonical._read_page_parent_data_source(page_id)
         verify_notion_page_identity(current, page_id, meeting_id)
-        if route['kind'] in ('private', 'one_on_one'):
+        if route['kind'] == 'one_on_one':
+            if not canonical._same_notion_id(parent, expected_parent):
+                # Same move the Fireflies flow uses: native move, then restore the 1:1 page's name and date.
+                canonical.try_one_on_one_sync(payload['title'], attendees, page_id, raise_on_error=True)
+        elif route['kind'] == 'private':
             if not canonical._same_notion_id(parent, expected_parent):
                 canonical._move_page_to_data_source(page_id, expected_parent)
         elif route['kind'] in ('client','sales'):
