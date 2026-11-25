@@ -119,7 +119,7 @@ struct MeetingWorkspaceView: View {
                 if ReelProduct.current == .notetaker {
                     VStack(alignment: .leading, spacing: 0) {
                         Text("Reel").font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(.secondary)
-                        Text("Notetaker").font(.system(size: 19, weight: .semibold, design: .rounded))
+                        Text("Notetaker").font(.system(size: 17, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.7)
                     }
                 } else {
                     Text("Reel").font(.system(size: 25, weight: .semibold, design: .rounded))
@@ -160,7 +160,7 @@ struct MeetingWorkspaceView: View {
             HStack(spacing: 4) {
                 sidebarButton("Settings", symbol: "gearshape", selected: false) {
                     (NSApp.delegate as? AppDelegate)?.showSettings()
-                }
+                }.lineLimit(1).layoutPriority(1)
                 ReelAppearanceMenu()
             }
         }
