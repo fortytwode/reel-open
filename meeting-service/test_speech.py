@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from app import BridgeError, create_app, verify_firebase
-from speech import SpeechError, summarize_text, transcribe_audio
+from speech import SpeechError, _dialogue, _grounded_owner, attendee_context, summarize_text, transcribe_audio
 
 
 def provider_notes(**fields):
@@ -405,8 +405,8 @@ def test_incomplete_or_invalid_dialogue_uses_the_legacy_summary_input(speaker_no
     ('I will send the build if approved.', 'I will send the build', 'Send the build', ''),
     ('I will send the build?', 'I will send the build', 'Send the build', ''),
     ('Bo said I will send the build.', 'I will send the build', 'Send the build', ''),
-    ('I will send the build.', 'I will send the build.', 'Send the build and invite Bo', ''),
-    ('I will send the new build.', 'I will send the new build.', 'Send the build', ''),
+    ('I will send the build.', 'I will send the build.', 'Send the build and invite Bo', 'Ana Skopelja'),
+    ('I will send the new build.', 'I will send the new build.', 'Send the build', 'Ana Skopelja'),
 ])
 def test_first_person_ownership_requires_a_whole_unconditional_commitment(speaker_notes, text, evidence, task, expected):
     owner, _, _ = speaker_notes(text, [speaker_turn(text, 'Ana Skopelja')], evidence=evidence, task=task)
@@ -437,3 +437,16 @@ def test_public_summary_endpoint_rejects_supplied_speaker_context(setup):
     result = client.post('/summary', json={'text': 'Approved.', 'speaker_turns': [speaker_turn('Approved.', 'Ana Skopelja')]},
                          headers={'Authorization': 'Bearer token'})
     assert result.status_code == 400 and not requests
+
+
+@pytest.mark.parametrize(('text', 'expected'), [
+    ("Okay, I will do that in the next couple hours. Um, I'll look into this.", 'Ana Skopelja'),
+    ("I'm going to check the tracking setup.", 'Ana Skopelja'),
+    ("Maybe I will look into this.", ''),
+    ("I won't look into this.", ''),
+    ("Will I look into this?", ''),
+])
+def test_the_speaker_owns_a_commitment_in_their_own_words(text, expected):
+    context = attendee_context(['ana@rocketshiphq.com', 'bo@rocketshiphq.com'], {'ana@rocketshiphq.com': 'Ana Skopelja'})
+    dialogue = _dialogue(text, [speaker_turn(text, 'Ana Skopelja')])
+    assert _grounded_owner('Ana Skopelja', text, text, context, 'Look into the YouTube access blocker', dialogue) == expected
