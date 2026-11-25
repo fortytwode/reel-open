@@ -240,7 +240,11 @@ def _grounded_owner(owner, evidence, text, context, task='', dialogue=()):
             named_commitment = r'(?:^| )' + re.escape(alias) + ' ' + lead + task_phrase
             raw_alias = r'[\W_]+'.join(re.escape(word) for word in alias.split())
             named_directive = r'(?<!\w)' + raw_alias + r'\s*[:,]\s*(?:(?:so\s+)?please\s+)?' + raw_task_phrase
-            if re.search(named_commitment, quoted) or re.search(named_directive, clause.casefold()):
+            # "I would ask Kartik to test …": an explicit request naming the person.
+            named_request = (r'(?:^| )(?:ask|asked|asking|get|getting|have) ' + re.escape(alias)
+                             + r' to (?:(?:already|also|just|please|then) )?' + task_phrase)
+            if (re.search(named_commitment, quoted) or re.search(named_directive, clause.casefold())
+                    or re.search(named_request, quoted)):
                 return label
     if dialogue and _first_person_commitment(excerpt, transcript, dialogue, unique, task):
         return label
