@@ -61,6 +61,26 @@ test('Mission Control calendar stays in the workspace and clears on sign out', a
     assert.equal(await page.locator('#nav-calendar').isVisible(), false);
     assert.equal(await page.locator('#other-product').getAttribute('href'), 'https://example.test/notetaker-meetings');
 
+    // A host that proxies only the library switches to Notetaker in place and keeps its sign-in.
+    const hosted = `http://127.0.0.1:${server.address().port}`;
+    const organization = await (await page.request.get(`${hosted}/organization.json`)).json();
+    await page.route('**/organization.json', route => route.fulfill({ json: { ...organization, notesBaseURL: `${hosted}/reel` } }));
+    await page.goto('about:blank');
+    await page.goto(`${hosted}/reel#meetings`);
+    await page.locator('#nav-meetings[aria-current="page"]').waitFor();
+    assert.equal(new URL(page.url()).pathname, '/reel');
+    assert.equal(await page.title(), 'Meetings · Reel Notetaker');
+    assert.equal(await page.locator('.brand').textContent(), '● Reel Notetaker');
+    assert.equal(await page.locator('#nav-library').isVisible(), false);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), `${hosted}/reel#library`);
+    await page.locator('#other-product').click();
+    await page.locator('#nav-library[aria-current="page"]').waitFor();
+    assert.equal(await page.title(), 'Screen recordings · Reel Recorder');
+    assert.equal(await page.locator('#nav-meetings').isVisible(), false);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), `${hosted}/reel#meetings`);
+    await page.unroute('**/organization.json');
+    await page.goto('about:blank');
+
     await page.goto(`http://127.0.0.1:${server.address().port}/reel/notetaker#calendar`);
     await page.locator('#meeting-calendar-panel .mc-card').waitFor();
     assert.equal(new URL(page.url()).pathname, '/reel/notetaker');
