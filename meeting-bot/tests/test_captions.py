@@ -280,8 +280,12 @@ class BrowserCaptionTests(unittest.IsolatedAsyncioTestCase):
                                 await providers.monitor(page, provider, 60, lambda: False, ffmpeg)
 
                         await page.locator('#status').evaluate("node => node.innerHTML = '<span>Meeting</span> ended'")
-                        self.assertEqual(await providers.monitor(page, provider, 60, lambda: False, ffmpeg),
-                                         'meeting_ended')
+                        # "Meeting ended" on the page while the call controls are
+                        # still present is not the end of the meeting.
+                        stopped = MagicMock(side_effect=(False, True, True))
+                        with patch.object(page, 'wait_for_timeout', AsyncMock()), patch('builtins.print'):
+                            self.assertEqual(await providers.monitor(page, provider, 60, stopped, ffmpeg),
+                                             'execution_stopped')
                         await page.locator('#status').evaluate("node => node.textContent = ''")
                         await page.locator('#consent').evaluate("node => node.textContent = 'Taking notes'")
                         self.assertTrue((await providers.observe(page, provider))['consent_gate'])

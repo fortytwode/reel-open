@@ -297,15 +297,23 @@ async def monitor(page, provider, duration, stopped, ffmpeg, check_media=None, *
     others_seen = False
     alone_since = None
     last_presence_log = started
+    ended_notice_logged = False
     while not stopped() and time.monotonic() - started < duration:
         if ffmpeg.poll() is not None:
             raise RuntimeError('recorder_exited')
         if check_media is not None:
             check_media()
         text = await body_text(page, ignore_captions=True)
-        if ENDED.search(text):
-            return 'meeting_ended'
         state = await observe(page, provider)
+        ended = ENDED.search(text)
+        if ended and not state['in_call']:
+            return 'meeting_ended'
+        if ended and not ended_notice_logged:
+            # Chat messages, other notetakers and toasts can say "call ended"
+            # while the meeting continues. Only the matched phrase is logged.
+            ended_notice_logged = True
+            print(json.dumps({'status': 'ended_notice_ignored', 'detail': 'still_in_call',
+                              'phrase': ' '.join(ended.group(0).lower().split())[:40]}), flush=True)
         if state['blocked'] or state['denied'] or state['consent_gate']:
             raise RuntimeError('meeting_access_lost')
         if state['in_call'] and not state['waiting']:
