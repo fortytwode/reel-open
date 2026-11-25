@@ -210,7 +210,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { 
 
 /* Two products, one shell: each page shows only its own navigation. */
 html[data-product="notetaker"] :is(#nav-library,#nav-recent,#nav-pinned,#nav-archive,#folder-section,.record-options,#library-footnote) { display: none !important; }
-html:not([data-product="notetaker"]) :is(#nav-meetings,#nav-calendar) { display: none !important; }
+html:not([data-product="notetaker"]) :is(#nav-meetings,#nav-calendar,#nav-tasks) { display: none !important; }
 html[data-product="notetaker"] .brand-mark { color: #1f8a70; text-shadow: 0 0 0 #1f8a70; }
 html[data-product="notetaker"] #nav-calendar { margin-left: 0; min-height: 0; color: inherit; font-size: inherit; }
 .other-product { display: block; margin: 0 0 8px; padding: 0 9px; color: #7b818a; font-size: 11px; text-decoration: none; }
@@ -321,3 +321,5 @@ html[data-product="notetaker"][data-note] :is(.heading-row,.toolbar) { display: 
 .nt-checklist label { flex: 1; min-width: 0; }
 .nt-actions .nt-filter { max-width: 170px; }
 html[data-product="notetaker"] #meeting-calendar-panel .mc-events { max-height: 520px; overflow-y: auto; border-top: 1px solid #eef0f2; }
+.nt-tasklist { margin: 4px 10px 6px; }
+.nt-day .nt-link { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 650; }
