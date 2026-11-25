@@ -220,3 +220,82 @@ html[data-product="notetaker"] #nav-calendar { margin-left: 0; min-height: 0; co
 html[data-product="notetaker"] :is(.workspace,.personal-library) { display: none !important; }
 html[data-product="notetaker"] .library-label { margin-top: 18px; }
 @media(max-width:620px) { .other-product { display: none; } }
+
+/* ---- Reel Notetaker: a reading surface, not a media grid ---- */
+html[data-product="notetaker"] :is(.toolbar .tabs,.sort-label,#meeting-description,.breadcrumb) { display: none !important; }
+html[data-product="notetaker"] .toolbar { justify-content: flex-end; border-bottom: 0; min-height: 0; margin: 6px 0 4px; }
+html[data-product="notetaker"] #meeting-actions .button { font-size: 12px; }
+html[data-product="notetaker"] .page-content { max-width: 980px; }
+.recordings.nt-home { display: block; }
+.nt-section { margin: 0 0 30px; }
+.nt-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 6px; }
+.nt-section-head h2 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; color: #20242b; }
+.nt-link { color: #1f7a66; font-size: 12px; text-decoration: none; }
+.nt-link:hover { text-decoration: underline; }
+.nt-day { margin: 16px 0 4px; padding: 0 10px; color: #8a9099; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.nt-row { display: grid; grid-template-columns: 118px minmax(0,1fr) auto auto auto; align-items: center; gap: 14px; padding: 10px; border-radius: 9px; color: #252a31; text-decoration: none; }
+.nt-row.nt-past { grid-template-columns: 70px minmax(0,1fr) auto auto auto; }
+.nt-row:hover { background: #f4f6f5; }
+.nt-row + .nt-row { box-shadow: 0 -1px 0 #f0f1f3; }
+.nt-row:hover, .nt-row:hover + .nt-row { box-shadow: none; }
+.nt-time { color: #6f7680; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.nt-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.nt-main strong { overflow: hidden; font-size: 13.5px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.nt-preview { overflow: hidden; color: #7b818a; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.nt-length { color: #8a9099; font-size: 11.5px; white-space: nowrap; }
+.nt-people { display: flex; }
+.nt-avatar { display: grid; place-items: center; width: 24px; height: 24px; margin-left: -6px; border: 2px solid #fff; border-radius: 50%; background: #e3efeb; color: #1f6b5a; font-size: 9.5px; font-weight: 700; }
+.nt-avatar:first-child { margin-left: 0; }
+.nt-avatar.nt-more { background: #eef0f2; color: #6f7680; }
+.nt-chip { padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.nt-chip-on { background: #e3f3ee; color: #17705c; }
+.nt-chip-live { background: #fde8e6; color: #b3362d; }
+.nt-chip-off { background: #f0f1f3; color: #6f7680; }
+.nt-live { background: #fff8f7; }
+.nt-more-button { margin: 8px 10px 0; font-size: 12px; }
+.nt-empty { margin: 10px; color: #7b818a; font-size: 13px; }
+.nt-note { max-width: 760px; }
+.nt-note-head h2 { margin: 14px 0 6px; font-size: 26px; font-weight: 720; letter-spacing: -.02em; line-height: 1.2; overflow-wrap: anywhere; }
+.nt-meta { margin: 0 0 12px; color: #6f7680; font-size: 13px; }
+.nt-attendees { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; }
+.nt-person { padding: 3px 10px; border: 1px solid #e3e6e9; border-radius: 999px; color: #485059; font-size: 12px; }
+.nt-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+.nt-actions :is(button,.button) { font-size: 12px; }
+.nt-tabbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 20px; border-bottom: 1px solid #e8eaed; }
+.nt-tabs { display: flex; gap: 22px; }
+.nt-find { width: 190px; max-width: 45%; padding: 5px 9px; border: 1px solid #e3e6e9; border-radius: 7px; font: inherit; font-size: 12px; }
+.nt-tab { padding: 9px 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: #6f7680; font-size: 13px; font-weight: 600; cursor: pointer; }
+.nt-tab.active { border-color: #1f8a70; color: #20242b; }
+.nt-panel { font-size: 15px; line-height: 1.65; color: #2b3038; }
+.nt-panel h3 { margin: 24px 0 6px; font-size: 15px; font-weight: 700; }
+.nt-panel h3:first-child { margin-top: 0; }
+.nt-panel p { margin: 0 0 10px; }
+.nt-points { margin: 0 0 10px; padding-left: 20px; }
+.nt-points li { margin: 0 0 8px; }
+.nt-todo { margin: 0; padding: 0; list-style: none; }
+.nt-todo li { position: relative; margin: 0 0 8px; padding-left: 26px; }
+.nt-todo li::before { content: ""; position: absolute; left: 2px; top: .32em; width: 14px; height: 14px; border: 1.5px solid #b7bec6; border-radius: 4px; }
+.nt-turn { margin: 0 0 18px; }
+.nt-turn-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 3px; font-size: 13px; }
+.nt-stamp { color: #9aa0a8; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.nt-turn p { margin: 0 0 6px; }
+.nt-plain { white-space: pre-wrap; }
+@media(max-width:720px) {
+  .nt-row, .nt-row.nt-past { grid-template-columns: minmax(0,1fr) auto; row-gap: 4px; }
+  .nt-time { grid-column: 1 / -1; }
+  .nt-people, .nt-length { display: none; }
+}
+html[data-product="notetaker"][data-note] :is(.heading-row,.toolbar) { display: none !important; }
+.nt-timed { display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 10px; margin: 0 0 12px; }
+.nt-timed .nt-stamp { padding-top: .35em; }
+.nt-now, .nt-soon { margin: 0 8px 0 0; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
+.nt-now { background: #d8382c; color: #fff; }
+.nt-soon { margin: 0 0 0 8px; background: #fff3d6; color: #8a5a00; }
+.nt-filters { display: flex; gap: 8px; }
+.nt-filter { max-width: 150px; padding: 4px 6px; border: 1px solid #e3e6e9; border-radius: 7px; background: #fff; color: #485059; font: inherit; font-size: 12px; }
+.nt-shared { margin: -8px 0 16px; color: #7b818a; font-size: 12px; }
+.nt-read { margin: 0 0 14px !important; color: #8a9099; font-size: 12px; }
+.nt-checklist { margin: 0; padding: 0; list-style: none; }
+.nt-checklist li { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 10px; }
+.nt-checklist input { width: 16px; height: 16px; margin-top: .3em; accent-color: #1f8a70; }
+.nt-checklist li.done label { color: #9aa0a8; text-decoration: line-through; }
