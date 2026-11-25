@@ -54,8 +54,10 @@ class AssistantUnitTests(unittest.TestCase):
 
     def test_answers_cite_only_meetings_that_were_supplied(self):
         notes = [{'id': MEETING, 'title': 'Peak weekly', 'started_at': '2026-11-25', 'summary': 'Budgets hold', 'transcript_text': 'pricing talk'}]
-        result = assistant.answer_question('What about pricing?', notes,
-                                           transport=openai({'answer': 'Budgets hold.', 'citations': [MEETING, OTHER, MEETING]}))
+        seen = []
+        result = assistant.answer_question('What about pricing?', notes, asked_by='ana@rocketshiphq.com',
+                                           transport=openai({'answer': 'Budgets hold.', 'citations': [MEETING, OTHER, MEETING]}, seen))
+        self.assertEqual(json.loads(seen[0]['input'])['asked_by'], 'ana@rocketshiphq.com')
         self.assertEqual(result, {'answer': 'Budgets hold.', 'citations': [MEETING]})
 
     def test_context_prefers_meetings_that_mention_the_question(self):
@@ -93,12 +95,14 @@ class AssistantRouteTests(WorkspaceTests):
 
     def test_questions_only_see_meetings_the_asker_can_read(self):
         captured = {}
-        def answer(question, notes, transport=None):
+        def answer(question, notes, transport=None, asked_by=''):
+            captured['asker'] = asked_by
             captured['ids'] = [n['id'] for n in notes]
             return {'answer': 'Budgets hold.', 'citations': [n['id'] for n in notes]}
         with patch('assistant.answer_question', side_effect=answer):
             status, data = self.call('owner', 'POST', 'ask', {'question': 'What happened to budgets?'})
             self.assertEqual((status, captured['ids']), (200, [MEETING]))
+            self.assertEqual(captured['asker'], 'owner@rocketshiphq.com')
             self.assertEqual([c['id'] for c in data['citations']], [MEETING])
             status, data = self.call('ana', 'POST', 'ask', {'question': 'What happened to budgets?'})
             self.assertEqual(sorted(captured['ids']), sorted([MEETING, OTHER]))
