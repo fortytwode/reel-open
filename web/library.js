@@ -772,7 +772,7 @@ try {
     el("result-count").textContent = allowed ? "Loading…" : ""; el("search").value = "";
     el("sign-in").hidden = !!candidate; el("sign-out").hidden = !candidate; el("refresh").hidden = !allowed; el("refresh").disabled = false;
     el("search").disabled = !allowed; el("sort").disabled = !allowed; el("account").textContent = user?.email || "";
-    if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else loadParticipantMeetings(); if (isCalendar()) updateView(); }
+    if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else { loadParticipantMeetings(); if (isMeetings()) loadUpcoming(); } if (isCalendar()) updateView(); }
     else render();
   });
 } catch (e) {
