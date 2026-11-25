@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from flask import jsonify, redirect, request
 
-from calendar_meetings import (same_account, org_placeholder_uid, DISPATCH_LEAD_SECONDS, ENTRY_LEAD_SECONDS, CalendarMeetingError, CalendarMeetings,
+from calendar_meetings import (same_account, org_placeholder_uid, _kept_uid, DISPATCH_LEAD_SECONDS, ENTRY_LEAD_SECONDS, CalendarMeetingError, CalendarMeetings,
                                CalendarProviderError, CalendarSelectionChanged, GoogleCalendarFactory,
                                canonical_join_url, cloud_capture_enabled, cloud_requires_calendar,
                                effective_cloud_providers)
@@ -454,59 +454,79 @@ def org_auto_enroll_domain():
     return domain if domain and wanted == domain and not public_account_access() else ""
 
 
-def enroll_organization(store, calendar_factory=None, now=None):
+def enroll_organization(store, calendar_factory=None, now=None, budget_seconds=20):
     """Switch the bot on for every colleague who hasn't set it up and hasn't switched it off.
 
     Colleagues come from the company directory (when that permission is granted),
     MEETING_ORG_ENROLL_EMAILS, and company addresses invited to meetings already
     on enrolled calendars. Someone who switched the bot off keeps their setting.
-    Notes still go only to the people invited to each meeting."""
+    Notes still go only to the people invited to each meeting. Bounded in time,
+    because it runs inside the per-minute calendar sync.
+    """
     from reel_organization import is_internal_email
     domain = org_auto_enroll_domain()
     if not domain:
         return []
+    started = time.monotonic()
+    remaining = lambda: budget_seconds - (time.monotonic() - started)
     now = now or datetime.now(UTC)
     marker, marker_generation = store.load("org-enrollment/last", timeout=2)
-    last = (marker or {}).get("at")
+    marker = marker or {}
+    last = marker.get("at")
     if last and now - datetime.fromisoformat(last) < ORG_ENROLL_INTERVAL:
         return []
-    store.cas("org-enrollment/last", {"at": now.isoformat()}, marker_generation, timeout=2)
+    # Addresses that weren't reachable (groups, people who left) are retried daily, not hourly.
+    unreachable = {email: at for email, at in (marker.get("unreachable") or {}).items()
+                   if now - datetime.fromisoformat(at) < timedelta(days=1)}
     factory = calendar_factory or GoogleCalendarFactory()
     candidates = {e.strip().lower() for e in os.getenv("MEETING_ORG_ENROLL_EMAILS", "").split(",") if e.strip()}
     admin = os.getenv("MEETING_DIRECTORY_ADMIN", "").strip().lower()
     if admin and hasattr(factory, "directory_emails"):
         candidates |= factory.directory_emails(domain, admin)
     prefix = store.prefix + "/calendar/" if store.prefix else "calendar/"
-    known = {}
-    for blob in store.bucket.list_blobs(prefix=prefix, timeout=10):
+    configured, finished = set(), True
+    for blob in store.bucket.list_blobs(prefix=prefix, timeout=5, retry=None):
+        if remaining() <= 5:
+            finished = False
+            break
         key = blob.name[len(store.prefix) + 1:] if store.prefix else blob.name
-        key = key.removesuffix(".json")
-        state, _ = store.load(key)
-        known[key] = state or {}
+        try:
+            state, _ = store.load(key.removesuffix(".json"), timeout=2)
+        except Exception:
+            continue
+        if (state or {}).get("config"):
+            configured.add(key.removesuffix(".json"))
         for event in (state or {}).get("events", {}).values():
             candidates |= {str(a).lower() for a in event.get("attendees", []) if isinstance(a, str)}
     enrolled = []
-    for email in sorted(e for e in candidates if is_internal_email(e)):
+    for email in sorted(e for e in candidates if is_internal_email(e)) if finished else ():
         key = "calendar/" + digest(email)
-        if (known.get(key) or {}).get("config"):
-            continue  # already set up, or switched off by its owner
+        if key in configured or email in unreachable:
+            continue  # already set up, switched off by its owner, or recently unreachable
+        if remaining() <= 0:
+            finished = False
+            break
         if not (hasattr(factory, "reachable") and factory.reachable(email)):
+            unreachable[email] = now.isoformat()
             continue
-        state, generation = store.load(key)
-        state = state or {"config": None, "events": {}}
-        if state.get("config"):
-            continue
-        uid = (state.get("identity") or {}).get("owner_uid") or org_placeholder_uid(email)
-        state["config"] = {"enabled": True, "calendar_ids": [email], "owner_uid": uid, "consent_mode": "approved",
-                           "consent_basis": "organization", "scope_revision": uuid.uuid4().hex,
-                           "enrolled_at": now.isoformat()}
-        state["identity"] = {"owner_email": email, "owner_uid": uid}
-        state.setdefault("events", {})
         try:
-            store.cas(key, state, generation)
+            state, generation = store.load(key, timeout=2)
+            state = state or {"config": None, "events": {}}
+            if state.get("config"):
+                continue
+            uid = (state.get("identity") or {}).get("owner_uid") or org_placeholder_uid(email)
+            state["config"] = {"enabled": True, "calendar_ids": ["primary"], "owner_uid": uid, "consent_mode": "approved",
+                               "consent_basis": "organization", "scope_revision": uuid.uuid4().hex,
+                               "enrolled_at": now.isoformat()}
+            state["identity"] = {"owner_email": email, "owner_uid": uid}
+            state.setdefault("events", {})
+            store.cas(key, state, generation, timeout=2)
             enrolled.append(email)
         except Exception:
             continue
+    # An unfinished pass resumes next minute; a finished one waits an hour.
+    store.cas("org-enrollment/last", {"at": now.isoformat() if finished else (now - ORG_ENROLL_INTERVAL).isoformat(),
+                                      "unreachable": unreachable}, marker_generation, timeout=2)
     return enrolled
 
 
@@ -1106,7 +1126,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                 if (previous.get("join_url") == link[0]
                         and previous.get("status") not in {"completed", "failed", "cancelled"}):
                     return False, previous
-            state["identity"] = {"owner_email": owner, "owner_uid": claims["sub"]}
+            state["identity"] = {"owner_email": owner, "owner_uid": _kept_uid(state, claims)}
             state["events"][event_id] = event
             return True, event
         current = core._mutate(owner, reserve)

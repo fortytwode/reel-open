@@ -195,7 +195,11 @@ def normalize_event(calendar_id, event, owner_email, now=None):
     organizer = event.get("organizer", {})
     # Only the organiser or an invited person. Someone who merely created the event for another
     # person (an assistant) is not on the call and must not get its recording or notes.
-    if not (str(organizer.get("email", "")).lower() == owner or owner_attendee is not None):
+    # The organiser or an invited person. A creator counts only on a selected shared calendar that is
+    # itself the organiser; someone who merely created an event for another person is not on the call.
+    creator = (str(event.get("creator", {}).get("email", "")).lower() == owner and calendar_id not in ("primary", owner)
+               and str(organizer.get("email", "")).lower() == str(calendar_id).lower())
+    if not (str(organizer.get("email", "")).lower() == owner or owner_attendee is not None or creator):
         return None
     if owner_attendee and owner_attendee.get("responseStatus") == "declined":
         return None

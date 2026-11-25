@@ -15,7 +15,7 @@ class Bucket:
     def __init__(self, store):
         self.store = store
 
-    def list_blobs(self, prefix, **_):
+    def list_blobs(self, prefix, **_):  # noqa: D401
         return [Blob(f"p/{k}.json") for k in sorted(self.store.data) if f"p/{k}".startswith(prefix)]
 
 
@@ -73,7 +73,7 @@ def test_everyone_in_the_company_is_enrolled_once_and_opt_outs_are_kept(org, mon
     enrolled = calendar_runtime.enroll_organization(store, factory)
     assert enrolled == ["ana@rocketshiphq.com", "kartik@rocketshiphq.com", "new@rocketshiphq.com"]
     ana = store.data[key("ana@rocketshiphq.com")]["config"]
-    assert ana["enabled"] and ana["consent_mode"] == "approved" and ana["calendar_ids"] == ["ana@rocketshiphq.com"]
+    assert ana["enabled"] and ana["consent_mode"] == "approved" and ana["calendar_ids"] == ["primary"]
     assert ana["owner_uid"] == org_placeholder_uid("ana@rocketshiphq.com")
     assert store.data[key("kartik@rocketshiphq.com")]["config"]["owner_uid"] == "real-k"
     assert store.data[key("bo@rocketshiphq.com")]["config"]["enabled"] is False  # switched off stays off
@@ -99,3 +99,14 @@ def test_only_the_verified_company_address_can_use_an_enrolled_id(org):
     with pytest.raises(CalendarMeetingError):
         CalendarMeetings._verify_binding({"identity": {"owner_uid": uid}},
                                          {"sub": "firebase-bo", "email": "bo@rocketshiphq.com", "email_verified": True})
+
+
+
+def test_unreachable_addresses_wait_a_day_and_a_slow_pass_resumes(org):
+    store = Store()
+    store.data[key("shamanth@rocketshiphq.com")] = {"config": {"enabled": True}, "events": {"e": {"attendees": ["team@rocketshiphq.com", "ana@rocketshiphq.com"]}}}
+    store.gen[key("shamanth@rocketshiphq.com")] = 1
+    factory = Factory(reachable={"ana@rocketshiphq.com"})
+    assert calendar_runtime.enroll_organization(store, factory, budget_seconds=0) == []  # out of time: nothing done
+    assert calendar_runtime.enroll_organization(store, factory) == ["ana@rocketshiphq.com"]  # resumed next run
+    assert "team@rocketshiphq.com" in store.data["org-enrollment/last"]["unreachable"]

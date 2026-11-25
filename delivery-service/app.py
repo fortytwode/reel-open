@@ -1613,7 +1613,9 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                     state = save(notes_url=notes_url)
                 elif state.get('notes_published'):
                     raise ProviderPending('Canonical meeting note is unavailable')
-            file_in_notion = notion_filing_allowed(owner, recipients) or bool(state.get('notion'))
+            if 'notion_filing' not in state:
+                state = save(notion_filing=notion_filing_allowed(owner, recipients) or bool(state.get('notion')))
+            file_in_notion = state['notion_filing'] is not False
             page = state.get('notion') if file_in_notion else {'page_id': '', 'url': ''}
             if not page:
                 if state.get('notion_create_uncertain') is False and state.get('notion_retry_after', 0) > clock():
@@ -1664,7 +1666,7 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 route = {'kind': 'reel'}
                 state = save(route=route, route_verified=True)
             people = [email for email in attendees if not email.endswith('@resource.calendar.google.com')]
-            if len(people) == 2 and all(is_internal_email(email) for email in people):
+            if file_in_notion and len(people) == 2 and all(is_internal_email(email) for email in people):
                 if not route or route.get('kind') != 'private':
                     route = {'kind':'private'}
                     state = save(route=route, route_verified=False, route_retry_after=0)
@@ -1675,7 +1677,7 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 if route is None:
                     route = providers.choose_route(title, attendees, payload['calendar'] is None)
                 state = save(route=route)
-            if not state.get('route_verified'):
+            if file_in_notion and not state.get('route_verified'):
                 if state.get('route_retry_after', 0) > clock():
                     raise Conflict('Notion routing is still settling; retry shortly')
                 save(route_retry_after=clock() + 60)
