@@ -1,5 +1,5 @@
 import * as firebase from "./reel/firebase.js?v=20261121-public-signup";
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261123-workspace1";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261125-complete1";
 import * as org from "./organization.js?v=20261121-public-signup";
 import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261105-parity2";
 
@@ -32,6 +32,8 @@ let calendar = null;
 let upcomingEvents = [], upcomingLoading = false, upcomingLoaded = false, upcomingLoadNumber = 0, showAllUpcoming = false, noteTab = "Summary";
 let pastRange = "any", pastPerson = "", noteSearch = "", pastSource = "all", pastFolder = "", noteFolders = [], namingFolder = false, renamingFolder = false;
 let editingSummary = false, sharingOpen = false, workspaceBusy = false, taskFilter = "open";
+let transcriptHits = new Map(), transcriptQuery = "", transcriptTimer = null, askState = { question: "", answer: null, citations: [], busy: false, error: "", scope: null };
+let rewriteBusy = false, invitationNote = "";
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
 const validUser = (u) => !!u;
@@ -189,7 +191,7 @@ function updateView() {
   document.querySelector(".search").hidden = calendarView;
   if (!calendarView && calendar) { calendar.dispose(); calendar = null; }
   if (calendarView && validUser(currentUser) && !calendar) {
-    calendar = mountMeetingCalendar({ container: el("meeting-calendar-panel"), session: async () => {
+    calendar = mountMeetingCalendar({ container: el("meeting-calendar-panel"), compact: notetaker, session: async () => {
       const user = currentUser, generation = accountNumber, snapshot = sessionSnapshot(user);
       return snapshot && { ...snapshot, isCurrent: () => currentUser?.uid === snapshot.uid && accountNumber === generation && auth.currentUser?.uid === snapshot.uid };
     }});
@@ -440,11 +442,24 @@ const captureStates = {
   requesting_entry: ["Asking to join", "nt-chip-live"], awaiting_admission: ["Waiting to be let in", "nt-chip-live"],
   cancelled: ["Not recording", "nt-chip-off"], declined: ["Not recording", "nt-chip-off"], failed: ["Not recorded", "nt-chip-off"],
 };
+async function joinMeeting(event, button) {
+  // Open the tab inside the click so it is not treated as a popup, then point it at the meeting.
+  const tab = window.open("", "_blank");
+  const label = button.textContent; button.disabled = true; button.textContent = "Opening…";
+  try {
+    const token = await currentUser.getIdToken();
+    const response = await fetch(`${organization.meetingServiceURL}/calendar/meetings/${encodeURIComponent(event.id)}/join`, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+    const data = await response.json().catch(() => null);
+    const url = data && typeof data.url === "string" && /^https:\/\//.test(data.url) ? data.url : null;
+    if (!response.ok || !url) throw new Error(data?.error || "This meeting has no link to join.");
+    if (tab) { tab.opener = null; tab.location.href = url; } else location.href = url;
+  } catch (error) { tab?.close(); message(error.message || "Couldn't open the meeting.", true); }
+  finally { button.disabled = false; button.textContent = label; }
+}
 function eventRow(event, now, conflicts = new Set()) {
   const start = new Date(event.start), end = new Date(event.end);
   const live = start <= now && end > now, minutes = Math.round((start - now) / 60000);
-  const row = node("a", "nt-row nt-upcoming" + (live ? " nt-live" : ""));
-  row.href = libraryURL("calendar");
+  const row = node("div", "nt-row nt-upcoming" + (live ? " nt-live" : ""));
   row.append(node("span", "nt-time", `${timeOf(start)} – ${timeOf(end)}`));
   const main = node("span", "nt-main"); const title = node("strong", "", event.title);
   if (live) title.prepend(node("span", "nt-now", "Now"));
@@ -453,7 +468,13 @@ function eventRow(event, now, conflicts = new Set()) {
   if (event.response === "tentative") title.append(node("span", "nt-soon nt-maybe", "Maybe"));
   main.append(title);
   const [label, tone] = captureStates[event.status] || [event.status, "nt-chip-off"];
-  row.append(main, peopleChips(event.attendees), node("span", `nt-chip ${tone}`, label));
+  const side = node("span", "nt-row-actions");
+  side.append(node("span", `nt-chip ${tone}`, label));
+  if (/^[0-9a-f]{64}$/.test(String(event.id)) && end > now && minutes <= 15 && !["cancelled", "declined", "failed"].includes(event.status)) {
+    const join = node("button", "nt-join", "Join"); join.type = "button"; join.title = "Open the meeting in a new tab";
+    join.addEventListener("click", () => joinMeeting(event, join)); side.append(join);
+  }
+  row.append(main, peopleChips(event.attendees), side);
   return row;
 }
 function filterControl(label, value, options, change) {
@@ -468,10 +489,13 @@ function renderMeetings() {
   if (selectedNote()) return renderNote();
   list.classList.add("nt-home");
   if (isTasks()) return renderTasks();
+  list.append(askPanel(null));
   const ownIDs = new Set(participantMeetings.flatMap((m) => Array.isArray(m.local_recording_ids) ? m.local_recording_ids : []));
   const combined = [...participantMeetings, ...meetings.filter((m) => !ownIDs.has(m.id))];
   const term = el("search").value.trim().toLocaleLowerCase();
-  const matches = (m) => !term || [m.title, m.summary, ...(Array.isArray(m.attendees) ? m.attendees : [])].some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(term));
+  if (term.length >= 3 && term !== transcriptQuery) queueTranscriptSearch(term);
+  if (term.length < 3) { transcriptQuery = ""; transcriptHits = new Map(); }
+  const matches = (m) => !term || transcriptHits.has(m.id) || [m.title, m.summary, ...(Array.isArray(m.attendees) ? m.attendees : [])].some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(term));
   const since = pastRange === "today" ? new Date().setHours(0, 0, 0, 0) : pastRange === "7" ? Date.now() - 7 * 864e5 : pastRange === "30" ? Date.now() - 30 * 864e5 : 0;
   const withPerson = (m) => (!pastPerson || (Array.isArray(m.attendees) && m.attendees.includes(pastPerson)))
     && (pastSource === "all" || (pastSource === "shared") === !!m.shared_with_me) && (!pastFolder || m.folder_id === pastFolder);
@@ -561,7 +585,8 @@ function renderMeetings() {
     row.href = m.participantNote ? libraryURL(`meetings/${m.id}`) : m.recording_source === "mac" ? "reel-notetaker://home" : organization.webBase + "/record?mode=meeting";
     row.append(node("span", "nt-time", Number.isNaN(started.getTime()) ? "" : timeOf(started)));
     const main = node("span", "nt-main"); main.append(node("strong", "", m.title));
-    const preview = m.participantNote ? summaryPreview(m.summary) : "Recorded on this Mac. Open Reel Notetaker to read it.";
+    const hit = term && transcriptHits.get(m.id);
+    const preview = hit ? `Transcript: ${hit}` : m.participantNote ? summaryPreview(m.summary) : "Recorded on this Mac. Open Reel Notetaker to read it.";
     if (preview) main.append(node("span", "nt-preview", preview));
     const ready = m.participantNote && String(m.summary || "").trim();
     if (m.participantNote && !ready) main.append(node("span", "nt-preview", "No summary yet"));
@@ -620,6 +645,9 @@ function noteMarkdown(blocks, people, meta, transcriptText) {
   return lines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 // One list of action items across every meeting, open ones first by meeting date.
+const TEMPLATE_NAMES = { standard: "Standard", client: "Client call", internal: "Team sync", one_on_one: "1:1", sales: "Sales call", brief: "Short" };
+const LANGUAGE_NAMES = { "": "Meeting language", en: "English", es: "Spanish", fr: "French", de: "German", pt: "Portuguese", it: "Italian", nl: "Dutch",
+  hi: "Hindi", ja: "Japanese", zh: "Chinese", ko: "Korean", ru: "Russian", tr: "Turkish", ar: "Arabic", id: "Indonesian" };
 function renderTasks() {
   const list = el("recordings");
   el("result-count").textContent = participantLoading ? "Loading…" : "";
@@ -660,6 +688,69 @@ function renderTasks() {
   if (!shown && !participantLoading) section.append(node("p", "nt-empty", term ? "No action items match your search." : taskFilter === "open" ? "Nothing open. Every action item from your meetings is ticked off." : "No action items yet."));
   head.querySelector("h2").textContent = `Action items across your meetings${open ? ` (${open} open)` : ""}`;
   list.append(section); message(participantError || "", !!participantError);
+}
+function queueTranscriptSearch(term) {
+  clearTimeout(transcriptTimer);
+  transcriptTimer = setTimeout(async () => {
+    if (!validUser(currentUser)) return;
+    try {
+      const token = await currentUser.getIdToken();
+      const response = await fetch(`${organization.deliveryServiceURL}/delivery/search?q=${encodeURIComponent(term)}`, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      const data = response.ok ? await response.json() : null;
+      if (el("search").value.trim().toLocaleLowerCase() !== term) return;
+      transcriptQuery = term;
+      transcriptHits = new Map((data?.results || []).filter((r) => r && typeof r.id === "string").map((r) => [r.id, String(r.snippet || "")]));
+      render();
+    } catch { /* title and summary matching still works */ }
+  }, 350);
+}
+const ASK_PROMPTS = {
+  home: ["What are my open action items from this week?", "What did we decide about budgets recently?", "Summarise this week's client calls"],
+  note: ["Write a follow-up email to the attendees", "What were the main disagreements?", "Suggest questions for the next meeting"],
+};
+function askPanel(meetingId) {
+  const panel = node("section", "nt-ask"); panel.setAttribute("aria-label", "Ask about your meetings");
+  const form = node("form", "nt-ask-form"), input = node("input"), go = node("button", "", askState.busy ? "Thinking…" : "Ask");
+  input.id = meetingId ? "ask-note" : "ask-home"; input.type = "text"; input.maxLength = 1000;
+  input.placeholder = meetingId ? "Ask about this meeting" : "Ask about your meetings, e.g. what did Peak decide on budgets?";
+  input.setAttribute("aria-label", input.placeholder); go.type = "submit"; go.disabled = askState.busy;
+  if (askState.scope === meetingId) input.value = askState.question;
+  const ask = async (question) => {
+    question = question.trim(); if (!question || askState.busy) return;
+    askState = { question, answer: null, citations: [], busy: true, error: "", scope: meetingId }; render();
+    const data = await deliveryPost("/delivery/ask", meetingId ? { question, meeting_id: meetingId } : { question });
+    askState = { ...askState, busy: false, answer: data?.answer || null, citations: Array.isArray(data?.citations) ? data.citations : [],
+      error: data ? "" : "Couldn't get an answer. Try again." };
+    render();
+  };
+  form.addEventListener("submit", (event) => { event.preventDefault(); ask(input.value); });
+  form.append(input, go); panel.append(form);
+  if (askState.scope === meetingId && (askState.answer || askState.error || askState.busy)) {
+    const answer = node("div", "nt-answer");
+    if (askState.busy) answer.append(node("p", "nt-read", "Reading your meetings…"));
+    else if (askState.error) answer.append(node("p", "nt-empty", askState.error));
+    else {
+      for (const line of askState.answer.split("\n")) if (line.trim()) answer.append(node(/^\s*[-•]\s/.test(line) ? "li" : "p", "", line.replace(/^\s*[-•]\s/, "")));
+      if (askState.citations.length) {
+        const sources = node("p", "nt-read", "From: ");
+        askState.citations.forEach((cite, index) => {
+          const link = node("a", "nt-link", cite.title || "a meeting"); link.href = libraryURL(`meetings/${cite.id}`);
+          if (index) sources.append(", "); sources.append(link);
+        });
+        answer.append(sources);
+      }
+      const copy = node("button", "nt-text-button", "Copy answer"); copy.type = "button";
+      copy.addEventListener("click", () => copyText(copy, askState.answer)); answer.append(copy);
+    }
+    panel.append(answer);
+  } else {
+    const prompts = node("div", "nt-prompts");
+    for (const prompt of ASK_PROMPTS[meetingId ? "note" : "home"]) {
+      const chip = node("button", "nt-prompt", prompt); chip.type = "button"; chip.addEventListener("click", () => ask(prompt)); prompts.append(chip);
+    }
+    panel.append(prompts);
+  }
+  return panel;
 }
 async function deliveryPost(path, body) {
   if (!validUser(currentUser) || workspaceBusy) return null;
@@ -741,19 +832,31 @@ function renderNote() {
     for (const person of invited) {
       const item = node("li"), remove = node("button", "secondary", "Remove"); remove.type = "button";
       remove.addEventListener("click", () => noteChange("share", { remove: [person] }));
-      item.append(node("span", "", person), node("span", "nt-role", "Invited"), remove); peopleList.append(item);
+      const role = filterControl(`Access for ${person}`, ws.roles?.[person] === "viewer" ? "viewer" : "editor",
+        [["editor", "Can edit"], ["viewer", "Can view"]], (value) => noteChange("share", { roles: { [person]: value } }));
+      item.append(node("span", "", person), role, remove); peopleList.append(item);
     }
     const form = node("form", "nt-inline-form"), input = node("input"), invite = node("button", "", "Invite");
     input.type = "email"; input.id = "share-email"; input.required = true; input.placeholder = `name@${organization.allowedEmailDomain || "company.com"}`; input.setAttribute("aria-label", "Email to invite");
     invite.type = "submit";
-    form.addEventListener("submit", (event) => { event.preventDefault(); noteChange("share", { add: [input.value.trim()] }); });
-    form.append(input, invite);
+    const newRole = filterControl("Access for the person invited", "editor", [["editor", "Can edit"], ["viewer", "Can view"]], () => {});
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = await deliveryPost(`/delivery/meetings/${note.id}/share`, { add: [input.value.trim()], role: newRole.value });
+      if (data?.meeting) {
+        const sent = data.invitations?.emailed || [], failed = data.invitations?.failed || [];
+        invitationNote = sent.length ? `Invited and emailed ${sent.join(", ")}.` : failed.length ? `Invited ${failed.join(", ")}, but the email didn't send. Share the link with them directly.` : "Already has access.";
+        note = data.meeting; render();
+      }
+    });
+    form.append(input, newRole, invite);
     const visibility = node("label", "nt-visibility", "Who can open the link ");
     visibility.append(filterControl("Who can open the link", ws.link_access === "organization" ? "organization" : "invited",
       [["invited", "Only people invited"], ["organization", `Anyone at ${organization.allowedEmailDomain || "your company"} with the link`]],
       (value) => noteChange("share", { link_access: value })));
     sharing.append(peopleList, form, visibility,
-      node("p", "nt-read", "People you invite can read the summary and transcript and tick off action items. Link viewers see the summary only. Notes are never shared outside your company."));
+      ...(invitationNote ? [node("p", "nt-banner", invitationNote)] : []),
+      node("p", "nt-read", "People you invite get an email with a link. Can edit: tick action items and edit the summary. Can view: read only. Link viewers see the summary only. Notes are never shared outside your company."));
   }
 
   const bar = node("div", "nt-tabbar");
@@ -774,13 +877,29 @@ function renderNote() {
   } else {
     const words = summaryText.split(/\s+/).filter(Boolean).length;
     const info = node("p", "nt-read", words ? `${Math.max(1, Math.round(words / 200))} min read` : "");
-    if (edited) info.append(` · Edited by ${personName(edited.by)}`);
+    if (edited && !edited.generated) info.append(` · Edited by ${personName(edited.by)}`);
     if (canEdit) {
       const edit = node("button", "nt-text-button", "Edit summary"); edit.type = "button"; edit.addEventListener("click", () => { editingSummary = true; noteTab = "Summary"; render(); });
       info.append(" · ", edit);
       if (edited) { const restore = node("button", "nt-text-button", "Restore original"); restore.type = "button"; restore.addEventListener("click", () => noteChange("summary", { restore: true })); info.append(" · ", restore); }
     }
+    if (edited?.generated) info.append(` · Rewritten (${TEMPLATE_NAMES[edited.generated.template] || "Standard"}${edited.generated.language ? `, ${LANGUAGE_NAMES[edited.generated.language] || edited.generated.language}` : ""}${edited.generated.with_my_notes ? ", with my notes" : ""})`);
     summary.append(info);
+    if (canEdit && transcriptText) {
+      const rewrite = node("div", "nt-rewrite");
+      const template = filterControl("Summary style", "standard", Object.entries(TEMPLATE_NAMES), () => {});
+      const language = filterControl("Summary language", "", Object.entries(LANGUAGE_NAMES), () => {});
+      const mineLabel = node("label", "nt-check"), mine = node("input"); mine.type = "checkbox"; mine.id = "rewrite-with-notes";
+      mine.disabled = !(ws?.my_notes || "").trim(); mineLabel.htmlFor = mine.id; mineLabel.append(mine, " Use my notes");
+      const go = node("button", "secondary", rewriteBusy ? "Rewriting…" : "Rewrite summary"); go.type = "button"; go.disabled = rewriteBusy;
+      go.addEventListener("click", async () => {
+        rewriteBusy = true; render();
+        await noteChange("regenerate", { template: template.value, language: language.value, include_my_notes: mine.checked });
+        rewriteBusy = false; render();
+      });
+      rewrite.append(template, language, mineLabel, go);
+      summary.append(rewrite);
+    }
     if (!blocks.length) summary.append(node("p", "nt-empty", "No summary for this meeting. There may have been no speech to summarise."));
     let listNode = null;
     for (const block of blocks) {
@@ -836,6 +955,7 @@ function renderNote() {
     mine.append(node("p", "nt-read", "Only you can see these. They are not included when the note is shared."), area, save);
   }
 
+  if (ws && ws.access !== "organization") { const askTab = node("section", "nt-panel"); panels.Ask = askTab; askTab.append(askPanel(note.id)); }
   const transcript = node("section", "nt-panel"); panels.Transcript = transcript;
   transcript.append(transcriptBlocks() || node("p", transcriptText ? "nt-plain" : "nt-empty",
     transcriptText || (ws?.access === "organization" ? "The transcript is available to people invited to this note." : "Transcript unavailable.")));
@@ -877,7 +997,9 @@ async function loadUpcoming() {
 async function loadNote() {
   const id = selectedNote(); if (publicSignup || !id || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++noteLoadNumber;
-  note = null; noteError = ""; noteLoading = true; noteSearch = ""; editingSummary = false; sharingOpen = false; render();
+  note = null; noteError = ""; noteLoading = true; noteSearch = ""; editingSummary = false; sharingOpen = false; invitationNote = ""; rewriteBusy = false;
+  if (askState.scope) askState = { question: "", answer: null, citations: [], busy: false, error: "", scope: null };
+  render();
   const current = () => number === noteLoadNumber && currentUser?.uid === uid && auth.currentUser?.uid === uid && selectedNote() === id;
   try {
     const token = await user.getIdToken(); if (!current()) return;

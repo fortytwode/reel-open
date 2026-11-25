@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import partial
 import hashlib
+import json
 from html import escape
 import logging
 import os
@@ -17,10 +18,10 @@ from reel_organization import _safe_url, firebase_project, is_internal_email, no
 
 if __package__:
     from .slack_recaps import SlackError, SlackRecaps
-    from . import workspace
+    from . import assistant, workspace
 else:
     from slack_recaps import SlackError, SlackRecaps
-    import workspace
+    import assistant, workspace
 
 logger = logging.getLogger(__name__)
 
@@ -669,16 +670,90 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
         add, remove = body.get('add', []), body.get('remove', [])
         if not isinstance(add, list) or not isinstance(remove, list) or len(add) + len(remove) > 50:
             raise workspace.WorkspaceError('Invalid people')
+        role = body.get('role', 'editor')
+        roles = body.get('roles') or {}
+        if not isinstance(roles, dict) or len(roles) > 50:
+            raise workspace.WorkspaceError('Invalid roles')
         before = set(note['workspace']['shared_with'])
         # Unlist first: a list entry without access is an integrity error, the reverse is only a missing row.
         for removed in before & {str(value).strip().lower() for value in remove}:
             if removed not in note['recipients']:
                 remove_note_index(note_store(), meeting_id, removed)
-        state = workspace.share(note_store(), meeting_id, note, add, remove, body.get('link_access'))
+        state = workspace.share(note_store(), meeting_id, note, add, remove, body.get('link_access'), role, roles)
         # Invited people find the note in their own list, marked as shared with them.
         for invited in state['shared_with']:
             update_note_index(note_store(), meeting_id, invited, None, lambda: None)
+        emailed, failed = [], []
+        for invited in [person for person in state['shared_with'] if person not in before]:
+            try:
+                send_invite(invited, email, note)
+                emailed.append(invited)
+            except Exception:
+                app.logger.warning('Share invitation email failed')
+                failed.append(invited)
+        result = {'meeting': read_shared_note(note_store(), meeting_id, email)}
+        if emailed or failed:
+            result['invitations'] = {'emailed': emailed, 'failed': failed}
+        return jsonify(**result)
+
+    def send_invite(recipient, inviter, note):
+        if 'providers' not in dependencies:
+            if __package__:
+                from .providers import configured_providers
+            else:
+                from providers import configured_providers
+            dependencies['providers'] = providers if providers is not None else configured_providers(store=note_store())
+        delivery = dependencies['providers']
+        key = digest_key('share-invitation', note['id'], recipient)
+        with delivery.context(lambda: None):
+            if delivery.find_email(key, since=None):
+                return
+            draft = delivery.create_draft(key, invite_message(recipient, inviter, note, configured_notes_url(note['id'])))
+            delivery.send_draft(key, draft)
+
+    @app.post('/delivery/meetings/<meeting_id>/regenerate')
+    @workspace_route
+    def meeting_regenerate(meeting_id):
+        email, note, body = workspace_request(meeting_id, edit=True)
+        my_notes = note['workspace']['my_notes'] if body.get('include_my_notes') is True else ''
+        try:
+            text = assistant.regenerate_summary(note, str(body.get('template', 'standard')), str(body.get('language', '')), my_notes)
+        except assistant.AssistantError as exc:
+            return jsonify(error=str(exc)), exc.status
+        workspace.set_summary(note_store(), meeting_id, 'notetaker', text, int(clock()),
+                              {'template': str(body.get('template', 'standard')), 'language': str(body.get('language', '')),
+                               'with_my_notes': bool(my_notes), 'requested_by': email})
         return refreshed(meeting_id, email)
+
+    @app.post('/delivery/ask')
+    @workspace_route
+    def ask():
+        email, _, body = workspace_request()
+        meeting_id = body.get('meeting_id')
+        if meeting_id is not None:
+            if not isinstance(meeting_id, str) or not re.fullmatch(r'reel_[0-9a-f]{64}', meeting_id):
+                raise LookupError
+            note = read_shared_note(note_store(), meeting_id, email)
+            if note is None:
+                raise LookupError
+            notes = [{**note, 'summary': note['workspace']['summary']['text'] if note['workspace']['summary'] else note.get('summary', '')}]
+        else:
+            notes = assistant.pick_context(str(body.get('question', '')), readable_notes(note_store(), email))
+        try:
+            result = assistant.answer_question(body.get('question'), notes)
+        except assistant.AssistantError as exc:
+            return jsonify(error=str(exc)), exc.status
+        titles = {note['id']: {'id': note['id'], 'title': note.get('title', ''), 'started_at': note.get('started_at', '')} for note in notes}
+        return jsonify(answer=result['answer'], citations=[titles[value] for value in result['citations']])
+
+    @app.get('/delivery/search')
+    @workspace_route
+    def transcript_search():
+        email, _, _ = workspace_request()
+        query = request.args.get('q', '')
+        if not 3 <= len(query.strip()) <= 200:
+            raise workspace.WorkspaceError('Search for 3 to 200 characters')
+        return jsonify(results=search_transcripts(readable_notes(note_store(), email), query))
 
     @app.route('/delivery/folders', methods=['GET', 'POST'])
     @workspace_route
@@ -887,7 +962,7 @@ def read_shared_note(store, meeting_id, email):
         # A link opens the summary. The transcript is for people who were invited.
         note = {**note, 'segments': [], 'transcript_text': ''}
     return {**note, 'local_recording_ids': ids,
-            'workspace': workspace.view(note, extra, workspace.load_user(store, email), level)}
+            'workspace': workspace.view(note, extra, workspace.load_user(store, email), level, email)}
 
 
 def list_shared_notes(store, email):
@@ -979,6 +1054,60 @@ def update_note_index(store, meeting_id, email, recording_id, fence):
         except PreconditionFailed:
             continue
     raise Conflict('Meeting index changed repeatedly')
+
+
+def readable_notes(store, email):
+    """Every full note this person may read from their own list (attended or invited)."""
+    index, _ = store.load(_index_key(email))
+    if index is None:
+        return []
+    if not isinstance(index.get('meetings'), dict):
+        raise DeliveryError('Invalid meeting index')
+    def read(meeting_id):
+        if not re.fullmatch(r'reel_[0-9a-f]{64}', meeting_id):
+            return None
+        note, _ = store.load('notes/' + meeting_id)
+        if note is None:
+            return None
+        _validate_note(note, meeting_id)
+        extra = workspace.load_extra(store, meeting_id)
+        if workspace.access_level(note, extra, email) not in ('recipient', 'shared'):
+            return None
+        return {**note, 'summary': extra['summary']['text'] if extra['summary'] else note.get('summary', '')}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return [note for note in pool.map(read, list(index['meetings'])[:300]) if note]
+
+
+def search_transcripts(notes, query, limit=50):
+    needle = ' '.join(query.split()).casefold()
+    results = []
+    for note in notes:
+        text = ' '.join(str(note.get('transcript_text') or '').split())
+        position = text.casefold().find(needle)
+        if position < 0:
+            continue
+        start = max(0, position - 70)
+        snippet = ('…' if start else '') + text[start:position + len(needle) + 90].strip() + '…'
+        results.append({'id': note['id'], 'snippet': snippet})
+    results.sort(key=lambda item: next((n['started_at'] for n in notes if n['id'] == item['id']), ''), reverse=True)
+    return results[:limit]
+
+
+def invite_message(recipient, inviter, note, url):
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    first = re.split(r'[._+\-]', recipient.split('@', 1)[0])[0].capitalize() or 'there'
+    who = ' '.join(part.capitalize() for part in re.split(r'[._+\-]', inviter.split('@', 1)[0]) if part) or inviter
+    title = ' '.join(str(note.get('title') or 'a meeting').split())[:150]
+    message = MIMEMultipart('alternative')
+    message['To'] = recipient
+    message['Subject'] = f'{who} shared meeting notes: {title}'
+    plain = f'Hi {first},\n\n{who} shared the notes from "{title}" with you in Reel Notetaker.\n\nOpen the notes: {url}'
+    html = (f'<p>Hi {escape(first)},</p><p>{escape(who)} shared the notes from &ldquo;{escape(title)}&rdquo; with you in Reel Notetaker.</p>'
+            f'<p><a href="{escape(url, quote=True)}">Open the notes</a></p>')
+    message.attach(MIMEText(plain, 'plain', 'utf-8'))
+    message.attach(MIMEText(html, 'html', 'utf-8'))
+    return message
 
 
 def remove_note_index(store, meeting_id, email):

@@ -20,6 +20,7 @@ MAX_PRIVATE_CHARS = 20_000
 MAX_FOLDERS = 100
 MAX_FOLDER_NAME = 80
 LINK_ACCESS = ('invited', 'organization')
+ROLES = ('editor', 'viewer')
 MEETING_ID = re.compile(r'reel_[0-9a-f]{64}')
 FOLDER_ID = re.compile(r'[0-9a-f]{32}')
 
@@ -65,7 +66,10 @@ def normalize_extra(raw):
     added = raw.get('added') if isinstance(raw.get('added'), list) else []
     summary = raw.get('summary') if isinstance(raw.get('summary'), dict) else None
     shared = [email for email in raw.get('shared_with', []) if isinstance(email, str)] if isinstance(raw.get('shared_with'), list) else []
+    roles = raw.get('roles') if isinstance(raw.get('roles'), dict) else {}
     return {
+        # People invited before roles existed could edit, so editor stays the default.
+        'roles': {email: roles.get(email) if roles.get(email) in ROLES else 'editor' for email in shared[:MAX_SHARED]},
         'tasks': {text: state for text, state in tasks.items() if _text(text, MAX_TASK_CHARS) and isinstance(state, dict)},
         'added': [task for task in added if isinstance(task, dict) and _text(task.get('text'), MAX_TASK_CHARS) and isinstance(task.get('id'), str)],
         'summary': summary if summary and _text(summary.get('text'), MAX_SUMMARY_CHARS) else None,
@@ -140,18 +144,22 @@ def remove_task(store, meeting_id, task_id):
     return _update(store, extra_key(meeting_id), normalize_extra, change)
 
 
-def set_summary(store, meeting_id, email, text, now):
-    """text=None restores the summary the notetaker wrote."""
+def set_summary(store, meeting_id, email, text, now, generated=None):
+    """text=None restores the summary the notetaker wrote. generated records how a rewrite was made."""
     if text is not None and (not _text(text, MAX_SUMMARY_CHARS) or not text.strip()):
         raise WorkspaceError('Invalid summary')
 
     def change(state):
-        state['summary'] = None if text is None else {'text': text.strip(), 'by': email, 'at': now}
+        state['summary'] = None if text is None else {'text': text.strip(), 'by': email, 'at': now,
+                                                      **({'generated': generated} if generated else {})}
     return _update(store, extra_key(meeting_id), normalize_extra, change)
 
 
-def share(store, meeting_id, note, add=(), remove=(), link_access=None):
+def share(store, meeting_id, note, add=(), remove=(), link_access=None, role='editor', roles=None):
     add = [str(email).strip().lower() for email in add]
+    roles = {str(email).strip().lower(): value for email, value in (roles or {}).items()}
+    if role not in ROLES or any(value not in ROLES for value in roles.values()):
+        raise WorkspaceError('Invalid role')
     remove = [str(email).strip().lower() for email in remove]
     if any(not is_internal_email(email) for email in add):
         raise WorkspaceError('Notes can be shared only inside your organization')
@@ -166,6 +174,7 @@ def share(store, meeting_id, note, add=(), remove=(), link_access=None):
         if len(shared) > MAX_SHARED:
             raise WorkspaceError('Too many people')
         state['shared_with'] = shared
+        state['roles'] = {email: roles.get(email) or (role if email in add else state['roles'].get(email, 'editor')) for email in shared}
         if link_access is not None:
             state['link_access'] = link_access
     return _update(store, extra_key(meeting_id), normalize_extra, change)
@@ -230,18 +239,20 @@ def place_in_folder(store, email, meeting_id, folder_id):
     return _update(store, user_key(email), normalize_user, change)
 
 
-def view(note, extra, user, level):
+def view(note, extra, user, level, email=''):
     """What one reader sees of the workspace for one note."""
     meeting_id = note['id']
     return {
         'access': level,
         # People who were invited can change the shared state; link viewers only read.
-        'can_edit': level in ('recipient', 'shared'),
+        'can_edit': level == 'recipient' or (level == 'shared' and extra['roles'].get(email) == 'editor'),
+        'role': 'owner' if level == 'recipient' else extra['roles'].get(email) if level == 'shared' else 'viewer',
         'can_share': level == 'recipient',
         'tasks': extra['tasks'],
         'added_tasks': extra['added'],
         'summary': extra['summary'],
         'shared_with': extra['shared_with'] if level != 'organization' else [],
+        'roles': extra['roles'] if level != 'organization' else {},
         'link_access': extra['link_access'],
         'my_notes': user['notes'].get(meeting_id, ''),
         'folder_id': user['meeting_folders'].get(meeting_id),

@@ -323,3 +323,25 @@ html[data-product="notetaker"][data-note] :is(.heading-row,.toolbar) { display: 
 html[data-product="notetaker"] #meeting-calendar-panel .mc-events { max-height: 520px; overflow-y: auto; border-top: 1px solid #eef0f2; }
 .nt-tasklist { margin: 4px 10px 6px; }
 .nt-day .nt-link { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 650; }
+.nt-row.nt-upcoming { grid-template-columns: 118px minmax(0,1fr) auto auto; }
+.nt-row-actions { display: flex; align-items: center; gap: 8px; }
+.nt-join { padding: 4px 12px; border: 0; border-radius: 999px; background: #1f8a70; color: #fff; font-size: 12px; font-weight: 650; cursor: pointer; }
+.nt-join:hover { background: #17705c; }
+.nt-join:disabled { opacity: .6; cursor: default; }
+.nt-ask { margin: 0 0 26px; padding: 14px 16px; border: 1px solid #e3e6e9; border-radius: 12px; background: #fbfcfb; }
+.nt-panel .nt-ask { margin: 0; }
+.nt-ask-form { display: flex; gap: 8px; }
+.nt-ask-form input { flex: 1; min-width: 0; padding: 8px 11px; border: 1px solid #dfe3e6; border-radius: 8px; font: inherit; font-size: 13.5px; }
+.nt-prompts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.nt-prompt { padding: 4px 10px; border: 1px solid #e3e6e9; border-radius: 999px; background: #fff; color: #485059; font-size: 12px; cursor: pointer; }
+.nt-prompt:hover { border-color: #1f8a70; color: #17705c; }
+.nt-answer { margin-top: 12px; font-size: 14px; line-height: 1.6; color: #2b3038; }
+.nt-answer p { margin: 0 0 8px; }
+.nt-answer li { margin: 0 0 6px 18px; }
+.nt-rewrite { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; padding: 10px 12px; border-radius: 8px; background: #f6f8f7; }
+.nt-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: #485059; }
+.nt-share-list .nt-filter { max-width: 110px; }
+@media(max-width:720px) { .nt-row.nt-upcoming { grid-template-columns: minmax(0,1fr) auto; } .nt-ask-form { flex-wrap: wrap; } }
+.mc-recent { margin-top: 14px; }
+.mc-recent > summary { cursor: pointer; color: #485059; font-size: 13px; font-weight: 600; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-events { max-height: none; overflow: visible; border-top: 0; }

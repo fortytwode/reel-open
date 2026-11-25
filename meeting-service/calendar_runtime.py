@@ -1,4 +1,5 @@
 """Calendar tasks and one consent-authorized, private bot execution per occurrence."""
+import re
 import base64
 import hashlib
 import hmac
@@ -413,6 +414,13 @@ class BotDispatcher:
         return {"status": "requesting_entry"}
 
 
+def _parse_join_end(event):
+    try:
+        return datetime.fromisoformat(str(event.get("end", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+
+
 def install_calendar_routes(app, claims_for_request, store_for_request, deliver_notes,
                             *, calendar_factory=None, scheduler=None, dispatcher_factory=None):
     def public_oauth():
@@ -687,6 +695,22 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         if sync_error:
             result["sync_error"] = sync_error
         return jsonify(result)
+
+    @app.route("/calendar/meetings/<event_id>/join", methods=["GET", "OPTIONS"])
+    def calendar_join_link(event_id):
+        """Hand the owner their own meeting link, one meeting at a time, only when they ask to join."""
+        if request.method == "OPTIONS":
+            return "", 204
+        claims = calendar_claims()
+        if not re.fullmatch(r"[0-9a-f]{64}", event_id):
+            return jsonify(error="Not found"), 404
+        state, _ = owner_state(claims)
+        event = ((state or {}).get("events") or {}).get(event_id)
+        url = event.get("join_url") if isinstance(event, dict) else None
+        if (not url or event.get("status") in ("cancelled", "completed", "failed")
+                or _parse_join_end(event) < datetime.now(UTC)):
+            return jsonify(error="This meeting has no link to join"), 404
+        return jsonify(url=url)
 
     @app.route("/calendar/desktop", methods=["GET", "OPTIONS"])
     def desktop_calendar():
