@@ -1,4 +1,5 @@
 """Bounded, retryable processing of captured cloud media."""
+import re
 import io
 import json
 import os
@@ -33,6 +34,29 @@ def caption_context(bucket, record, duration):
     except Exception:
         # Missing, invalid or unavailable captions do not discard the recording.
         return None
+
+
+def speaker_name_hints(attendees, attendee_names, segments):
+    """Add the names people showed on the call to invited emails they unambiguously belong to.
+
+    A display label is linked only when its first name equals the first name in
+    exactly one invited email and no other label claims that email.
+    """
+    names = dict(attendee_names) if isinstance(attendee_names, dict) else {}
+    emails = [email for email in attendees if isinstance(email, str) and '@' in email]
+    first = lambda value: re.split(r'[\s._+\-]+', value.strip().casefold())[0] if value and value.strip() else ''
+    labels = {part.get('speaker_name') for part in segments if isinstance(part.get('speaker_name'), str)}
+    claims = {}
+    for label in labels:
+        if not label.strip() or len(label) > 80 or re.search(r'[\x00-\x1f\x7f-\x9f<>\u2028\u2029]', label):
+            continue
+        owners = [email for email in emails if first(email.split('@', 1)[0]) == first(label)]
+        if len(owners) == 1:
+            claims.setdefault(owners[0], []).append(label.strip())
+    for email, claimed in claims.items():
+        if len(claimed) == 1 and not names.get(email):
+            names[email] = claimed[0]
+    return names
 
 
 def caption_led(transcript):
@@ -297,12 +321,14 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                 text = '\n'.join(segment['text'] for segment in segments)
                 speaker_context = ({'speaker_turns': transcript['segments']}
                     if transcript.get('speaker_attribution') in ('platform_captions', 'partial') else {})
+                summary_names = attendee_names
                 if caption_led(transcript):
                     # The transcript is the meeting's own named captions: summarise that text,
                     # so every turn the summariser sees carries its speaker.
                     text = transcript['text']
+                    summary_names = speaker_name_hints(record['attendees'], attendee_names, transcript['segments'])
                 summary = immutable_json(bucket, prefix + 'processing/summary.json', lambda: summarize_text(
-                    text, record['title'][:200], record['attendees'], attendee_names=attendee_names, **speaker_context))
+                    text, record['title'][:200], record['attendees'], attendee_names=summary_names, **speaker_context))
                 # Old immutable summaries lack this decision; hold them for review.
                 from speech import acknowledgement_only
                 record['has_meeting_content'] = (False if acknowledgement_only(text) else

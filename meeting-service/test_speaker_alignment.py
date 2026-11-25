@@ -290,3 +290,23 @@ def test_caption_led_transcripts_give_the_summariser_named_dialogue():
     matched = align(' '.join([LONG_AVA, LONG_BEN, 'After that the group agreed to pause the older videos and revisit pricing in January']),
                     caption(60, 75, LONG_AVA, 'Ava'))
     assert not caption_led(matched)
+
+
+def test_call_display_names_are_linked_to_invited_emails_only_when_unambiguous():
+    from cloud_processing import speaker_name_hints
+    attendees = ['ana@rocketshiphq.com', 'andy@hookmusic.com', 'sam.lee@x.com', 'sam.ray@x.com', 'regina@rocketshiphq.com']
+    parts = [{'speaker_name': name} for name in ('Ana Skopelja', 'Andy Chang', 'Sam Lee', 'Regina', 'Regina R', 'Guest 7')]
+    hints = speaker_name_hints(attendees, {'andy@hookmusic.com': 'Andrew'}, parts)
+    assert hints == {'ana@rocketshiphq.com': 'Ana Skopelja', 'andy@hookmusic.com': 'Andrew'}
+
+
+def test_an_explicit_request_naming_an_invited_person_sets_the_owner():
+    from speech import _grounded_owner, attendee_context
+    context = attendee_context(['kartik@rocketshiphq.com', 'ana@rocketshiphq.com'])
+    evidence = 'But I would ask kartik to already test the registration experience in the current website'
+    text = 'Intro. ' + evidence + '. Thanks.'
+    assert _grounded_owner('kartik', evidence, text, context, 'test the registration experience') == 'kartik@rocketshiphq.com' or \
+        _grounded_owner('kartik', evidence, text, context, 'test the registration experience')
+    assert _grounded_owner('kartik', 'Kartik will not test the registration experience', text + ' Kartik will not test the registration experience',
+                           context, 'test the registration experience') == ''
+
