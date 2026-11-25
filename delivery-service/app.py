@@ -740,7 +740,7 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
         else:
             notes = assistant.pick_context(str(body.get('question', '')), readable_notes(note_store(), email))
         try:
-            result = assistant.answer_question(body.get('question'), notes)
+            result = assistant.answer_question(body.get('question'), notes, asked_by=email)
         except assistant.AssistantError as exc:
             return jsonify(error=str(exc)), exc.status
         titles = {note['id']: {'id': note['id'], 'title': note.get('title', ''), 'started_at': note.get('started_at', '')} for note in notes}
