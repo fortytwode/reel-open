@@ -67,21 +67,30 @@ function rememberRecording(id) {
 // page to Notetaker in place, so the existing sign-in keeps working.
 const fixedNotetaker = document.documentElement.dataset.product === "notetaker";
 const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
-const proxied = !fixedNotetaker && !!organization && sameOrigin(location.href, organization.notesBaseURL) && !sameOrigin(location.href, organization.webBase);
+// A host that serves each product at its own address names both in the page:
+// <meta name="reel-recorder-url" content="/recorder"> and reel-notetaker-url.
+const hostPage = name => {
+  const path = document.querySelector(`meta[name="${name}"]`)?.content || "";
+  return /^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(path) ? location.origin + path : null;
+};
+const hostRecorder = hostPage("reel-recorder-url"), hostNotetaker = hostPage("reel-notetaker-url");
+const hostPages = !!(hostRecorder && hostNotetaker);
+const proxied = !hostPages && !fixedNotetaker && !!organization && sameOrigin(location.href, organization.notesBaseURL) && !sameOrigin(location.href, organization.webBase);
 const meetingHash = () => /^#(?:meetings(?:\/.*)?|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
 let notetaker = fixedNotetaker || (proxied && meetingHash());
 // Where the library is served from another origin, open Notetaker there too so
 // people sign in once for both products.
-if (fixedNotetaker && organization?.notesBaseURL && organization.webBase && !publicSignup
+if (fixedNotetaker && !hostPages && organization?.notesBaseURL && organization.webBase && !publicSignup
     && sameOrigin(organization.notesBaseURL, organization.notesBaseURL)
     && !sameOrigin(organization.webBase, organization.notesBaseURL) && !sameOrigin(location.href, organization.notesBaseURL)) {
   location.replace(organization.notesBaseURL + (location.hash || "#meetings"));
 }
 const productName = () => notetaker ? "Reel Notetaker" : "Reel Recorder";
-const notetakerURL = (hash = "") => !organization ? "/notetaker-meetings" + hash
+const notetakerURL = (hash = "") => hostPages ? hostNotetaker + hash
+  : !organization ? "/notetaker-meetings" + hash
   : publicSignup ? organization.webBase + "/notetaker"
   : proxied ? organization.notesBaseURL + (hash || "#meetings") : organization.webBase + "/notetaker-meetings" + hash;
-const recorderURL = () => !organization ? "/library" : organization.notesBaseURL + (proxied ? "#library" : "");
+const recorderURL = () => hostPages ? hostRecorder : !organization ? "/library" : organization.notesBaseURL + (proxied ? "#library" : "");
 function showProduct() {
   notetaker = fixedNotetaker || (proxied && meetingHash());
   document.documentElement.dataset.product = notetaker ? "notetaker" : "recorder";

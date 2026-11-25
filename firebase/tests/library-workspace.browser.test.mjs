@@ -13,6 +13,11 @@ const server = createServer(async (req, res) => {
     const html = (await readFile(join(web, 'library.html'), 'utf8')).replace('<head>', '<head><base href="/reel/assets/">');
     res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(html);
   }
+  if (path === '/recorder' || path === '/notetaker-page') {
+    const metas = '<base href="/reel/assets/"><meta name="reel-recorder-url" content="/recorder"><meta name="reel-notetaker-url" content="/notetaker-page">';
+    const html = (await readFile(join(web, path === '/recorder' ? 'library.html' : 'notetaker-meetings.html'), 'utf8')).replace('<head>', '<head>' + metas);
+    res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(html);
+  }
   if (path === '/reel/notetaker') {
     const html = (await readFile(join(web, 'notetaker-meetings.html'), 'utf8')).replace('<head>', '<head><base href="/reel/assets/">');
     res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(html);
@@ -110,6 +115,49 @@ test('Mission Control calendar stays in the workspace and clears on sign out', a
     const manual = page.locator('[data-browser] a').filter({hasText:'Capture manually'});
     await manual.waitFor({state:'attached'});
     assert.equal(await manual.getAttribute('href'), 'https://example.test/record?mode=meeting');
+  } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+});
+
+test('a host with one address per product keeps each page on its own address', async () => {
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const browser = await chromium.launch({ headless:true, executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+  try {
+    const page = await browser.newPage();
+    await page.route('**/reel/firebase.js*', route => route.fulfill({ contentType:'text/javascript', body:`
+      export const FB_CDN='https://sdk.example.test/', CLOUD_CONFIG={firestoreDatabase:'reel'}, EMU=false, googleAccountLabel='a work account';
+      const user={uid:'owner',email:'owner@rocketshiphq.com',emailVerified:true,getIdToken:async()=> 'token'};
+      const auth={currentUser:user}; const am={signOut:async()=>{auth.currentUser=null; window.reelAuth(null,null)}, signInWithPopup:async()=>{}};
+      export const loadAuth=async()=>({auth,am}); export const observeReelAccount=(_am,_auth,cb)=>{window.reelAuth=cb;cb(user,user)};
+      export const sessionSnapshot=u=>u&&({uid:u.uid,email:u.email,getIdToken:()=>u.getIdToken()}); export const googleSignInProvider=()=>({});
+    ` }));
+    await page.route('https://sdk.example.test/firebase-firestore.js', route => route.fulfill({contentType:'text/javascript',body:`
+      export const getFirestore=()=>({}); export const collection=(...x)=>x; export const query=x=>x;
+      export const orderBy=()=>null; export const onSnapshot=(_q,cb)=>{queueMicrotask(()=>cb({docs:[]}));return ()=>{}};
+    `}));
+    let syncRequests = 0;
+    await page.route('https://meetings.example.test/**', route => {
+      if (route.request().url().endsWith('/calendar/sync')) syncRequests++;
+      return route.fulfill({json:{events:[],meetings:[],config:{enabled:true,calendar_ids:['primary']},capabilities:{calendar:true,provider:'desktop'}}});
+    });
+    await page.route('https://delivery.example.test/**', route => route.fulfill({json:{meetings:[],next_cursor:null}}));
+    const hosted = `http://127.0.0.1:${server.address().port}`;
+    await page.goto(`${hosted}/recorder`);
+    await page.locator('#nav-library[aria-current="page"]').waitFor();
+    assert.equal(await page.title(), 'Screen recordings · Reel Recorder');
+    assert.equal(await page.locator('#nav-meetings').isVisible(), false);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), `${hosted}/notetaker-page`);
+    // Old meeting links that land on the Recorder page move to the Notetaker page.
+    await page.goto('about:blank');
+    await page.goto(`${hosted}/recorder#meetings`);
+    await page.waitForURL(`${hosted}/notetaker-page#meetings`);
+    await page.locator('#nav-meetings[aria-current="page"]').waitFor();
+    assert.equal(await page.title(), 'Meetings · Reel Notetaker');
+    assert.equal(await page.locator('.brand').getAttribute('href'), `${hosted}/notetaker-page`);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), `${hosted}/recorder`);
+    assert.equal(await page.locator('.workspace').isVisible(), false);
+    await page.locator('#nav-calendar').click();
+    await page.locator('#meeting-calendar-panel .mc-card').waitFor();
+    assert.equal(new URL(page.url()).pathname, '/notetaker-page');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
 
