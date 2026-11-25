@@ -625,7 +625,9 @@ function renderMeetings() {
 // spoke. Names, when the service has them, come as "Name: text" lines in transcript_text.
 function transcriptBlocks() {
   const wrap = node("div", "nt-transcript");
-  const lines = typeof note.transcript_text === "string" ? note.transcript_text.split("\n").map((line) => line.trim()).filter(Boolean) : [];
+  let lines = typeof note.transcript_text === "string" ? note.transcript_text.split("\n").map((line) => line.trim()).filter(Boolean) : [];
+  // The service opens with a note on how speakers were identified; show it as a note, not as speech.
+  if (/^Speaker identification /.test(lines[0] || "")) { wrap.append(node("p", "nt-read", lines[0])); lines = lines.slice(1); }
   const named = lines.map((line) => /^([A-Z][^:]{1,40}):\s+(.+)$/.exec(line));
   if (lines.length > 1 && named.filter(Boolean).length >= lines.length * 0.6) {
     let last = null, block = null;
@@ -651,6 +653,18 @@ async function copyText(button, text) {
   setTimeout(() => { button.textContent = label; }, 1600);
 }
 const taskKey = (id) => organizationStorageKey(`reel-tasks:${currentUser?.uid}:${id}`);
+// Action items read "Owner: task" or "Owner unconfirmed: task". Show the owner as a label.
+function taskParts(text) {
+  const match = /^([^:]{2,40}):\s+(.+)$/.exec(String(text));
+  if (!match) return { owner: "", task: String(text) };
+  return { owner: /^owner unconfirmed$/i.test(match[1].trim()) ? "" : match[1].trim(), task: match[2] };
+}
+function taskLabel(text) {
+  const { owner, task } = taskParts(text);
+  const label = node("label", "", task);
+  if (owner) label.prepend(node("span", "nt-owner", owner));
+  return label;
+}
 function doneTasks(id) { try { const value = JSON.parse(localStorage.getItem(taskKey(id)) || "[]"); return new Set(Array.isArray(value) ? value : []); } catch { return new Set(); } }
 function saveTasks(id, done) { try { localStorage.setItem(taskKey(id), JSON.stringify([...done])); } catch { /* ticks then last only for this visit */ } }
 function noteMarkdown(blocks, people, meta, transcriptText) {
@@ -690,7 +704,7 @@ function renderTasks() {
     title.append(link, ` · ${Number.isNaN(started.getTime()) ? "" : dayLabel(started)}`); section.append(title);
     const checklist = node("ul", "nt-checklist nt-tasklist");
     for (const item of visible) {
-      const row = node("li"), box = node("input"), label = node("label", "", item.text);
+      const row = node("li"), box = node("input"), label = taskLabel(item.text);
       box.type = "checkbox"; box.checked = item.done; box.id = `task-${shown++}`; label.htmlFor = box.id; row.classList.toggle("done", item.done);
       box.addEventListener("change", async () => {
         const data = await deliveryPost(`/delivery/meetings/${m.id}/tasks`, { task: item.key, done: box.checked });
@@ -1066,7 +1080,10 @@ function renderNote() {
       if (block.type === "bullet" || block.type === "todo") {
         const kind = block.type === "todo" ? "nt-todo" : "nt-points";
         if (!listNode || listNode.className !== kind) { listNode = node("ul", kind); summary.append(listNode); }
-        const item = node("li"); if (block.label) item.append(node("strong", "", block.label + ": ")); item.append(block.text); listNode.append(item);
+        const item = node("li");
+        if (block.type === "todo") { const { owner, task } = taskParts(block.text); if (owner) item.append(node("span", "nt-owner", owner)); item.append(task); }
+        else { if (block.label) item.append(node("strong", "", block.label + ": ")); item.append(block.text); }
+        listNode.append(item);
         continue;
       }
       listNode = null;
@@ -1086,7 +1103,7 @@ function renderNote() {
     taskPanel.append(node("p", "nt-read", `${doneCount} of ${total} done. ${ws ? "Everyone on this note sees what is ticked." : "Ticks are saved in this browser only."}`));
     const checklist = node("ul", "nt-checklist");
     const line = (key, text, done, who, removable) => {
-      const item = node("li"), box = node("input"), label = node("label", "", text);
+      const item = node("li"), box = node("input"), label = taskLabel(text);
       box.type = "checkbox"; box.id = `note-task-${checklist.children.length}`; box.checked = done; box.disabled = !!ws && !canEdit; label.htmlFor = box.id;
       box.addEventListener("change", () => {
         if (ws) noteChange("tasks", { task: key, done: box.checked });

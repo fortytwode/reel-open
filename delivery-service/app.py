@@ -884,7 +884,10 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
                 workspace.revoke_token(note_store(), email, str(body['revoke']))
             else:
                 raise workspace.WorkspaceError('Invalid request')
-        result = {'tokens': workspace.load_user(note_store(), email)['mcp_tokens'], 'endpoint': request.host_url.rstrip('/') + '/mcp'}
+        # Cloud Run terminates TLS in front of the app, so the request itself looks like plain http.
+        local = request.host.split(':')[0] in ('localhost', '127.0.0.1')
+        result = {'tokens': workspace.load_user(note_store(), email)['mcp_tokens'],
+                  'endpoint': ('http://' if local else 'https://') + request.host + '/mcp'}
         if created:
             result['created'] = created
         return jsonify(**result)
