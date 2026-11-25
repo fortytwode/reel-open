@@ -22,6 +22,15 @@ enum ProductOwnership {
         return NSWorkspace.shared.open(forwarded)
     }
 
+    static var recorderURL: URL? {
+        product == .notetaker ? NSWorkspace.shared.urlForApplication(withBundleIdentifier: ReelProduct.stateBundleID) : Bundle.main.bundleURL
+    }
+
+    static func openRecorderApp() {
+        guard product == .notetaker, let url = recorderURL else { return }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+
     @discardableResult
     static func openNotetakerApp() -> Bool {
         guard product == .recorder, let url = notetakerURL else { return false }
