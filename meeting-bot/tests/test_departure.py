@@ -33,6 +33,30 @@ class MonitorDepartureTests(unittest.IsolatedAsyncioTestCase):
                                              silent_seconds=lambda: timeline(self.now)[1], scheduled_end=end)
         return reason, self.now
 
+    async def ended_text(self, state):
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+        ffmpeg = MagicMock()
+        ffmpeg.poll.return_value = None
+        stopped = MagicMock(side_effect=[False, False, False, True, True])
+        with patch('providers.body_text', AsyncMock(return_value='Notetaker: the call ended early last week')), \
+             patch('providers.observe', AsyncMock(return_value=state)), \
+             patch('builtins.print') as printed:
+            reason = await providers.monitor(page, 'meet', 7200, stopped, ffmpeg)
+        return reason, [call.args[0] for call in printed.call_args_list]
+
+    async def test_ended_wording_while_still_in_the_call_does_not_stop_the_recording(self):
+        reason, printed = await self.ended_text(IN_CALL)
+        self.assertEqual(reason, 'execution_stopped')
+        self.assertEqual(len(printed), 1)
+        self.assertIn('"ended_notice_ignored"', printed[0])
+        self.assertIn('"call ended"', printed[0])
+        self.assertNotIn('Notetaker', printed[0])
+
+    async def test_ended_wording_after_leaving_the_call_stops_the_recording(self):
+        reason, _ = await self.ended_text(IDLE)
+        self.assertEqual(reason, 'meeting_ended')
+
     async def test_overrunning_conversation_is_recorded_until_the_room_empties(self):
         # Scheduled end at 600s; people talk until 1500s, then leave.
         def timeline(now):
