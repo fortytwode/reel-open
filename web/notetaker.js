@@ -2,6 +2,10 @@ import { organization, publicSignup } from "./organization.js?v=20261121-public-
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
 import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
 
+// Team deployments read meetings, notes and the calendar in the full Notetaker
+// workspace. Public sign-up keeps this lighter calendar page.
+if (organization && !publicSignup) location.replace("/notetaker-meetings" + location.hash);
+
 const el = id => document.getElementById(id);
 function showSection() {
   const calendarOpen = publicSignup || location.hash === "#calendar" || location.hash.startsWith("#calendar-meeting=");

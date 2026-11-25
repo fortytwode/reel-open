@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" data-product="notetaker">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Meetings · Reel Notetaker</title>
+  <link rel="manifest" href="/notetaker.webmanifest">
+  <link rel="icon" href="/icons/notetaker-192.png" type="image/png">
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+  <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js" crossorigin>
+  <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js" crossorigin>
+  <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js" crossorigin>
+  <link rel="stylesheet" href="./library.css?v=20261125-products1">
+  <link rel="stylesheet" href="./meeting-calendar.css?v=20261119-choice1">
+  <script type="module" src="./library.js?v=20261125-products1"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Main navigation">
+      <a class="brand" href="#meetings"><span class="brand-mark" aria-hidden="true">●</span> Reel Notetaker</a>
+      <div class="workspace"><span class="workspace-mark" aria-hidden="true">R</span><span><strong>Workspace</strong><small>Meeting notes</small></span></div>
+      <div class="library-label">MEETINGS</div>
+      <nav class="primary-nav">
+        <a class="nav-link active" id="nav-library" href="/library#library" data-library="#library"><span class="nav-icon" aria-hidden="true">▤</span> Screen recordings</a>
+        <a class="nav-link" id="nav-meetings" href="#meetings"><span class="nav-icon" aria-hidden="true">◷</span> Meetings</a>
+        <a class="nav-link nav-child" id="nav-calendar" href="#calendar"><span class="nav-icon" aria-hidden="true">↳</span> Meeting calendar</a>
+        <a class="nav-link nav-child" id="nav-recent" href="/library#recent" data-library="#recent"><span class="nav-icon" aria-hidden="true">↳</span> Recently viewed videos</a>
+        <a class="nav-link" id="nav-pinned" href="#pinned"><span class="nav-icon" aria-hidden="true">☆</span> Pinned</a>
+        <a class="nav-link" id="nav-archive" href="#archive"><span class="nav-icon" aria-hidden="true">▱</span> Archive</a>
+      </nav>
+      <div id="folder-section" hidden><div class="library-label folder-label">FOLDERS</div><nav id="folder-nav" class="primary-nav" aria-label="Recording folders"></nav><button id="new-folder" class="secondary" type="button" disabled>New folder</button></div>
+      <div class="sidebar-spacer"></div>
+      <a id="other-product" class="other-product" href="/library">Reel Recorder <span aria-hidden="true">↗</span><small>Screen recordings and share links</small></a>
+      <div class="personal-library"><span class="avatar" aria-hidden="true">▤</span><span><strong>Your meetings</strong><small>Private to you and attendees</small></span></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar">
+        <label class="search" aria-label="Search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search meetings" disabled></label>
+        <div class="account-actions"><button id="sign-in" type="button" hidden>Sign in with Google</button><span id="account" class="muted"></span><button id="sign-out" class="secondary" type="button" hidden>Sign out</button></div>
+      </header>
+      <section class="page-content">
+        <div class="heading-row">
+          <div class="heading"><div class="breadcrumb">Notetaker <span aria-hidden="true">/</span></div><h1 id="view-title">Meetings</h1><p id="view-description" hidden>Videos opened from this library on this browser.</p><p id="meeting-description" hidden>Read notes from meetings you were invited to. The original video stays on the recording device unless explicitly shared.</p></div>
+          <div id="meeting-actions" hidden><a class="button secondary" href="reel://home">Open local meeting history on Mac</a> <a id="record-meeting" class="button" href="/record?mode=meeting" data-recorder="?mode=meeting">Record a meeting</a></div>
+          <details class="record-options"><summary class="new-video">New video <span aria-hidden="true">⌄</span></summary><div class="record-menu"><a href="/record" data-recorder="">Record in browser <span aria-hidden="true">↗</span></a><a href="/record?mode=meeting" data-recorder="?mode=meeting">Record a meeting <span aria-hidden="true">↗</span></a><a href="reel://record">Record on Mac <span aria-hidden="true">↗</span></a></div></details>
+        </div>
+        <div class="toolbar">
+          <div class="tabs"><a id="video-tab" class="tab active" href="/library#library" data-library="#library">Screen recordings</a></div>
+          <div class="view-controls"><p id="result-count" class="result-count" aria-live="polite" aria-atomic="true">Loading…</p><label class="sort-label"><span class="visually-hidden">Sort recordings</span><select id="sort" disabled><option id="recent-sort" value="recent" hidden>Recently viewed</option><option value="newest" selected>Newest first</option><option value="oldest">Oldest first</option><option value="title">Title A–Z</option></select></label><button id="refresh" class="refresh-button secondary" type="button" aria-label="Refresh library" title="Refresh" hidden>↻</button></div>
+        </div>
+        <p id="status" role="status" aria-live="polite">Loading your meetings</p>
+        <p id="organization-status" role="status" aria-live="polite" hidden></p>
+        <div id="meeting-calendar-panel" hidden></div>
+        <form id="folder-form" class="folder-form" hidden><label for="folder-name">Folder name</label><input id="folder-name" maxlength="80" required autocomplete="off"><button type="submit">Create folder</button><button id="cancel-folder" type="button" class="secondary">Cancel</button></form>
+        <div id="loading-grid" class="recordings loading-grid" aria-hidden="true">
+          <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
+          <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
+          <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
+          <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
+          <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
+          <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
+        </div>
+        <div id="recordings" class="recordings" aria-label="Videos"></div>
+        <p id="library-footnote" class="footnote">Find recordings saved on this device in <a id="local-browser-recordings" href="/record#local-recordings" data-recorder="#local-recordings">the browser recorder</a> or <a id="local-mac-recordings" href="reel://local-library">Reel for Mac</a>. Uploaded recordings appear in your private online library. Share links let others watch subject to your password and expiry settings.</p>
+      </section>
+    </main>
+  </div>
+  <dialog id="player-dialog" aria-labelledby="player-title">
+    <div class="player-heading"><h2 id="player-title">Recording</h2><button id="close-player" class="secondary" type="button" autofocus aria-label="Close player">✕</button></div>
+    <div id="inline-player" class="inline-player"></div>
+    <div class="player-footer"><a id="player-open" class="button secondary" href="#" target="_blank" rel="noopener">Open full page</a><span>Transcript, comments and sharing</span></div>
+  </dialog>
+</body>
+</html>
