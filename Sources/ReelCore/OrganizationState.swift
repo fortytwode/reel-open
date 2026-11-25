@@ -8,10 +8,15 @@ public struct OrganizationState {
 
     private let identifier: String
     public let defaultsSuite: String
-    public var sessionService: String { defaultsSuite + ".firebase" }
-    public var notionService: String { defaultsSuite + ".notion" }
+    /// Keychain items stay with the app that wrote them. Reading another app's
+    /// item makes macOS stop and ask for the login password, so Reel Notetaker
+    /// keeps its own sign-in while sharing the Recorder's settings.
+    private let keychainPrefix: String
+    public var sessionService: String { keychainPrefix + ".firebase" }
+    public var notionService: String { keychainPrefix + ".notion" }
 
-    public init(config: CloudConfig, bundleID: String = Bundle.main.bundleIdentifier ?? "org.reel.app") {
+    public init(config: CloudConfig, bundleID: String = ReelProduct.stateBundleID,
+                keychainBundleID: String? = Bundle.main.bundleIdentifier) {
         if config.isConfigured {
             // A digest keeps even a maximum-length email domain within filesystem name limits.
             let identity = Data("\(config.projectID)\n\(config.allowedEmailDomain)".utf8)
@@ -20,6 +25,7 @@ public struct OrganizationState {
             identifier = "local"
         }
         defaultsSuite = "\(bundleID).organization.\(identifier)"
+        keychainPrefix = "\(keychainBundleID ?? bundleID).organization.\(identifier)"
     }
 
     public func directory(under base: URL) -> URL {

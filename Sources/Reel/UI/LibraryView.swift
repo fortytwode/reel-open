@@ -15,7 +15,7 @@ struct LibraryView: View {
 
     private var filtered: [Recording] {
         model.recordings.filter { recording in
-            (recording.meeting != nil) == meetingVideos &&
+            (recording.meeting != nil) == (meetingVideos && ProductOwnership.ownsMeetings) &&
                 (search.isEmpty || recording.title.localizedCaseInsensitiveContains(search))
         }
     }
@@ -34,10 +34,12 @@ struct LibraryView: View {
             }
             .padding(12)
             VStack(alignment: .leading, spacing: 8) {
-                Picker("Video type", selection: $meetingVideos) {
-                    Text("Screen recordings").tag(false)
-                    Text("Meeting videos").tag(true)
-                }.pickerStyle(.segmented).fixedSize()
+                if ProductOwnership.ownsMeetings {
+                    Picker("Video type", selection: $meetingVideos) {
+                        Text("Screen recordings").tag(false)
+                        Text("Meeting videos").tag(true)
+                    }.pickerStyle(.segmented).fixedSize()
+                }
                 Text(meetingVideos
                      ? "Meeting videos saved on this Mac. Choose a recording to open its local notes."
                      : "Record your screen or camera and share a video link.")

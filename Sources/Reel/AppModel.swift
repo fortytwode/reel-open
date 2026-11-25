@@ -144,7 +144,7 @@ final class AppModel: ObservableObject {
             Toast.show("Signed in as \(account?.email ?? "")")
             // Return to the latest finished recording after interactive sign-in. Older
             // waiting uploads must not overwrite its clipboard link or open extra tabs.
-            let waiting = recordings.filter(\.awaitsUploadOnSignIn)
+            let waiting = ProductOwnership.ownsClips ? recordings.filter(\.awaitsUploadOnSignIn) : []
             let latest = waiting.max { $0.createdAt < $1.createdAt }?.id
             for r in waiting {
                 Publisher.shared.publish(r, copyLink: settings.copyLinkOnStop && r.id == latest)

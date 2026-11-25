@@ -8,6 +8,8 @@ import ScreenCaptureKit
 /// transcript + summary + remaining uploads + link.
 @MainActor
 final class RecorderController {
+    /// Held while a recording is captured and saved, so the other Reel app never recovers it.
+    private var captureLeases: [String: LibraryStore.CaptureLease] = [:]
     static let shared = RecorderController()
     private var model: AppModel { AppModel.shared }
 
@@ -164,6 +166,13 @@ final class RecorderController {
             model.meetingCalendarReference = nil
             return false
         }
+        // Reel Recorder records screen clips and Reel Notetaker records meetings.
+        guard model.meetingMode ? ProductOwnership.ownsMeetings : ProductOwnership.ownsClips else {
+            model.meetingCalendarOccurrenceID = nil
+            model.meetingCalendarReference = nil
+            model.lastError = model.meetingMode ? "Meetings are recorded by Reel Notetaker." : "Screen recordings are made in Reel Recorder."
+            return false
+        }
         startFlowActive = true
         let requestedArea = preselectedArea ?? presetArea
         model.phase = .preparing
@@ -312,6 +321,7 @@ final class RecorderController {
         } catch {
             return bail("Cannot create the recording: \(error.localizedDescription)")
         }
+        captureLeases[recording.id] = model.library.beginCapture(recording.id)
         let folder = model.library.folder(for: recording)
         overlays = OverlayStore()
         model.drawing = DrawingState()
@@ -464,6 +474,7 @@ final class RecorderController {
 
     private func finishRecording(_ recording: Recording, result: RecordingResult, upload: Task<SegmentUploader?, Never>?,
                                  stoppedAt: Date, autoUpload: Bool, copyLink: Bool, finished: ((Recording?) -> Void)?) async {
+        defer { captureLeases[recording.id] = nil }
         let finishShare = Task { () -> Bool in
             guard let uploader = await upload?.value, let latest = model.recording(id: recording.id) else {
                 Publisher.shared.clearFinishedLiveStart(for: recording.id)
@@ -550,6 +561,7 @@ final class RecorderController {
     }
 
     private func removeUnpublished(_ recording: Recording) {
+        captureLeases[recording.id] = nil
         do { try model.library.delete(recording, recoverable: false) }
         catch { model.lastError = error.localizedDescription }
         model.reloadLibrary()

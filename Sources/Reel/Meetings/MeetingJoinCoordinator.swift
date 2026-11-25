@@ -186,7 +186,8 @@ final class MeetingJoinCoordinator: ObservableObject {
     }
 
     func updateBackgroundMonitoring() {
-        guard MeetingSetupJoining.shouldMonitorInBackground(defaults: OrganizationState.defaults) else {
+        // Only the app that owns meetings watches the calendar and joins.
+        guard ProductOwnership.ownsMeetings, MeetingSetupJoining.shouldMonitorInBackground(defaults: OrganizationState.defaults) else {
             loop?.cancel()
             loop = nil
             return
@@ -602,7 +603,7 @@ final class MeetingJoinCoordinator: ObservableObject {
     /// An automatic join that gives up must say so; the status line is only visible in Reel.
     private func notifyMissedJoin(_ meeting: CalendarMeeting, reason: String) {
         log.notice("Automatic join gave up; notifying")
-        var url = URLComponents(); url.scheme = "reel"; url.host = "join-meeting"
+        var url = URLComponents(); url.scheme = ReelProduct.current.urlScheme; url.host = "join-meeting"
         url.queryItems = [URLQueryItem(name: "id", value: Self.key(meeting))]
         Notifier.post(title: "Reel is not recording “\(meeting.title)”",
                       body: reason.isEmpty ? "Open Reel to join and record this meeting." : reason, url: url.url)
@@ -839,7 +840,7 @@ final class MeetingJoinCoordinator: ObservableObject {
         for meeting in upcoming {
             let id = Self.reminderIdentifier(meeting)
             guard !scheduled.contains(id), schedule.shouldAttempt(key: Self.key(meeting), start: meeting.start, end: meeting.end, now: meeting.start) else { continue }
-            var url = URLComponents(); url.scheme = "reel"; url.host = "join-meeting"
+            var url = URLComponents(); url.scheme = ReelProduct.current.urlScheme; url.host = "join-meeting"
             url.queryItems = [URLQueryItem(name: "id", value: Self.key(meeting))]
             let content = UNMutableNotificationContent()
             content.title = "Meeting detected. Join and record?"; content.body = meeting.title

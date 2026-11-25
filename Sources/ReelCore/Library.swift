@@ -186,6 +186,38 @@ public final class LibraryStore: @unchecked Sendable {
         return try action()
     }
 
+    /// Held from the first manifest write until a capture has been saved. A second
+    /// Reel process must never treat that recording as interrupted. The kernel
+    /// releases the lock if the capturing process exits or crashes.
+    public final class CaptureLease: @unchecked Sendable {
+        private let descriptor: Int32
+        fileprivate init(descriptor: Int32) { self.descriptor = descriptor }
+        deinit { flock(descriptor, LOCK_UN); close(descriptor) }
+    }
+
+    private func captureLockDescriptor(_ id: String) -> Int32? {
+        let directory = root.appendingPathComponent(".capture-locks", isDirectory: true)
+        guard mkdir(directory.path, 0o700) == 0 || errno == EEXIST else { return nil }
+        let key = SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
+        let descriptor = open(directory.appendingPathComponent(key).path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        return descriptor >= 0 ? descriptor : nil
+    }
+
+    /// nil when another capture already holds this recording.
+    public func beginCapture(_ id: String) -> CaptureLease? {
+        guard let descriptor = captureLockDescriptor(id) else { return nil }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { close(descriptor); return nil }
+        return CaptureLease(descriptor: descriptor)
+    }
+
+    /// True while any process, this one included, is still capturing the recording.
+    public func isCaptureLive(_ id: String) -> Bool {
+        guard let descriptor = captureLockDescriptor(id) else { return false }
+        defer { close(descriptor) }
+        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { flock(descriptor, LOCK_UN); return false }
+        return errno == EWOULDBLOCK
+    }
+
     private func lockError() -> POSIXError {
         POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }

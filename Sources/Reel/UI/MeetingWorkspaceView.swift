@@ -116,7 +116,14 @@ struct MeetingWorkspaceView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 9) {
                 Image(systemName: "waveform.circle.fill").font(.system(size: 30)).foregroundStyle(.tint)
-                Text("Reel").font(.system(size: 25, weight: .semibold, design: .rounded))
+                if ReelProduct.current == .notetaker {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Reel").font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(.secondary)
+                        Text("Notetaker").font(.system(size: 17, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.7)
+                    }
+                } else {
+                    Text("Reel").font(.system(size: 25, weight: .semibold, design: .rounded))
+                }
             }.padding(.vertical, 22).padding(.horizontal, 10)
             sidebarButton("Meetings", symbol: "rectangle.stack", selected: !sharedOnly) {
                 sharedOnly = false; selection = nil
@@ -128,9 +135,18 @@ struct MeetingWorkspaceView: View {
             sidebarButton("Calendar settings", symbol: "calendar", selected: false) {
                 (NSApp.delegate as? AppDelegate)?.showMeetings()
             }
-            sidebarButton("Screen recordings", symbol: "film", selected: false) {
-                (NSApp.delegate as? AppDelegate)?.showLibrary()
-            }.help("Record and share screen or camera videos")
+            if ReelProduct.current == .notetaker {
+                // Screen recordings live in the other app.
+                if ProductOwnership.recorderURL != nil {
+                    sidebarButton("Reel Recorder", symbol: "arrow.up.forward.app", selected: false) {
+                        ProductOwnership.openRecorderApp()
+                    }.help("Open Reel Recorder for screen and camera videos")
+                }
+            } else {
+                sidebarButton("Screen recordings", symbol: "film", selected: false) {
+                    (NSApp.delegate as? AppDelegate)?.showLibrary()
+                }.help("Record and share screen or camera videos")
+            }
             Spacer()
             if let account = model.account {
                 Label {
@@ -144,7 +160,7 @@ struct MeetingWorkspaceView: View {
             HStack(spacing: 4) {
                 sidebarButton("Settings", symbol: "gearshape", selected: false) {
                     (NSApp.delegate as? AppDelegate)?.showSettings()
-                }
+                }.lineLimit(1).layoutPriority(1)
                 ReelAppearanceMenu()
             }
         }
