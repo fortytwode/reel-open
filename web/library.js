@@ -30,7 +30,7 @@ let participantMeetings = [], participantLoading = false, participantError = "",
 let note = null, noteLoading = false, noteError = "", noteLoadNumber = 0;
 let calendar = null;
 let upcomingEvents = [], upcomingLoading = false, upcomingLoaded = false, upcomingLoadNumber = 0, showAllUpcoming = false, noteTab = "Summary";
-let pastRange = "any", pastPerson = "", noteSearch = "", pastSource = "all", pastFolder = "", noteFolders = [], namingFolder = false;
+let pastRange = "any", pastPerson = "", noteSearch = "", pastSource = "all", pastFolder = "", noteFolders = [], namingFolder = false, renamingFolder = false;
 let editingSummary = false, sharingOpen = false, workspaceBusy = false;
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
@@ -522,16 +522,31 @@ function renderMeetings() {
     }));
   if (pastFolder && !noteFolders.some((folder) => folder.id === pastFolder)) pastFolder = "";
   pastHead.append(filters); past.append(pastHead);
+  const openFolder = noteFolders.find((folder) => folder.id === pastFolder);
+  if (openFolder && !namingFolder) {
+    const manage = node("p", "nt-read", `Folder: ${openFolder.name} · `);
+    const rename = node("button", "nt-text-button", "Rename"), remove = node("button", "nt-text-button", "Delete folder");
+    rename.type = remove.type = "button";
+    rename.addEventListener("click", () => { renamingFolder = true; namingFolder = true; render(); });
+    remove.addEventListener("click", async () => {
+      // Deleting a folder never deletes notes; they return to "No folder".
+      const data = await deliveryPost("/delivery/folders", { delete: openFolder.id });
+      if (data?.folders) { noteFolders = data.folders; pastFolder = ""; loadParticipantMeetings(); }
+    });
+    manage.append(rename, " · ", remove, " (notes are kept)"); past.append(manage);
+  }
   if (namingFolder) {
     const form = node("form", "nt-inline-form"), input = node("input"), save = node("button", "", "Create folder"), cancel = node("button", "secondary", "Cancel");
     input.id = "new-note-folder"; input.maxLength = 80; input.required = true; input.placeholder = "Folder name"; input.setAttribute("aria-label", "Folder name");
+    const renaming = renamingFolder && openFolder;
+    if (renaming) { input.value = openFolder.name; save.textContent = "Rename folder"; }
     save.type = "submit"; cancel.type = "button";
-    cancel.addEventListener("click", () => { namingFolder = false; render(); });
+    cancel.addEventListener("click", () => { namingFolder = renamingFolder = false; render(); });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const data = await deliveryPost("/delivery/folders", { create: input.value });
-      if (data?.folders) { noteFolders = data.folders; pastFolder = data.folders.at(-1)?.id || ""; }
-      namingFolder = false; render();
+      const data = await deliveryPost("/delivery/folders", renaming ? { rename: { id: openFolder.id, name: input.value } } : { create: input.value });
+      if (data?.folders) { noteFolders = data.folders; if (!renaming) pastFolder = data.folders.at(-1)?.id || ""; }
+      namingFolder = renamingFolder = false; render();
     });
     form.append(input, save, cancel); past.append(form);
   }
