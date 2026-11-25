@@ -245,3 +245,51 @@ test('Notetaker joins an upcoming call on request and answers questions with sou
     assert.equal(await page.locator('.nt-answer a').getAttribute('href'), `http://127.0.0.1:${server.address().port}/reel/notetaker#meetings/${note.id}`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
+
+test('Notetaker creates an AI connection key once and shows how to add it', async () => {
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const browser = await chromium.launch({ headless:true, executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' });
+  try {
+    const page = await browser.newPage();
+    await page.route('**/reel/firebase.js*', route => route.fulfill({ contentType:'text/javascript', body:`
+      export const FB_CDN='https://sdk.example.test/', CLOUD_CONFIG={firestoreDatabase:'reel'}, EMU=false, googleAccountLabel='a work account';
+      const user={uid:'owner',email:'owner@rocketshiphq.com',emailVerified:true,getIdToken:async()=> 'token'};
+      const auth={currentUser:user}; const am={signOut:async()=>{}, signInWithPopup:async()=>{}};
+      export const loadAuth=async()=>({auth,am}); export const observeReelAccount=(_am,_auth,cb)=>{cb(user,user)};
+      export const sessionSnapshot=u=>u&&({uid:u.uid,email:u.email,getIdToken:()=>u.getIdToken()}); export const googleSignInProvider=()=>({});
+    ` }));
+    await page.route('https://sdk.example.test/firebase-firestore.js', route => route.fulfill({contentType:'text/javascript',body:`
+      export const getFirestore=()=>({}); export const collection=(...x)=>x; export const query=x=>x;
+      export const orderBy=()=>null; export const onSnapshot=(_q,cb)=>{queueMicrotask(()=>cb({docs:[]}));return ()=>{}};
+    `}));
+    await page.route('https://meetings.example.test/**', route => route.fulfill({json:{meetings:[],events:[],config:{enabled:true,calendar_ids:['primary']},capabilities:{calendar:true}}}));
+    let tokens = [];
+    await page.route('https://delivery.example.test/**', route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/delivery/mcp-tokens') {
+        const body = route.request().method() === 'POST' ? route.request().postDataJSON() : null;
+        if (body?.create) { tokens = [{id:'t1',label:body.create,created:1795600000}];
+          return route.fulfill({json:{tokens,endpoint:'https://delivery.example.test/mcp',created:{id:'t1',token:'reel_mcp_secret'}}}); }
+        if (body?.revoke) { tokens = []; }
+        return route.fulfill({json:{tokens,endpoint:'https://delivery.example.test/mcp'}});
+      }
+      if (url.pathname === '/delivery/prompts') return route.fulfill({json:{mine:[],team:[]}});
+      if (url.pathname.endsWith('folders')) return route.fulfill({json:{folders:[]}});
+      return route.fulfill({json:{meetings:[],next_cursor:null}});
+    });
+    await page.goto(`http://127.0.0.1:${server.address().port}/reel/notetaker#connect`);
+    await page.getByText('No connections yet.').waitFor();
+    assert.equal(await page.locator('#nav-connect[aria-current="page"]').count(), 1);
+    await page.locator('#connect-label').fill('Claude on my laptop');
+    await page.getByRole('button', { name: 'Create connection key' }).click();
+    await page.getByText("Copy it now. For your security it won't be shown again.").waitFor();
+    const blocks = await page.locator('.nt-code pre').allTextContents();
+    assert.equal(blocks[0], 'reel_mcp_secret');
+    assert.equal(blocks[1], 'claude mcp add --transport http reel-notetaker https://delivery.example.test/mcp --header "Authorization: Bearer reel_mcp_secret"');
+    await page.getByRole('button', { name: "I've copied it" }).click();
+    assert.equal(await page.locator('.nt-code').count(), 0);
+    assert.equal(await page.getByText('Claude on my laptop').count(), 1);
+    await page.getByRole('button', { name: 'Revoke' }).click();
+    await page.getByText('No connections yet.').waitFor();
+  } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
+});

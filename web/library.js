@@ -34,6 +34,7 @@ let pastRange = "any", pastPerson = "", noteSearch = "", pastSource = "all", pas
 let editingSummary = false, sharingOpen = false, workspaceBusy = false, taskFilter = "open";
 let transcriptHits = new Map(), transcriptQuery = "", transcriptTimer = null, askState = { question: "", answer: null, citations: [], busy: false, error: "", scope: null };
 let rewriteBusy = false, invitationNote = "";
+let sharedFolders = [], namingShared = false, savedPrompts = { mine: [], team: [] }, savingPrompt = false, connectState = { tokens: [], endpoint: "", created: null, loaded: false };
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
 const validUser = (u) => !!u;
@@ -81,7 +82,7 @@ const hostPage = name => {
 const hostRecorder = hostPage("reel-recorder-url"), hostNotetaker = hostPage("reel-notetaker-url");
 const hostPages = !!(hostRecorder && hostNotetaker);
 const proxied = !hostPages && !fixedNotetaker && !!organization && sameOrigin(location.href, organization.notesBaseURL) && !sameOrigin(location.href, organization.webBase);
-const meetingHash = () => /^#(?:meetings(?:\/.*)?|tasks|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
+const meetingHash = () => /^#(?:meetings(?:\/.*)?|tasks|connect|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
 let notetaker = fixedNotetaker || (proxied && meetingHash());
 // Where the library is served from another origin, open Notetaker there too so
 // people sign in once for both products.
@@ -116,6 +117,7 @@ const isRecent = () => !notetaker && location.hash === "#recent";
 const isCalendar = () => location.hash === "#calendar" || (notetaker && /^#(?:calendar-meeting|meeting-request)=/.test(location.hash));
 const selectedNote = () => /^#meetings\/(reel_[a-f0-9]{64})$/.exec(location.hash)?.[1] || null;
 const isTasks = () => notetaker && location.hash === "#tasks";
+const isConnect = () => notetaker && location.hash === "#connect";
 const isMeetings = () => location.hash === "#meetings" || !!selectedNote() || (notetaker && !isCalendar());
 const isArchived = () => location.hash === "#archive";
 const isPinned = () => location.hash === "#pinned";
@@ -175,7 +177,7 @@ function updateView() {
     return;
   }
   const folder = folders.find((f) => f.id === selectedFolder());
-  const title = calendarView ? "Meeting calendar" : isTasks() ? "Tasks" : meetingsView ? "Meetings" : recentView ? "Recently viewed videos" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
+  const title = calendarView ? "Meeting calendar" : isTasks() ? "Tasks" : isConnect() ? "Connect an AI assistant" : meetingsView ? "Meetings" : recentView ? "Recently viewed videos" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
   el("view-title").textContent = title;
   el("view-description").hidden = !recentView && !isArchived();
   el("view-description").textContent = isArchived() ? "Archived recordings are hidden from your other library views. Existing share links still work." : "Videos opened from this library on this browser.";
@@ -198,7 +200,7 @@ function updateView() {
   }
   el("search").placeholder = meetingsView ? "Search meetings" : "Search recordings";
   document.title = `${title} · ${productName()}`;
-  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !calendarView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView && !isTasks()], ["nav-tasks", isTasks()], ["nav-calendar", calendarView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
+  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !calendarView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView && !isTasks() && !isConnect()], ["nav-tasks", isTasks()], ["nav-connect", isConnect()], ["nav-calendar", calendarView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
     const url = new URL(location.href); url.hash = id.slice(4) === "library" ? "library" : id.slice(4);
     el(id).href = url.href;
     el(id).classList.toggle("active", selected);
@@ -489,6 +491,7 @@ function renderMeetings() {
   if (selectedNote()) return renderNote();
   list.classList.add("nt-home");
   if (isTasks()) return renderTasks();
+  if (isConnect()) return renderConnect();
   list.append(askPanel(null));
   const ownIDs = new Set(participantMeetings.flatMap((m) => Array.isArray(m.local_recording_ids) ? m.local_recording_ids : []));
   const combined = [...participantMeetings, ...meetings.filter((m) => !ownIDs.has(m.id))];
@@ -498,7 +501,8 @@ function renderMeetings() {
   const matches = (m) => !term || transcriptHits.has(m.id) || [m.title, m.summary, ...(Array.isArray(m.attendees) ? m.attendees : [])].some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(term));
   const since = pastRange === "today" ? new Date().setHours(0, 0, 0, 0) : pastRange === "7" ? Date.now() - 7 * 864e5 : pastRange === "30" ? Date.now() - 30 * 864e5 : 0;
   const withPerson = (m) => (!pastPerson || (Array.isArray(m.attendees) && m.attendees.includes(pastPerson)))
-    && (pastSource === "all" || (pastSource === "shared") === !!m.shared_with_me) && (!pastFolder || m.folder_id === pastFolder);
+    && (pastSource === "all" || (pastSource === "shared") === !!m.shared_with_me)
+    && (!pastFolder || (pastFolder.startsWith("s:") ? (sharedFolders.find((f) => "s:" + f.id === pastFolder)?.meeting_ids || []).includes(m.id) : m.folder_id === pastFolder));
   const filtered = combined.filter((m) => matches(m) && withPerson(m) && Date.parse(m.started_at) >= since).sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
   const busy = meetingLoading || participantLoading;
   el("result-count").textContent = busy ? "Loading…" : term ? `${filtered.length} of ${combined.length} meetings` : `${combined.length} meetings`;
@@ -542,13 +546,29 @@ function renderMeetings() {
     filterControl("Filter by date", pastRange, [["any", "Any time"], ["today", "Today"], ["7", "Last 7 days"], ["30", "Last 30 days"]], (value) => { pastRange = value; render(); }),
     filterControl("Filter by attendee", pastPerson, [["", "Everyone"], ...people], (value) => { pastPerson = value; render(); }),
     filterControl("Filter by source", pastSource, [["all", "All notes"], ["mine", "My meetings"], ["shared", "Shared with me"]], (value) => { pastSource = value; render(); }),
-    filterControl("Filter by folder", pastFolder, [["", "All folders"], ...noteFolders.map((folder) => [folder.id, folder.name]), ["+", "New folder…"]], (value) => {
-      if (value === "+") namingFolder = true; else pastFolder = value;
+    filterControl("Filter by folder", pastFolder, [["", "All folders"], ...noteFolders.map((folder) => [folder.id, folder.name]),
+      ...sharedFolders.map((folder) => ["s:" + folder.id, `Shared: ${folder.name}`]), ["+", "New folder…"], ["s+", "New shared folder…"]], (value) => {
+      if (value === "+") namingFolder = true; else if (value === "s+") namingShared = true; else pastFolder = value;
       render();
     }));
-  if (pastFolder && !noteFolders.some((folder) => folder.id === pastFolder)) pastFolder = "";
+  if (pastFolder && !noteFolders.some((folder) => folder.id === pastFolder) && !sharedFolders.some((folder) => "s:" + folder.id === pastFolder)) pastFolder = "";
   pastHead.append(filters); past.append(pastHead);
   const openFolder = noteFolders.find((folder) => folder.id === pastFolder);
+  const openShared = sharedFolders.find((folder) => "s:" + folder.id === pastFolder);
+  if (openShared && !namingShared) past.append(sharedFolderPanel(openShared));
+  if (namingShared) {
+    const form = node("form", "nt-inline-form"), input = node("input"), save = node("button", "", "Create shared folder"), cancel = node("button", "secondary", "Cancel");
+    input.id = "new-shared-folder"; input.maxLength = 80; input.required = true; input.placeholder = "Shared folder name, e.g. Peak account"; input.setAttribute("aria-label", "Shared folder name");
+    save.type = "submit"; cancel.type = "button";
+    cancel.addEventListener("click", () => { namingShared = false; render(); });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = await deliveryPost("/delivery/shared-folders", { create: input.value });
+      if (data?.folders) { sharedFolders = data.folders; pastFolder = data.created ? "s:" + data.created : ""; }
+      namingShared = false; render();
+    });
+    form.append(input, save, cancel); past.append(form);
+  }
   if (openFolder && !namingFolder) {
     const manage = node("p", "nt-read", `Folder: ${openFolder.name} · `);
     const rename = node("button", "nt-text-button", "Rename"), remove = node("button", "nt-text-button", "Delete folder");
@@ -708,6 +728,138 @@ const ASK_PROMPTS = {
   home: ["What are my open action items from this week?", "What did we decide about budgets recently?", "Summarise this week's client calls"],
   note: ["Write a follow-up email to the attendees", "What were the main disagreements?", "Suggest questions for the next meeting"],
 };
+function sharedFolderPanel(folder) {
+  const panel = node("section", "nt-share"); panel.setAttribute("aria-label", `Shared folder ${folder.name}`);
+  const editor = folder.role === "editor";
+  panel.append(node("h3", "", `Shared folder: ${folder.name}`),
+    node("p", "nt-read", `${folder.meeting_ids.length} ${folder.meeting_ids.length === 1 ? "meeting" : "meetings"}. Everyone below can open them. Add a meeting from its own page with "Add to shared folder".`));
+  const update = async (body) => { const data = await deliveryPost("/delivery/shared-folders", { id: folder.id, ...body }); if (data?.folders) { sharedFolders = data.folders;
+    if (data.invitations) invitationNote = data.invitations.emailed.length ? `Added and emailed ${data.invitations.emailed.join(", ")}.` : `Added ${data.invitations.failed.join(", ")}, but the email didn't send.`;
+    loadParticipantMeetings(); } return data; };
+  const list = node("ul", "nt-share-list");
+  for (const member of folder.members) {
+    const item = node("li"); item.append(node("span", "", member.email));
+    if (member.email === folder.owner) item.append(node("span", "nt-role", "Owner"));
+    else if (editor) {
+      item.append(filterControl(`Access for ${member.email}`, member.role, [["editor", "Can edit"], ["viewer", "Can view"]], (value) => update({ add_member: member.email, role: value })));
+      const remove = node("button", "secondary", "Remove"); remove.type = "button"; remove.addEventListener("click", () => update({ remove_member: member.email })); item.append(remove);
+    } else item.append(node("span", "nt-role", member.role === "editor" ? "Can edit" : "Can view"));
+    list.append(item);
+  }
+  panel.append(list);
+  if (editor) {
+    const form = node("form", "nt-inline-form"), input = node("input"), role = filterControl("Access for the person added", "editor", [["editor", "Can edit"], ["viewer", "Can view"]], () => {}), add = node("button", "", "Add person");
+    input.type = "email"; input.id = "folder-member"; input.required = true; input.placeholder = `name@${organization.allowedEmailDomain || "company.com"}`; input.setAttribute("aria-label", "Email to add"); add.type = "submit";
+    form.addEventListener("submit", (event) => { event.preventDefault(); update({ add_member: input.value.trim(), role: role.value }); });
+    form.append(input, role, add); panel.append(form);
+  }
+  if (invitationNote) panel.append(node("p", "nt-banner", invitationNote));
+  const footer = node("p", "nt-read");
+  if (folder.is_owner) {
+    const remove = node("button", "nt-text-button", "Delete shared folder"); remove.type = "button";
+    remove.addEventListener("click", async () => { const data = await update({ delete: true }); if (data) pastFolder = ""; render(); });
+    footer.append(remove, " (meetings stay with the people who were in them)");
+  } else {
+    const leave = node("button", "nt-text-button", "Leave this folder"); leave.type = "button";
+    leave.addEventListener("click", async () => { await update({ remove_member: currentUser.email }); pastFolder = ""; render(); });
+    footer.append(leave);
+  }
+  panel.append(footer);
+  return panel;
+}
+function promptChips(meetingId, ask) {
+  const scope = meetingId ? "note" : "all";
+  const saved = [...savedPrompts.mine.map((p) => ({ ...p, mine: true, team: false })), ...savedPrompts.team.map((p) => ({ ...p, team: true }))]
+    .filter((p) => p.scope === scope || p.scope === "all");
+  const prompts = node("div", "nt-prompts");
+  for (const prompt of saved) {
+    const chip = node("span", "nt-saved-prompt");
+    const run = node("button", "nt-prompt nt-prompt-saved", prompt.title); run.type = "button"; run.title = prompt.text + (prompt.team ? " (shared with the team)" : "");
+    run.addEventListener("click", () => ask(prompt.text)); chip.append(run);
+    if (prompt.mine) {
+      const remove = node("button", "nt-prompt-remove", "×"); remove.type = "button"; remove.setAttribute("aria-label", `Delete saved prompt ${prompt.title}`);
+      remove.addEventListener("click", async () => { const data = await deliveryPost("/delivery/prompts", { delete: prompt.id }); if (data?.mine) { savedPrompts = data; render(); } });
+      chip.append(remove);
+    }
+    prompts.append(chip);
+  }
+  for (const text of ASK_PROMPTS[meetingId ? "note" : "home"]) {
+    const chip = node("button", "nt-prompt", text); chip.type = "button"; chip.addEventListener("click", () => ask(text)); prompts.append(chip);
+  }
+  return prompts;
+}
+function savePromptForm(meetingId) {
+  if (!savingPrompt) {
+    const open = node("button", "nt-text-button", "Save this question"); open.type = "button";
+    open.addEventListener("click", () => { savingPrompt = true; render(); });
+    return open;
+  }
+  const form = node("form", "nt-inline-form"), title = node("input"), team = node("input"), teamLabel = node("label", "nt-check"), save = node("button", "", "Save"), cancel = node("button", "secondary", "Cancel");
+  title.id = "prompt-title"; title.maxLength = 60; title.required = true; title.placeholder = "Short name, e.g. Weekly wins"; title.setAttribute("aria-label", "Prompt name");
+  team.type = "checkbox"; team.id = "prompt-team"; teamLabel.htmlFor = team.id; teamLabel.append(team, " Share with the team");
+  save.type = "submit"; cancel.type = "button"; cancel.addEventListener("click", () => { savingPrompt = false; render(); });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = await deliveryPost("/delivery/prompts", { save: { title: title.value, text: askState.question, scope: meetingId ? "note" : "all", team: team.checked } });
+    if (data?.mine) savedPrompts = data;
+    savingPrompt = false; render();
+  });
+  form.append(title, teamLabel, save, cancel);
+  return form;
+}
+async function loadConnect() {
+  try {
+    const token = await currentUser.getIdToken();
+    const response = await fetch(organization.deliveryServiceURL + "/delivery/mcp-tokens", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+    const data = response.ok ? await response.json() : null;
+    connectState = { ...connectState, tokens: data?.tokens || [], endpoint: data?.endpoint || "", loaded: true };
+  } catch { connectState = { ...connectState, loaded: true }; }
+  if (isConnect()) render();
+}
+function codeBlock(text, label) {
+  const wrap = node("div", "nt-code"), pre = node("pre"), copy = node("button", "secondary", "Copy");
+  pre.textContent = text; copy.type = "button"; copy.setAttribute("aria-label", `Copy ${label}`); copy.addEventListener("click", () => copyText(copy, text));
+  wrap.append(pre, copy); return wrap;
+}
+function renderConnect() {
+  const list = el("recordings"); el("result-count").textContent = ""; message("");
+  if (!connectState.loaded) { loadConnect(); list.append(node("p", "nt-empty", "Loading your connections…")); return; }
+  const page = node("section", "nt-connect");
+  page.append(node("p", "nt-lede", "Let Claude, ChatGPT or another assistant read your meeting notes. It sees only the meetings you can open here, and it can't change anything."));
+  const endpoint = connectState.endpoint || organization.deliveryServiceURL + "/mcp";
+  if (connectState.created) {
+    const token = connectState.created.token;
+    const box = node("div", "nt-share");
+    box.append(node("h3", "", "Your new connection key"), node("p", "nt-banner", "Copy it now. For your security it won't be shown again."), codeBlock(token, "connection key"),
+      node("h3", "", "Claude Code"), codeBlock(`claude mcp add --transport http reel-notetaker ${endpoint} --header "Authorization: Bearer ${token}"`, "Claude Code command"),
+      node("h3", "", "Claude Desktop, Cursor and others (config file)"),
+      codeBlock(JSON.stringify({ mcpServers: { "reel-notetaker": { command: "npx", args: ["-y", "mcp-remote@0.16.6", endpoint, "--header", `Authorization: Bearer ${token}`] } } }, null, 2), "config"),
+      node("p", "nt-read", "ChatGPT and claude.ai web connectors need a sign-in flow this connection doesn't offer yet; use Claude Code or a desktop app."));
+    const done = node("button", "", "I've copied it"); done.type = "button"; done.addEventListener("click", () => { connectState = { ...connectState, created: null }; render(); });
+    box.append(done); page.append(box);
+  }
+  page.append(node("h3", "", "What the assistant can do"));
+  const tools = node("ul", "nt-points");
+  for (const line of ["List your meetings and their summaries", "Open one meeting: summary, action items, your private notes and the transcript", "Search every transcript for exact words", "List action items across meetings and whether they're done"]) tools.append(node("li", "", line));
+  page.append(tools, node("h3", "", "Your connections"));
+  const rows = node("ul", "nt-share-list");
+  if (!connectState.tokens.length) rows.append(node("li", "nt-empty", "No connections yet."));
+  for (const item of connectState.tokens) {
+    const row = node("li"), revoke = node("button", "secondary", "Revoke"); revoke.type = "button";
+    revoke.addEventListener("click", async () => { const data = await deliveryPost("/delivery/mcp-tokens", { revoke: item.id }); if (data) { connectState = { ...connectState, tokens: data.tokens }; render(); } });
+    row.append(node("span", "", item.label), node("span", "nt-role", `Added ${new Date(item.created * 1000).toLocaleDateString()}`), revoke); rows.append(row);
+  }
+  const form = node("form", "nt-inline-form"), label = node("input"), create = node("button", "", "Create connection key");
+  label.id = "connect-label"; label.maxLength = 60; label.required = true; label.placeholder = "Name it, e.g. Claude on my laptop"; label.setAttribute("aria-label", "Connection name"); create.type = "submit";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = await deliveryPost("/delivery/mcp-tokens", { create: label.value });
+    if (data?.created) { connectState = { ...connectState, tokens: data.tokens, endpoint: data.endpoint, created: data.created }; render(); }
+  });
+  form.append(label, create);
+  page.append(rows, form, node("p", "nt-read", `Server address: ${endpoint}`));
+  list.append(page);
+}
 function askPanel(meetingId) {
   const panel = node("section", "nt-ask"); panel.setAttribute("aria-label", "Ask about your meetings");
   const form = node("form", "nt-ask-form"), input = node("input"), go = node("button", "", askState.busy ? "Thinking…" : "Ask");
@@ -717,7 +869,7 @@ function askPanel(meetingId) {
   if (askState.scope === meetingId) input.value = askState.question;
   const ask = async (question) => {
     question = question.trim(); if (!question || askState.busy) return;
-    askState = { question, answer: null, citations: [], busy: true, error: "", scope: meetingId }; render();
+    askState = { question, answer: null, citations: [], busy: true, error: "", scope: meetingId }; savingPrompt = false; render();
     const data = await deliveryPost("/delivery/ask", meetingId ? { question, meeting_id: meetingId } : { question });
     askState = { ...askState, busy: false, answer: data?.answer || null, citations: Array.isArray(data?.citations) ? data.citations : [],
       error: data ? "" : "Couldn't get an answer. Try again." };
@@ -740,14 +892,12 @@ function askPanel(meetingId) {
         answer.append(sources);
       }
       const copy = node("button", "nt-text-button", "Copy answer"); copy.type = "button";
-      copy.addEventListener("click", () => copyText(copy, askState.answer)); answer.append(copy);
+      copy.addEventListener("click", () => copyText(copy, askState.answer));
+      const actionsRow = node("div", "nt-answer-actions"); actionsRow.append(copy, savePromptForm(meetingId)); answer.append(actionsRow);
     }
     panel.append(answer);
   } else {
-    const prompts = node("div", "nt-prompts");
-    for (const prompt of ASK_PROMPTS[meetingId ? "note" : "home"]) {
-      const chip = node("button", "nt-prompt", prompt); chip.type = "button"; chip.addEventListener("click", () => ask(prompt)); prompts.append(chip);
-    }
+    const prompts = promptChips(meetingId, ask);
     panel.append(prompts);
   }
   return panel;
@@ -821,6 +971,16 @@ function renderNote() {
   if (ws && ws.access !== "organization") {
     actions.append(filterControl("Folder for this note", ws.folder_id || "", [["", "No folder"], ...noteFolders.map((folder) => [folder.id, folder.name])],
       (value) => noteChange("folder", { folder_id: value || null })));
+    const inShared = sharedFolders.filter((folder) => folder.meeting_ids.includes(note.id));
+    const addable = ws.can_share ? sharedFolders.filter((folder) => folder.role === "editor" && !folder.meeting_ids.includes(note.id)) : [];
+    if (addable.length) {
+      actions.append(filterControl("Add to a shared folder", "", [["", "Add to shared folder…"], ...addable.map((folder) => [folder.id, folder.name])], async (value) => {
+        if (!value) return;
+        const data = await deliveryPost("/delivery/shared-folders", { id: value, add_meeting: note.id });
+        if (data?.folders) { sharedFolders = data.folders; loadNote(); }
+      }));
+    }
+    if (inShared.length) head.append(node("p", "nt-shared", `In shared ${inShared.length === 1 ? "folder" : "folders"}: ${inShared.map((folder) => folder.name).join(", ")}`));
   }
 
   let sharing = null;
@@ -1035,6 +1195,13 @@ async function loadParticipantMeetings() {
       const response = await fetch(organization.deliveryServiceURL + "/delivery/folders", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
       const data = response.ok ? await response.json() : null;
       if (current() && Array.isArray(data?.folders)) { noteFolders = data.folders.filter((folder) => folder && typeof folder.id === "string" && typeof folder.name === "string"); render(); }
+      const [shared, prompts] = await Promise.all(["/delivery/shared-folders", "/delivery/prompts"].map((path) =>
+        fetch(organization.deliveryServiceURL + path, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)));
+      if (current()) {
+        if (Array.isArray(shared?.folders)) sharedFolders = shared.folders;
+        if (prompts && Array.isArray(prompts.mine) && Array.isArray(prompts.team)) savedPrompts = prompts;
+        render();
+      }
     } catch { /* folders are optional; the list works without them */ }
   } catch { if (current()) { participantLoading = false; participantError = "Couldn't load participant notes. Check your connection and click Refresh."; render(); } }
 }
