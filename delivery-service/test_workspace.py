@@ -53,6 +53,8 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(self.workspace('ana')['added_tasks'][0]['done'])
         row = next(m for m in self.call('owner', 'GET', 'meetings')[1]['meetings'] if m['id'] == MEETING)
         self.assertEqual((row['tasks_done'], row['tasks_added']), (2, 1))
+        self.assertEqual(row['task_state'], {'Send the report.': True})
+        self.assertEqual([(task['text'], task['done']) for task in row['added_tasks']], [('Book the review', True)])
         self.call('ana', 'POST', f'meetings/{MEETING}/tasks', {'remove': added[0]['id']})
         self.assertEqual(self.workspace('owner')['added_tasks'], [])
         self.assertEqual(self.call('owner', 'POST', f'meetings/{MEETING}/tasks', {'task': '', 'done': True})[0], 400)

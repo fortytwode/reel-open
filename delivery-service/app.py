@@ -915,6 +915,9 @@ def list_shared_notes(store, email):
         return {**{k:v for k,v in note.items() if k not in ('segments', 'transcript_text')}, 'local_recording_ids':ids,
                 'shared_with_me': level == 'shared', 'folder_id': user['meeting_folders'].get(meeting_id),
                 'tasks_done': open_tasks, 'tasks_added': len(extra['added']),
+                # Enough to show one list of action items across meetings without opening each note.
+                'task_state': {text: state.get('done') is True for text, state in extra['tasks'].items()},
+                'added_tasks': [{'id': task['id'], 'text': task['text'], 'done': task.get('done') is True} for task in extra['added']],
                 **({'summary': extra['summary']['text'], 'summary_edited': True} if extra['summary'] else {})}
     # Each note still gets its own authoritative recipient check. Bound concurrency
     # so a large index doesn't turn one request into unbounded storage traffic.

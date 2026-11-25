@@ -31,7 +31,7 @@ let note = null, noteLoading = false, noteError = "", noteLoadNumber = 0;
 let calendar = null;
 let upcomingEvents = [], upcomingLoading = false, upcomingLoaded = false, upcomingLoadNumber = 0, showAllUpcoming = false, noteTab = "Summary";
 let pastRange = "any", pastPerson = "", noteSearch = "", pastSource = "all", pastFolder = "", noteFolders = [], namingFolder = false, renamingFolder = false;
-let editingSummary = false, sharingOpen = false, workspaceBusy = false;
+let editingSummary = false, sharingOpen = false, workspaceBusy = false, taskFilter = "open";
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
 const validUser = (u) => !!u;
@@ -79,7 +79,7 @@ const hostPage = name => {
 const hostRecorder = hostPage("reel-recorder-url"), hostNotetaker = hostPage("reel-notetaker-url");
 const hostPages = !!(hostRecorder && hostNotetaker);
 const proxied = !hostPages && !fixedNotetaker && !!organization && sameOrigin(location.href, organization.notesBaseURL) && !sameOrigin(location.href, organization.webBase);
-const meetingHash = () => /^#(?:meetings(?:\/.*)?|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
+const meetingHash = () => /^#(?:meetings(?:\/.*)?|tasks|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
 let notetaker = fixedNotetaker || (proxied && meetingHash());
 // Where the library is served from another origin, open Notetaker there too so
 // people sign in once for both products.
@@ -113,6 +113,7 @@ function showProduct() {
 const isRecent = () => !notetaker && location.hash === "#recent";
 const isCalendar = () => location.hash === "#calendar" || (notetaker && /^#(?:calendar-meeting|meeting-request)=/.test(location.hash));
 const selectedNote = () => /^#meetings\/(reel_[a-f0-9]{64})$/.exec(location.hash)?.[1] || null;
+const isTasks = () => notetaker && location.hash === "#tasks";
 const isMeetings = () => location.hash === "#meetings" || !!selectedNote() || (notetaker && !isCalendar());
 const isArchived = () => location.hash === "#archive";
 const isPinned = () => location.hash === "#pinned";
@@ -172,7 +173,7 @@ function updateView() {
     return;
   }
   const folder = folders.find((f) => f.id === selectedFolder());
-  const title = calendarView ? "Meeting calendar" : meetingsView ? "Meetings" : recentView ? "Recently viewed videos" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
+  const title = calendarView ? "Meeting calendar" : isTasks() ? "Tasks" : meetingsView ? "Meetings" : recentView ? "Recently viewed videos" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
   el("view-title").textContent = title;
   el("view-description").hidden = !recentView && !isArchived();
   el("view-description").textContent = isArchived() ? "Archived recordings are hidden from your other library views. Existing share links still work." : "Videos opened from this library on this browser.";
@@ -195,7 +196,7 @@ function updateView() {
   }
   el("search").placeholder = meetingsView ? "Search meetings" : "Search recordings";
   document.title = `${title} · ${productName()}`;
-  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !calendarView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView], ["nav-calendar", calendarView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
+  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !calendarView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView && !isTasks()], ["nav-tasks", isTasks()], ["nav-calendar", calendarView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
     const url = new URL(location.href); url.hash = id.slice(4) === "library" ? "library" : id.slice(4);
     el(id).href = url.href;
     el(id).classList.toggle("active", selected);
@@ -466,6 +467,7 @@ function renderMeetings() {
   document.documentElement.toggleAttribute("data-note", !!selectedNote());
   if (selectedNote()) return renderNote();
   list.classList.add("nt-home");
+  if (isTasks()) return renderTasks();
   const ownIDs = new Set(participantMeetings.flatMap((m) => Array.isArray(m.local_recording_ids) ? m.local_recording_ids : []));
   const combined = [...participantMeetings, ...meetings.filter((m) => !ownIDs.has(m.id))];
   const term = el("search").value.trim().toLocaleLowerCase();
@@ -616,6 +618,48 @@ function noteMarkdown(blocks, people, meta, transcriptText) {
   }
   if (transcriptText) lines.push("", "## Transcript", "", transcriptText);
   return lines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+// One list of action items across every meeting, open ones first by meeting date.
+function renderTasks() {
+  const list = el("recordings");
+  el("result-count").textContent = participantLoading ? "Loading…" : "";
+  const section = node("section", "nt-section"); section.setAttribute("aria-label", "Tasks");
+  const head = node("div", "nt-section-head"); head.append(node("h2", "", "Action items across your meetings"));
+  const filters = node("div", "nt-filters");
+  filters.append(filterControl("Show", taskFilter, [["open", "Open"], ["done", "Done"], ["all", "All"]], (value) => { taskFilter = value; render(); }));
+  head.append(filters); section.append(head);
+  const term = el("search").value.trim().toLocaleLowerCase(); let shown = 0, open = 0;
+  for (const m of [...participantMeetings].sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))) {
+    const items = [
+      ...summaryBlocks(m.summary).filter((block) => block.type === "todo").map((block) => ({ key: block.text, text: block.text, done: m.task_state?.[block.text] === true })),
+      ...(Array.isArray(m.added_tasks) ? m.added_tasks.map((task) => ({ key: task.id, text: task.text, done: task.done === true })) : []),
+    ];
+    open += items.filter((item) => !item.done).length;
+    const visible = items.filter((item) => (taskFilter === "all" || (taskFilter === "done") === item.done) && (!term || item.text.toLocaleLowerCase().includes(term) || m.title.toLocaleLowerCase().includes(term)));
+    if (!visible.length) continue;
+    const started = new Date(m.started_at);
+    const title = node("h3", "nt-day"); const link = node("a", "nt-link", m.title); link.href = libraryURL(`meetings/${m.id}`);
+    title.append(link, ` · ${Number.isNaN(started.getTime()) ? "" : dayLabel(started)}`); section.append(title);
+    const checklist = node("ul", "nt-checklist nt-tasklist");
+    for (const item of visible) {
+      const row = node("li"), box = node("input"), label = node("label", "", item.text);
+      box.type = "checkbox"; box.checked = item.done; box.id = `task-${shown++}`; label.htmlFor = box.id; row.classList.toggle("done", item.done);
+      box.addEventListener("change", async () => {
+        const data = await deliveryPost(`/delivery/meetings/${m.id}/tasks`, { task: item.key, done: box.checked });
+        if (data?.meeting) {
+          const state = data.meeting.workspace || {};
+          m.task_state = Object.fromEntries(Object.entries(state.tasks || {}).map(([text, value]) => [text, value?.done === true]));
+          m.added_tasks = (state.added_tasks || []).map((task) => ({ id: task.id, text: task.text, done: task.done === true }));
+        }
+        render();
+      });
+      row.append(box, label); checklist.append(row);
+    }
+    section.append(checklist);
+  }
+  if (!shown && !participantLoading) section.append(node("p", "nt-empty", term ? "No action items match your search." : taskFilter === "open" ? "Nothing open. Every action item from your meetings is ticked off." : "No action items yet."));
+  head.querySelector("h2").textContent = `Action items across your meetings${open ? ` (${open} open)` : ""}`;
+  list.append(section); message(participantError || "", !!participantError);
 }
 async function deliveryPost(path, body) {
   if (!validUser(currentUser) || workspaceBusy) return null;
