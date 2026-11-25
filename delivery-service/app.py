@@ -696,7 +696,7 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
             result['invitations'] = {'emailed': emailed, 'failed': failed}
         return jsonify(**result)
 
-    def send_invite(recipient, inviter, note):
+    def send_invite(recipient, inviter, note, what=None, url=None):
         if 'providers' not in dependencies:
             if __package__:
                 from .providers import configured_providers
@@ -708,7 +708,7 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
         with delivery.context(lambda: None):
             if delivery.find_email(key, since=None):
                 return
-            draft = delivery.create_draft(key, invite_message(recipient, inviter, note, configured_notes_url(note['id'])))
+            draft = delivery.create_draft(key, invite_message(recipient, inviter, note, url or configured_notes_url(note['id']), what))
             delivery.send_draft(key, draft)
 
     @app.post('/delivery/meetings/<meeting_id>/regenerate')
@@ -745,6 +745,243 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
             return jsonify(error=str(exc)), exc.status
         titles = {note['id']: {'id': note['id'], 'title': note.get('title', ''), 'started_at': note.get('started_at', '')} for note in notes}
         return jsonify(answer=result['answer'], citations=[titles[value] for value in result['citations']])
+
+    # ---- Shared folders ----
+    def reconcile_access(meeting_id, emails):
+        """List or unlist a meeting for each person, from the access they have now."""
+        note, _ = note_store().load('notes/' + meeting_id)
+        if note is None:
+            return
+        _validate_note(note, meeting_id)
+        extra = workspace.load_extra(note_store(), meeting_id)
+        for person in emails:
+            if person in note['recipients']:
+                continue
+            if workspace.access_level(note, extra, person) == 'shared':
+                update_note_index(note_store(), meeting_id, person, None, lambda: None)
+            else:
+                remove_note_index(note_store(), meeting_id, person)
+
+    def sync_folder_meeting(folder, meeting_id, affected):
+        members = folder['members'] if meeting_id in folder['meetings'] and not folder['deleted'] else {}
+        workspace.grant_folder_access(note_store(), meeting_id, folder['id'], members)
+        reconcile_access(meeting_id, set(affected) | set(members))
+
+    def folder_view(folder, email):
+        return {'id': folder['id'], 'name': folder['name'], 'owner': folder['owner'], 'is_owner': folder['owner'] == email,
+                'role': folder['members'].get(email), 'members': [{'email': e, 'role': r} for e, r in folder['members'].items()],
+                'meeting_ids': folder['meetings']}
+
+    def my_shared_folders(email):
+        folders = []
+        for folder_id in workspace.load_user(note_store(), email)['shared_folders']:
+            folder = workspace.load_folder(note_store(), folder_id)
+            if folder and email in folder['members']:
+                folders.append(folder_view(folder, email))
+        return folders
+
+    @app.route('/delivery/shared-folders', methods=['GET', 'POST'])
+    @workspace_route
+    def shared_folders():
+        email, _, body = workspace_request()
+        if request.method == 'GET':
+            return jsonify(folders=my_shared_folders(email))
+        result = {}
+        if 'create' in body:
+            result['created'] = workspace.create_shared_folder(note_store(), email, body['create'])
+            return jsonify(folders=my_shared_folders(email), **result)
+        folder = workspace.load_folder(note_store(), str(body.get('id', '')))
+        if not folder or email not in folder['members']:
+            raise LookupError
+        editor = folder['members'][email] == 'editor'
+        if 'rename' in body:
+            if not editor:
+                raise PermissionError
+            name = workspace._folder_name(body['rename'])
+            workspace.change_folder(note_store(), folder['id'], lambda state: state.update(name=name))
+        elif 'add_member' in body:
+            if not editor:
+                raise PermissionError
+            member, role = str(body['add_member']).strip().lower(), body.get('role', 'editor')
+            if not is_internal_email(member) or role not in workspace.ROLES:
+                raise workspace.WorkspaceError('Folders can be shared only inside your organization')
+            if member not in folder['members'] and len(folder['members']) >= workspace.MAX_FOLDER_MEMBERS:
+                raise workspace.WorkspaceError('Too many people in this folder')
+            new = member not in folder['members']
+            folder = workspace.change_folder(note_store(), folder['id'], lambda state: state['members'].update({member: role}))
+            workspace.join_shared_folder(note_store(), member, folder['id'])
+            for meeting_id in folder['meetings']:
+                sync_folder_meeting(folder, meeting_id, [member])
+            if new:
+                try:
+                    send_invite(member, email, {'id': 'folder-' + folder['id'], 'title': folder['name']}, 'folder', (notes_base_url() or '') + '#meetings')
+                    result['invitations'] = {'emailed': [member], 'failed': []}
+                except Exception:
+                    app.logger.warning('Folder invitation email failed')
+                    result['invitations'] = {'emailed': [], 'failed': [member]}
+        elif 'remove_member' in body:
+            member = str(body['remove_member']).strip().lower()
+            if member == folder['owner'] or (member != email and not editor):
+                raise PermissionError
+            folder = workspace.change_folder(note_store(), folder['id'], lambda state: state['members'].pop(member, None))
+            workspace.leave_shared_folder(note_store(), member, folder['id'])
+            for meeting_id in folder['meetings']:
+                sync_folder_meeting(folder, meeting_id, [member])
+        elif 'add_meeting' in body or 'remove_meeting' in body:
+            meeting_id = str(body.get('add_meeting') or body.get('remove_meeting'))
+            if not re.fullmatch(r'reel_[0-9a-f]{64}', meeting_id):
+                raise LookupError
+            if 'add_meeting' in body:
+                note = read_shared_note(note_store(), meeting_id, email)
+                # Only someone who was in the meeting can open its notes to a group.
+                if note is None or not note['workspace']['can_share'] or not editor:
+                    raise PermissionError
+                folder = workspace.change_folder(note_store(), folder['id'], lambda state: state['meetings'].append(meeting_id)
+                                                 if meeting_id not in state['meetings'] else None)
+            else:
+                if not editor:
+                    raise PermissionError
+                folder = workspace.change_folder(note_store(), folder['id'], lambda state: state.update(meetings=[m for m in state['meetings'] if m != meeting_id]))
+            sync_folder_meeting(folder, meeting_id, folder['members'])
+        elif body.get('delete') is True:
+            if folder['owner'] != email:
+                raise PermissionError
+            folder = workspace.change_folder(note_store(), folder['id'], lambda state: state.update(deleted=True))
+            for meeting_id in folder['meetings']:
+                sync_folder_meeting(folder, meeting_id, folder['members'])
+            for member in folder['members']:
+                workspace.leave_shared_folder(note_store(), member, folder['id'])
+        else:
+            raise workspace.WorkspaceError('Invalid request')
+        return jsonify(folders=my_shared_folders(email), **result)
+
+    # ---- Saved prompts ----
+    @app.route('/delivery/prompts', methods=['GET', 'POST'])
+    @workspace_route
+    def prompts():
+        email, _, body = workspace_request()
+        if request.method == 'POST':
+            if isinstance(body.get('save'), dict):
+                item = body['save']
+                workspace.save_prompt(note_store(), email, item.get('title'), item.get('text'), item.get('scope', 'all'), item.get('team') is True)
+            elif 'delete' in body:
+                workspace.delete_prompt(note_store(), email, str(body['delete']))
+            else:
+                raise workspace.WorkspaceError('Invalid request')
+        return jsonify(**workspace.list_prompts(note_store(), email))
+
+    # ---- Connections for AI assistants (MCP) ----
+    @app.route('/delivery/mcp-tokens', methods=['GET', 'POST'])
+    @workspace_route
+    def mcp_tokens():
+        email, _, body = workspace_request()
+        created = None
+        if request.method == 'POST':
+            if 'create' in body:
+                token, token_id = workspace.create_token(note_store(), email, body['create'], int(clock()))
+                created = {'id': token_id, 'token': token}
+            elif 'revoke' in body:
+                workspace.revoke_token(note_store(), email, str(body['revoke']))
+            else:
+                raise workspace.WorkspaceError('Invalid request')
+        result = {'tokens': workspace.load_user(note_store(), email)['mcp_tokens'], 'endpoint': request.host_url.rstrip('/') + '/mcp'}
+        if created:
+            result['created'] = created
+        return jsonify(**result)
+
+    @app.route('/mcp', methods=['GET', 'POST', 'DELETE'])
+    def mcp():
+        if request.method != 'POST':
+            return jsonify(error='Use POST'), 405
+        authorization = request.headers.get('Authorization', '')
+        email = workspace.token_owner(note_store(), authorization[7:].strip()) if authorization.startswith('Bearer ') else None
+        if not email:
+            return jsonify(error='A valid Reel Notetaker connection token is required'), 401
+        message = request.get_json(silent=True)
+        if not isinstance(message, dict) or message.get('jsonrpc') != '2.0' or not isinstance(message.get('method'), str):
+            return jsonify(jsonrpc='2.0', id=None, error={'code': -32600, 'message': 'Invalid request'}), 400
+        if 'id' not in message:
+            return '', 202
+        try:
+            result = mcp_handle(email, message['method'], message.get('params') or {})
+            return jsonify(jsonrpc='2.0', id=message['id'], result=result)
+        except LookupError as exc:
+            return jsonify(jsonrpc='2.0', id=message['id'], error={'code': -32601, 'message': str(exc) or 'Not found'})
+        except (ValueError, workspace.WorkspaceError) as exc:
+            return jsonify(jsonrpc='2.0', id=message['id'], error={'code': -32602, 'message': str(exc)})
+        except Exception:
+            app.logger.error('MCP request failed')
+            return jsonify(jsonrpc='2.0', id=message['id'], error={'code': -32603, 'message': 'Meeting notes are unavailable right now'})
+
+    def mcp_handle(email, method, params):
+        if method == 'initialize':
+            version = params.get('protocolVersion') if isinstance(params.get('protocolVersion'), str) else '2025-06-18'
+            return {'protocolVersion': version, 'capabilities': {'tools': {}},
+                    'serverInfo': {'name': 'reel-notetaker', 'version': '1.0.0'},
+                    'instructions': 'Read-only access to the Reel Notetaker meeting notes this person can open.'}
+        if method == 'ping':
+            return {}
+        if method == 'tools/list':
+            return {'tools': MCP_TOOLS}
+        if method != 'tools/call':
+            raise LookupError('Unknown method')
+        name, arguments = params.get('name'), params.get('arguments') or {}
+        if not isinstance(arguments, dict):
+            raise ValueError('arguments must be an object')
+        data = mcp_tool(email, name, arguments)
+        return {'content': [{'type': 'text', 'text': json.dumps(data, ensure_ascii=False, indent=1)}], 'isError': False}
+
+    def mcp_tool(email, name, arguments):
+        if name == 'list_meetings':
+            query = str(arguments.get('query') or '').casefold()
+            days = arguments.get('days')
+            limit = min(int(arguments.get('limit') or 25), 100)
+            notes = readable_notes(note_store(), email)
+            if isinstance(days, int) and days > 0:
+                cutoff = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(clock() - days * 86400))
+                notes = [n for n in notes if n.get('started_at', '') >= cutoff]
+            if query:
+                notes = [n for n in notes if query in (n.get('title', '') + ' ' + n.get('summary', '') + ' ' + ' '.join(n.get('attendees', []))).casefold()]
+            notes.sort(key=lambda n: n.get('started_at', ''), reverse=True)
+            return [{'meeting_id': n['id'], 'title': n.get('title'), 'started_at': n.get('started_at'),
+                     'attendees': n.get('attendees', []), 'summary': n.get('summary', '')[:600]} for n in notes[:limit]]
+        if name == 'get_meeting':
+            meeting_id = str(arguments.get('meeting_id', ''))
+            if not re.fullmatch(r'reel_[0-9a-f]{64}', meeting_id):
+                raise ValueError('meeting_id is the id from list_meetings')
+            note = read_shared_note(note_store(), meeting_id, email)
+            if note is None:
+                raise LookupError('Meeting not found')
+            view = note['workspace']
+            result = {'meeting_id': meeting_id, 'title': note.get('title'), 'started_at': note.get('started_at'),
+                      'duration_seconds': note.get('duration_seconds'), 'attendees': note.get('attendees', []),
+                      'summary': view['summary']['text'] if view['summary'] else note.get('summary', ''),
+                      'action_items_ticked': [text for text, state in view['tasks'].items() if state.get('done')],
+                      'added_action_items': [{'text': t['text'], 'done': t.get('done') is True} for t in view['added_tasks']],
+                      'my_private_notes': view['my_notes'], 'notes_url': note.get('notes_url')}
+            if arguments.get('include_transcript', True) is not False:
+                result['transcript'] = note.get('transcript_text', '')
+            return result
+        if name == 'search_transcripts':
+            query = str(arguments.get('query') or '')
+            if not 3 <= len(query.strip()) <= 200:
+                raise ValueError('query must be 3 to 200 characters')
+            notes = readable_notes(note_store(), email)
+            titles = {n['id']: n for n in notes}
+            return [{'meeting_id': r['id'], 'title': titles[r['id']].get('title'), 'started_at': titles[r['id']].get('started_at'),
+                     'excerpt': r['snippet']} for r in search_transcripts(notes, query)]
+        if name == 'list_action_items':
+            status = arguments.get('status', 'open')
+            items = []
+            for note in sorted(readable_notes(note_store(), email), key=lambda n: n.get('started_at', ''), reverse=True)[:100]:
+                extra = workspace.load_extra(note_store(), note['id'])
+                for line in action_lines(note.get('summary', '')):
+                    done = extra['tasks'].get(line, {}).get('done') is True
+                    items.append({'meeting': note.get('title'), 'started_at': note.get('started_at'), 'meeting_id': note['id'], 'task': line, 'done': done})
+                for task in extra['added']:
+                    items.append({'meeting': note.get('title'), 'started_at': note.get('started_at'), 'meeting_id': note['id'], 'task': task['text'], 'done': task.get('done') is True})
+            return [item for item in items if status == 'all' or (status == 'done') == item['done']][:500]
+        raise LookupError('Unknown tool')
 
     @app.get('/delivery/search')
     @workspace_route
@@ -1056,6 +1293,39 @@ def update_note_index(store, meeting_id, email, recording_id, fence):
     raise Conflict('Meeting index changed repeatedly')
 
 
+def action_lines(summary):
+    """Action items as the page shows them: lines under an "Action items" heading."""
+    lines, inside = [], False
+    for raw in str(summary or '').split('\n'):
+        line = raw.strip()
+        if not line:
+            continue
+        bullet = re.match(r'^[-•*]\s+(.*)$', line)
+        if not bullet and len(line) <= 48 and not re.search(r'[.!?]$', line.rstrip(':')) and ': ' not in line:
+            inside = bool(re.fullmatch(r'(?i)(action items|next steps|follow[- ]ups?):?', line))
+            continue
+        if inside:
+            lines.append(bullet.group(1) if bullet else line)
+    return lines
+
+
+MCP_TOOLS = [
+    {'name': 'list_meetings', 'description': 'List meetings whose notes you can open, newest first, with a short summary.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'query': {'type': 'string', 'description': 'Words to match in the title, summary or attendees'},
+         'days': {'type': 'integer', 'description': 'Only meetings from the last N days'},
+         'limit': {'type': 'integer', 'description': 'At most this many meetings (default 25, max 100)'}}}},
+    {'name': 'get_meeting', 'description': 'Full notes for one meeting: summary, action items, your private notes and the transcript.',
+     'inputSchema': {'type': 'object', 'required': ['meeting_id'], 'properties': {
+         'meeting_id': {'type': 'string', 'description': 'The meeting_id from list_meetings'},
+         'include_transcript': {'type': 'boolean', 'description': 'Include the full transcript (default true)'}}}},
+    {'name': 'search_transcripts', 'description': 'Find meetings whose transcript contains exact words, with the matching excerpt.',
+     'inputSchema': {'type': 'object', 'required': ['query'], 'properties': {'query': {'type': 'string'}}}},
+    {'name': 'list_action_items', 'description': 'Action items across your meetings, with whether each is ticked off.',
+     'inputSchema': {'type': 'object', 'properties': {'status': {'type': 'string', 'enum': ['open', 'done', 'all']}}}},
+]
+
+
 def readable_notes(store, email):
     """Every full note this person may read from their own list (attended or invited)."""
     index, _ = store.load(_index_key(email))
@@ -1093,7 +1363,7 @@ def search_transcripts(notes, query, limit=50):
     return results[:limit]
 
 
-def invite_message(recipient, inviter, note, url):
+def invite_message(recipient, inviter, note, url, what=None):
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     first = re.split(r'[._+\-]', recipient.split('@', 1)[0])[0].capitalize() or 'there'
@@ -1101,10 +1371,16 @@ def invite_message(recipient, inviter, note, url):
     title = ' '.join(str(note.get('title') or 'a meeting').split())[:150]
     message = MIMEMultipart('alternative')
     message['To'] = recipient
-    message['Subject'] = f'{who} shared meeting notes: {title}'
-    plain = f'Hi {first},\n\n{who} shared the notes from "{title}" with you in Reel Notetaker.\n\nOpen the notes: {url}'
-    html = (f'<p>Hi {escape(first)},</p><p>{escape(who)} shared the notes from &ldquo;{escape(title)}&rdquo; with you in Reel Notetaker.</p>'
-            f'<p><a href="{escape(url, quote=True)}">Open the notes</a></p>')
+    if what == 'folder':
+        message['Subject'] = f'{who} shared a folder of meeting notes: {title}'
+        plain = f'Hi {first},\n\n{who} added you to the shared folder "{title}" in Reel Notetaker. Its meeting notes are now in your list.\n\nOpen Reel Notetaker: {url}'
+        html = (f'<p>Hi {escape(first)},</p><p>{escape(who)} added you to the shared folder &ldquo;{escape(title)}&rdquo; in Reel Notetaker. '
+                f'Its meeting notes are now in your list.</p><p><a href="{escape(url, quote=True)}">Open Reel Notetaker</a></p>')
+    else:
+        message['Subject'] = f'{who} shared meeting notes: {title}'
+        plain = f'Hi {first},\n\n{who} shared the notes from "{title}" with you in Reel Notetaker.\n\nOpen the notes: {url}'
+        html = (f'<p>Hi {escape(first)},</p><p>{escape(who)} shared the notes from &ldquo;{escape(title)}&rdquo; with you in Reel Notetaker.</p>'
+                f'<p><a href="{escape(url, quote=True)}">Open the notes</a></p>')
     message.attach(MIMEText(plain, 'plain', 'utf-8'))
     message.attach(MIMEText(html, 'html', 'utf-8'))
     return message
