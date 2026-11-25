@@ -360,3 +360,9 @@ html[data-product="notetaker"] #meeting-calendar-panel .mc-events { max-height: 
 .nt-owner { display: inline-block; margin-right: 8px; padding: 1px 8px; border-radius: 999px; background: #e3f3ee; color: #17705c; font-size: 11.5px; font-weight: 650; vertical-align: 1px; }
 .nt-check { white-space: nowrap; }
 .nt-transcript > .nt-read { margin: 0 0 16px; }
+/* Calendar settings: one setting per row, so the consent sentence stays next to its box. */
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin: 12px 0; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls select { min-width: 260px; padding: 5px 8px; border: 1px solid #dfe3e6; border-radius: 7px; font: inherit; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls .mc-check { flex: 1 1 100%; display: flex; align-items: flex-start; gap: 8px; white-space: normal; color: #485059; font-size: 13px; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls button { flex: 0 0 auto; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-card { max-width: 760px; }
