@@ -8,7 +8,39 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, quote, urlsplit, urlunsplit
 from uuid import uuid4
 
-from reel_organization import meeting_domain_enabled, meeting_owner_allowed, public_account_access
+from reel_organization import is_internal_email, meeting_domain_enabled, meeting_owner_allowed, public_account_access
+
+
+ORG_UID_PREFIX = "org-"
+
+
+def org_placeholder_uid(email):
+    """Account id for a colleague enrolled by the organisation before they ever signed in.
+
+    It is derived from their company email, so only that verified company address
+    can act as them later."""
+    return ORG_UID_PREFIX + hashlib.sha256(str(email).strip().lower().encode()).hexdigest()[:40]
+
+
+def same_account(bound_uid, claims):
+    """True when a stored account id belongs to the signed-in person."""
+    if not bound_uid:
+        return False
+    if bound_uid == claims.get("sub"):
+        return True
+    email = str(claims.get("email", "")).strip().lower()
+    return (isinstance(bound_uid, str) and bound_uid.startswith(ORG_UID_PREFIX) and not public_account_access()
+            and claims.get("email_verified") is True and is_internal_email(email)
+            and bound_uid == org_placeholder_uid(email))
+
+
+def _kept_uid(state, claims):
+    """Keep an organisation enrolment's id so meetings already recorded stay attached."""
+    for key in ("identity", "config"):
+        bound = (state.get(key) or {}).get("owner_uid")
+        if bound and bound != claims["sub"] and same_account(bound, claims):
+            return bound
+    return claims["sub"]
 
 
 class CalendarMeetingError(Exception):
@@ -161,8 +193,9 @@ def normalize_event(calendar_id, event, owner_email, now=None):
     attendees = event.get("attendees", [])
     owner_attendee = next((x for x in attendees if str(x.get("email", "")).lower() == owner), None)
     organizer = event.get("organizer", {})
-    creator = str(event.get("creator", {}).get("email", "")).lower() == owner
-    if not (str(organizer.get("email", "")).lower() == owner or creator or owner_attendee is not None):
+    # Only the organiser or an invited person. Someone who merely created the event for another
+    # person (an assistant) is not on the call and must not get its recording or notes.
+    if not (str(organizer.get("email", "")).lower() == owner or owner_attendee is not None):
         return None
     if owner_attendee and owner_attendee.get("responseStatus") == "declined":
         return None
@@ -226,6 +259,47 @@ def normalize_event(calendar_id, event, owner_email, now=None):
 
 class GoogleCalendarFactory:
     """Read-only delegated Calendar API client; credentials stay server-side."""
+    @staticmethod
+    def _credentials(scopes):
+        credentials_path = os.getenv("GOOGLE_CALENDAR_CREDENTIALS", "/secrets/google-sa/credentials.json")
+        if not os.path.isfile(credentials_path):
+            raise CalendarMeetingError("Google Calendar credentials are unavailable")
+        from google.oauth2 import service_account
+        return service_account.Credentials.from_service_account_file(credentials_path, scopes=scopes)
+
+    def reachable(self, email):
+        """Whether this colleague's main calendar can be read (reads no events)."""
+        from google.auth.transport.requests import AuthorizedSession
+        try:
+            session = AuthorizedSession(self._credentials(["https://www.googleapis.com/auth/calendar.readonly"]).with_subject(email))
+            return session.get("https://www.googleapis.com/calendar/v3/calendars/primary", params={"fields": "id"}, timeout=10).status_code == 200
+        except Exception:
+            return False
+
+    def directory_emails(self, domain, admin):
+        """Active accounts in the company directory, if the directory scope has been granted."""
+        from google.auth.transport.requests import AuthorizedSession
+        try:
+            session = AuthorizedSession(self._credentials(
+                ["https://www.googleapis.com/auth/admin.directory.user.readonly"]).with_subject(admin))
+            emails, token = set(), None
+            for _ in range(20):
+                params = {"domain": domain, "maxResults": 500, "fields": "nextPageToken,users(primaryEmail,suspended,archived)"}
+                if token:
+                    params["pageToken"] = token
+                response = session.get("https://admin.googleapis.com/admin/directory/v1/users", params=params, timeout=15)
+                if response.status_code != 200:
+                    return set()
+                data = response.json()
+                emails |= {u["primaryEmail"].lower() for u in data.get("users", [])
+                           if u.get("primaryEmail") and not u.get("suspended") and not u.get("archived")}
+                token = data.get("nextPageToken")
+                if not token:
+                    break
+            return emails
+        except Exception:
+            return set()
+
     def __call__(self, owner_email, calendar_ids):
         credentials_path = os.getenv("GOOGLE_CALENDAR_CREDENTIALS", "/secrets/google-sa/credentials.json")
         if not os.path.isfile(credentials_path):
@@ -344,14 +418,15 @@ class CalendarMeetings:
                 if not self.grant_active(owner, selection):
                     raise CalendarSelectionChanged("Calendar authorization changed. Connect again.")
                 same_scope = same_scope and old.get("grant_id") == grant_id
-            state["config"] = {"enabled": True, "calendar_ids": ids, "owner_uid": claims["sub"],
+            uid = _kept_uid(state, claims)
+            state["config"] = {"enabled": True, "calendar_ids": ids, "owner_uid": uid,
                 "consent_mode": old.get("consent_mode", "ask") if same_scope else "ask",
                 "scope_revision": old.get("scope_revision", "legacy") if same_scope else uuid4().hex}
             if public_account_access():
                 state["config"]["grant_id"] = grant_id
                 if not same_scope:
                     self._cancel_excluded(state, ())
-            state["identity"] = {"owner_email": owner, "owner_uid": claims["sub"]}
+            state["identity"] = {"owner_email": owner, "owner_uid": uid}
             self._cancel_excluded(state, ids)
             return True, self._public_settings(state["config"])
         return self._mutate(owner, save)
@@ -360,7 +435,7 @@ class CalendarMeetings:
     def _verify_binding(state, claims):
         for key in ("identity", "config"):
             bound = (state.get(key) or {}).get("owner_uid")
-            if bound and bound != claims["sub"]:
+            if bound and not same_account(bound, claims):
                 raise CalendarMeetingError("Calendar connection belongs to a different account identity")
 
     def sources(self, claims):

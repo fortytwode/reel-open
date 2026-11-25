@@ -755,14 +755,16 @@ function sharedFolderPanel(folder) {
     const item = node("li"); item.append(node("span", "", member.email));
     if (member.email === folder.owner) item.append(node("span", "nt-role", "Owner"));
     else if (editor) {
-      item.append(filterControl(`Access for ${member.email}`, member.role, [["editor", "Can edit"], ["viewer", "Can view"]], (value) => update({ add_member: member.email, role: value })));
+      // Only the folder's owner decides who is in it and what they can do.
+      if (folder.is_owner) item.append(filterControl(`Access for ${member.email}`, member.role, [["editor", "Can edit"], ["viewer", "Can view"]], (value) => update({ add_member: member.email, role: value })));
+      else item.append(node("span", "nt-role", member.role === "editor" ? "Can edit" : "Can view"));
       const remove = node("button", "secondary", "Remove"); remove.type = "button"; remove.addEventListener("click", () => update({ remove_member: member.email })); item.append(remove);
     } else item.append(node("span", "nt-role", member.role === "editor" ? "Can edit" : "Can view"));
     list.append(item);
   }
   panel.append(list);
-  if (editor) {
-    const form = node("form", "nt-inline-form"), input = node("input"), role = filterControl("Access for the person added", "editor", [["editor", "Can edit"], ["viewer", "Can view"]], () => {}), add = node("button", "", "Add person");
+  if (folder.is_owner) {
+    const form = node("form", "nt-inline-form"), input = node("input"), role = filterControl("Access for the person added", "viewer", [["editor", "Can edit"], ["viewer", "Can view"]], () => {}), add = node("button", "", "Add person");
     input.type = "email"; input.id = "folder-member"; input.required = true; input.placeholder = `name@${organization.allowedEmailDomain || "company.com"}`; input.setAttribute("aria-label", "Email to add"); add.type = "submit";
     form.addEventListener("submit", (event) => { event.preventDefault(); update({ add_member: input.value.trim(), role: role.value }); });
     form.append(input, role, add); panel.append(form);

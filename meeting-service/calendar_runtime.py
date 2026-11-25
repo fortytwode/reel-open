@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from flask import jsonify, redirect, request
 
-from calendar_meetings import (DISPATCH_LEAD_SECONDS, ENTRY_LEAD_SECONDS, CalendarMeetingError, CalendarMeetings,
+from calendar_meetings import (same_account, org_placeholder_uid, DISPATCH_LEAD_SECONDS, ENTRY_LEAD_SECONDS, CalendarMeetingError, CalendarMeetings,
                                CalendarProviderError, CalendarSelectionChanged, GoogleCalendarFactory,
                                canonical_join_url, cloud_capture_enabled, cloud_requires_calendar,
                                effective_cloud_providers)
@@ -443,6 +443,73 @@ class _RequestReadCache:
         return getattr(self._store, name)
 
 
+ORG_ENROLL_INTERVAL = timedelta(hours=1)
+
+
+def org_auto_enroll_domain():
+    """The company domain whose people get the bot without signing up, or ''."""
+    from reel_organization import organization_domain
+    domain = organization_domain()
+    wanted = os.getenv("MEETING_ORG_AUTO_ENROLL", "").strip().lower()
+    return domain if domain and wanted == domain and not public_account_access() else ""
+
+
+def enroll_organization(store, calendar_factory=None, now=None):
+    """Switch the bot on for every colleague who hasn't set it up and hasn't switched it off.
+
+    Colleagues come from the company directory (when that permission is granted),
+    MEETING_ORG_ENROLL_EMAILS, and company addresses invited to meetings already
+    on enrolled calendars. Someone who switched the bot off keeps their setting.
+    Notes still go only to the people invited to each meeting."""
+    from reel_organization import is_internal_email
+    domain = org_auto_enroll_domain()
+    if not domain:
+        return []
+    now = now or datetime.now(UTC)
+    marker, marker_generation = store.load("org-enrollment/last", timeout=2)
+    last = (marker or {}).get("at")
+    if last and now - datetime.fromisoformat(last) < ORG_ENROLL_INTERVAL:
+        return []
+    store.cas("org-enrollment/last", {"at": now.isoformat()}, marker_generation, timeout=2)
+    factory = calendar_factory or GoogleCalendarFactory()
+    candidates = {e.strip().lower() for e in os.getenv("MEETING_ORG_ENROLL_EMAILS", "").split(",") if e.strip()}
+    admin = os.getenv("MEETING_DIRECTORY_ADMIN", "").strip().lower()
+    if admin and hasattr(factory, "directory_emails"):
+        candidates |= factory.directory_emails(domain, admin)
+    prefix = store.prefix + "/calendar/" if store.prefix else "calendar/"
+    known = {}
+    for blob in store.bucket.list_blobs(prefix=prefix, timeout=10):
+        key = blob.name[len(store.prefix) + 1:] if store.prefix else blob.name
+        key = key.removesuffix(".json")
+        state, _ = store.load(key)
+        known[key] = state or {}
+        for event in (state or {}).get("events", {}).values():
+            candidates |= {str(a).lower() for a in event.get("attendees", []) if isinstance(a, str)}
+    enrolled = []
+    for email in sorted(e for e in candidates if is_internal_email(e)):
+        key = "calendar/" + digest(email)
+        if (known.get(key) or {}).get("config"):
+            continue  # already set up, or switched off by its owner
+        if not (hasattr(factory, "reachable") and factory.reachable(email)):
+            continue
+        state, generation = store.load(key)
+        state = state or {"config": None, "events": {}}
+        if state.get("config"):
+            continue
+        uid = (state.get("identity") or {}).get("owner_uid") or org_placeholder_uid(email)
+        state["config"] = {"enabled": True, "calendar_ids": [email], "owner_uid": uid, "consent_mode": "approved",
+                           "consent_basis": "organization", "scope_revision": uuid.uuid4().hex,
+                           "enrolled_at": now.isoformat()}
+        state["identity"] = {"owner_email": email, "owner_uid": uid}
+        state.setdefault("events", {})
+        try:
+            store.cas(key, state, generation)
+            enrolled.append(email)
+        except Exception:
+            continue
+    return enrolled
+
+
 def install_calendar_routes(app, claims_for_request, store_for_request, deliver_notes,
                             *, calendar_factory=None, scheduler=None, dispatcher_factory=None):
     raw_store_for_request = store_for_request
@@ -553,7 +620,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                 public["detail"] = "Entry request outcome is unconfirmed; a duplicate request is blocked."
             if event.get("execution_id"):
                 record, _ = load("executions/" + event["execution_id"])
-                if record and record.get("owner_id") == claims["sub"]:
+                if record and same_account(record.get("owner_id"), claims):
                     public["notion_status"] = record.get("notion_status", "pending")
                     public["notion_url"] = "" if public_account_access() else record.get("notion_url", "")
                     public["video_available"] = bool(record.get("artifacts", {}).get("recording.mp4"))
@@ -614,7 +681,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         if not event or not event.get("execution_id"):
             raise CalendarMeetingError("No capture is available for this meeting")
         record, _ = store_for_request().load("executions/" + event["execution_id"])
-        if not record or record.get("owner_id") != claims["sub"]:
+        if not record or not same_account(record.get("owner_id"), claims):
             raise CalendarMeetingError("Meeting capture is unavailable")
         if public_account_access():
             expected_prefix = "reel-meetings/bot/" + digest(claims["sub"]) + "/" + event["execution_id"] + "/"
@@ -910,7 +977,7 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             store = store_for_request()
             key = "executions/" + execution
             current, generation = store.load(key)
-            if (not current or current.get("owner_id") != claims["sub"]
+            if (not current or not same_account(current.get("owner_id"), claims)
                     or current.get("event_id") != event_id or current.get("status") != "failed"
                     or not has_recovery_media(current)):
                 raise CalendarMeetingError("No partial recording is available for recovery")
@@ -1095,6 +1162,10 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
         if not internal_identity():
             return jsonify(error="Internal identity required"), 403
         store = store_for_request()
+        try:
+            enroll_organization(raw_store_for_request(), calendar_factory)
+        except Exception:
+            app.logger.warning("Organisation enrolment did not complete; it will retry")
         try:
             queued, queue_failures = reconcile_processing(store, CloudTasks())
         except Exception:

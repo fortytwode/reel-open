@@ -42,8 +42,10 @@ class FolderPromptMcpTests(WorkspaceTests):
     def test_only_someone_from_the_meeting_can_put_it_in_a_shared_folder(self):
         folder = self.call('owner', 'POST', 'shared-folders', {'create': 'Clients'})[1]['created']
         self.assertEqual(self.call('owner', 'POST', 'shared-folders', {'id': folder, 'add_meeting': OTHER})[0], 403)
-        self.call('owner', 'POST', 'shared-folders', {'id': folder, 'add_member': 'ana@rocketshiphq.com'})
+        self.call('owner', 'POST', 'shared-folders', {'id': folder, 'add_member': 'ana@rocketshiphq.com', 'role': 'editor'})
         self.assertEqual(self.call('ana', 'POST', 'shared-folders', {'id': folder, 'add_meeting': OTHER})[0], 200)
+        # An editor who isn't the folder's owner can't bring more people in.
+        self.assertEqual(self.call('ana', 'POST', 'shared-folders', {'id': folder, 'add_member': 'zed@rocketshiphq.com'})[0], 403)
         self.assertEqual(self.call('owner', 'GET', 'meetings/' + OTHER)[0], 200)
         self.assertEqual(self.call('owner', 'POST', 'shared-folders', {'id': folder, 'add_member': 'x@example.com'})[0], 400)
 
@@ -108,3 +110,25 @@ class FolderPromptMcpTests(WorkspaceTests):
         token_id = self.call('owner', 'GET', 'mcp-tokens')[1]['tokens'][0]['id']
         self.call('owner', 'POST', 'mcp-tokens', {'revoke': token_id})
         self.assertEqual(self.mcp(token, 'tools/list')[0], 401)
+
+
+def test_invite_recipients_keep_declined_people_but_not_rooms():
+    from app import internal_recipients
+    event = {'organizer': {'email': 'shamanth@rocketshiphq.com'}, 'attendees': [
+        {'email': 'ana@rocketshiphq.com', 'responseStatus': 'declined'},
+        {'email': 'bo@rocketshiphq.com', 'responseStatus': 'accepted'},
+        {'email': 'room-1@resource.calendar.google.com', 'resource': True},
+        {'email': 'client@example.com'}]}
+    import os
+    os.environ.setdefault('REEL_ORGANIZATION_DOMAIN', 'rocketshiphq.com')
+    assert internal_recipients(event) == ['ana@rocketshiphq.com', 'bo@rocketshiphq.com', 'shamanth@rocketshiphq.com']
+
+
+def test_notion_filing_is_limited_to_listed_owners(monkeypatch):
+    from app import notion_filing_allowed
+    monkeypatch.delenv('NOTION_DELIVERY_OWNERS', raising=False)
+    assert notion_filing_allowed('ana@rocketshiphq.com')
+    monkeypatch.setenv('NOTION_DELIVERY_OWNERS', 'shamanth@rocketshiphq.com')
+    assert notion_filing_allowed('Shamanth@rocketshiphq.com') and not notion_filing_allowed('ana@rocketshiphq.com')
+    # Ana's bot recorded a call Shamanth was invited to: it is filed as before.
+    assert notion_filing_allowed('ana@rocketshiphq.com', ['ana@rocketshiphq.com', 'shamanth@rocketshiphq.com'])
