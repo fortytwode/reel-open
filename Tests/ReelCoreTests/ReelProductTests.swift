@@ -36,6 +36,17 @@ final class ReelProductTests: XCTestCase {
         XCTAssertEqual(ReelProduct.notetakerBundleID(stateBundleID: "com.example.reel"), "com.example.reel.notetaker")
     }
 
+    func testAppsShareSettingsButKeepSeparateKeychainSignIns() {
+        let config = testOrganization
+        let recorder = OrganizationState(config: config, bundleID: "com.example.reel", keychainBundleID: "com.example.reel")
+        let notetaker = OrganizationState(config: config, bundleID: "com.example.reel", keychainBundleID: "com.example.reel.notetaker")
+        XCTAssertEqual(recorder.defaultsSuite, notetaker.defaultsSuite)
+        XCTAssertEqual(recorder.sessionService, recorder.defaultsSuite + ".firebase")
+        XCTAssertNotEqual(recorder.sessionService, notetaker.sessionService)
+        XCTAssertNotEqual(recorder.notionService, notetaker.notionService)
+        XCTAssertTrue(notetaker.sessionService.hasPrefix("com.example.reel.notetaker.organization."))
+    }
+
     func testCaptureLeaseMarksARecordingLiveUntilReleased() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("reel-lease-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
