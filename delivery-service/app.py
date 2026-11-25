@@ -1614,7 +1614,23 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 elif state.get('notes_published'):
                     raise ProviderPending('Canonical meeting note is unavailable')
             if 'notion_filing' not in state:
-                state = save(notion_filing=notion_filing_allowed(owner, recipients) or bool(state.get('notion')))
+                filing = notion_filing_allowed(owner, recipients) or bool(state.get('notion'))
+                updates = {}
+                people = [email for email in attendees if not email.endswith('@resource.calendar.google.com')]
+                one_on_one_route = getattr(providers, 'one_on_one_route', None)
+                if (filing and not state.get('notion') and one_on_one_route and len(people) == 2
+                        and all(is_internal_email(email) for email in people)):
+                    # A 1:1 goes straight to that teammate's own 1:1 database. When another
+                    # notetaker already filed this 1:1 there, don't add a second page.
+                    route = one_on_one_route(title, people)
+                    fence()
+                    if route:
+                        if providers.one_on_one_filed(route, title, payload['started_at']):
+                            filing, route = False, {'kind': 'reel'}
+                            updates['route_verified'] = True
+                        fence()
+                        updates['route'] = route
+                state = save(notion_filing=filing, **updates)
             file_in_notion = state['notion_filing'] is not False
             page = state.get('notion') if file_in_notion else {'page_id': '', 'url': ''}
             if not page:
@@ -1667,7 +1683,7 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 state = save(route=route, route_verified=True)
             people = [email for email in attendees if not email.endswith('@resource.calendar.google.com')]
             if file_in_notion and len(people) == 2 and all(is_internal_email(email) for email in people):
-                if not route or route.get('kind') != 'private':
+                if not route or route.get('kind') not in ('private', 'one_on_one'):
                     route = {'kind':'private'}
                     state = save(route=route, route_verified=False, route_retry_after=0)
             if route is None:

@@ -99,6 +99,41 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(receipt['recipients'], ['ana@rocketshiphq.com', 'owner@rocketshiphq.com'])
         self.assertEqual((self.providers.creates, self.providers.sends), (0, 1))
 
+    def _one_on_one(self, filed):
+        self.event['attendees'] = [{'email':'owner@rocketshiphq.com','responseStatus':'accepted'},
+                                   {'email':'ana@rocketshiphq.com','responseStatus':'accepted'}]
+        route = {'kind':'one_on_one', 'data_source_id':'ana-1on1'}
+        self.providers.one_on_one_route = Mock(return_value=route)
+        self.providers.one_on_one_filed = Mock(return_value=filed)
+        self.providers.apply_route = Mock()
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        return route, args
+
+    def test_one_to_one_is_filed_in_the_teammates_own_database(self):
+        route, args = self._one_on_one(filed=False)
+        receipt = deliver(*args, calendar_selection=lambda: ('primary',))
+        self.assertEqual((receipt['route'], self.providers.creates, self.providers.sends), ('one_on_one', 1, 1))
+        self.assertEqual(self.providers.apply_route.call_args.args[1], route)
+        self.providers.one_on_one_route.assert_called_once_with(
+            'Authoritative title', ['ana@rocketshiphq.com', 'owner@rocketshiphq.com'])
+        self.assertEqual(deliver(*args, calendar_selection=lambda: ('primary',))['route'], 'one_on_one')
+        self.assertEqual((self.providers.creates, self.providers.sends), (1, 1))
+
+    def test_one_to_one_already_filed_by_another_notetaker_skips_notion(self):
+        _, args = self._one_on_one(filed=True)
+        receipt = deliver(*args, calendar_selection=lambda: ('primary',))
+        self.assertEqual((receipt['url'], self.providers.creates, self.providers.sends), ('', 0, 1))
+        self.assertEqual(receipt['recipients'], ['ana@rocketshiphq.com', 'owner@rocketshiphq.com'])
+        self.providers.apply_route.assert_not_called()
+
+    def test_one_to_one_without_a_teammate_database_stays_private(self):
+        _, args = self._one_on_one(filed=False)
+        self.providers.one_on_one_route.return_value = None
+        receipt = deliver(*args, calendar_selection=lambda: ('primary',))
+        self.assertEqual((receipt['route'], self.providers.creates), ('private', 1))
+        self.providers.one_on_one_filed.assert_not_called()
+
     def test_calendar_followup_retries_without_repeating_gmail_or_acceptance(self):
         self.event.update(recurringEventId='series', originalStartTime={'dateTime':'2026-11-10T11:00:00+01:00'})
         choose = self.providers.choose_calendar_route = Mock(return_value={'kind':'client'})
@@ -1006,3 +1041,47 @@ class CloudSlackRetryTests(unittest.TestCase):
         self.assertNotIn('slack_retry_pending', result)
         slack.resolve_dm.assert_not_called()
         self.assertEqual(self.providers.sends, 1)
+
+
+class CanonicalOneOnOneTests(unittest.TestCase):
+    def adapter(self, results=(), status=200):
+        from providers import CanonicalProviders
+        adapter = CanonicalProviders.__new__(CanonicalProviders)
+        response = SimpleNamespace(status_code=status, json=lambda: {'results': list(results)})
+        adapter.canonical = SimpleNamespace(
+            requests=SimpleNamespace(post=Mock(return_value=response)), NOTION_API_BASE='https://api.notion.com/v1',
+            NOTION_MOVE_API_VERSION='2026-03-11', NOTION_REQUEST_TIMEOUT_SECONDS=30,
+            _notion_headers=lambda version: {'Notion-Version': version},
+            _get_active_team_members=Mock(return_value=[{'name': 'Ana'}]),
+            _detect_1on1_member=Mock(return_value={'name': 'Ana'}),
+            _resolve_one_on_one_db=Mock(return_value=('db', 'ana-source')))
+        return adapter
+
+    @staticmethod
+    def page(title):
+        return {'properties': {'Name': {'title': [{'plain_text': title}]}}}
+
+    def test_route_uses_the_teammates_recorded_database(self):
+        adapter = self.adapter()
+        self.assertEqual(adapter.one_on_one_route('Shamanth / Ana', ['a', 'b']),
+                         {'kind': 'one_on_one', 'data_source_id': 'ana-source'})
+        adapter.canonical._resolve_one_on_one_db.side_effect = RuntimeError('no database')
+        self.assertIsNone(adapter.one_on_one_route('Shamanth / Ana', ['a', 'b']))
+        adapter.canonical._detect_1on1_member.return_value = None
+        self.assertIsNone(adapter.one_on_one_route('Shamanth / Ana', ['a', 'b']))
+
+    def test_unreadable_team_list_waits_instead_of_guessing(self):
+        adapter = self.adapter()
+        adapter.canonical._get_active_team_members.return_value = []
+        with self.assertRaises(ProviderPending):
+            adapter.one_on_one_route('Shamanth / Ana', ['a', 'b'])
+
+    def test_existing_page_with_the_same_title_counts_as_filed(self):
+        route = {'kind': 'one_on_one', 'data_source_id': 'ana-source'}
+        adapter = self.adapter([self.page('Other call'), self.page(' shamanth /  Ana ')])
+        self.assertTrue(adapter.one_on_one_filed(route, 'Shamanth / Ana', '2026-11-19T15:30:00Z'))
+        url = adapter.canonical.requests.post.call_args.args[0]
+        self.assertTrue(url.endswith('/data_sources/ana-source/query'))
+        self.assertFalse(self.adapter([self.page('Other call')]).one_on_one_filed(route, 'Shamanth / Ana', '2026-11-19T15:30:00Z'))
+        with self.assertRaises(ProviderPending):
+            self.adapter(status=500).one_on_one_filed(route, 'Shamanth / Ana', '2026-11-19T15:30:00Z')
