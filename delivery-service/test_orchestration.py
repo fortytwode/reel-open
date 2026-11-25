@@ -70,6 +70,35 @@ class OrchestrationTests(unittest.TestCase):
         result = self.post(); self.assertEqual(result.status_code,200,result.json)
         self.assertEqual(result.json['recipients'], ['nonattendee@rocketshiphq.com','owner@rocketshiphq.com'])
         self.assertEqual(set(result.json), {'verified','page_id','url','recipients','email_status','route','suppressed_duplicate','notes_url'})
+    def test_people_added_after_recording_started_get_nothing(self):
+        self.event['attendees'].append({'email':'late@rocketshiphq.com','responseStatus':'accepted'})
+        args = (self.payload, self.claims['email'], self.store, self.providers,
+                lambda owner: Service([self.event]), lambda: self.now)
+        receipt = deliver(*args, calendar_selection=lambda: ('primary',),
+                          invited=['owner@rocketshiphq.com', 'nonattendee@rocketshiphq.com'])
+        self.assertEqual(receipt['recipients'], ['nonattendee@rocketshiphq.com', 'owner@rocketshiphq.com'])
+
+    def test_unlisted_owner_meetings_are_not_filed_in_notion(self):
+        with patch.dict('os.environ', {'NOTION_DELIVERY_OWNERS': 'someone-else@rocketshiphq.com'}):
+            args = (self.payload, self.claims['email'], self.store, self.providers,
+                    lambda owner: Service([self.event]), lambda: self.now)
+            receipt = deliver(*args, calendar_selection=lambda: ('primary',))
+        self.assertEqual(self.providers.creates, 0)
+        self.assertEqual(receipt['url'], '')
+        self.assertEqual(self.providers.sends, 1)  # the recap email still goes to the invitees
+        self.assertEqual(receipt['recipients'], ['nonattendee@rocketshiphq.com', 'owner@rocketshiphq.com'])
+
+    def test_internal_one_to_one_delivers_without_notion(self):
+        self.event['attendees'] = [{'email':'owner@rocketshiphq.com','responseStatus':'accepted'},
+                                   {'email':'ana@rocketshiphq.com','responseStatus':'accepted'}]
+        self.providers.apply_route = Mock(side_effect=AssertionError('no Notion page to route'))
+        with patch.dict('os.environ', {'NOTION_DELIVERY_OWNERS': 'someone-else@rocketshiphq.com'}):
+            args = (self.payload, self.claims['email'], self.store, self.providers,
+                    lambda owner: Service([self.event]), lambda: self.now)
+            receipt = deliver(*args, calendar_selection=lambda: ('primary',))
+        self.assertEqual(receipt['recipients'], ['ana@rocketshiphq.com', 'owner@rocketshiphq.com'])
+        self.assertEqual((self.providers.creates, self.providers.sends), (0, 1))
+
     def test_calendar_followup_retries_without_repeating_gmail_or_acceptance(self):
         self.event.update(recurringEventId='series', originalStartTime={'dateTime':'2026-11-10T11:00:00+01:00'})
         choose = self.providers.choose_calendar_route = Mock(return_value={'kind':'client'})

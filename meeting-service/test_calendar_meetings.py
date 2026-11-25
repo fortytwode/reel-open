@@ -843,3 +843,12 @@ def test_occurrence_queued_before_early_dispatch_gets_one_earlier_task(setup):
     service.sync(CLAIMS)
     assert len(scheduler.tasks) == 2
     assert scheduler.tasks[0] == scheduler.tasks[1]
+
+
+def test_someone_who_only_created_the_event_is_not_on_the_call():
+    raw = event(organizer={"email": "boss@example.com"}, creator={"email": OWNER},
+                attendees=[{"email": "boss@example.com", "responseStatus": "accepted"},
+                           {"email": "guest@example.com", "responseStatus": "accepted"}])
+    assert normalize_event("primary", raw, OWNER, NOW) is None
+    invited = event(organizer={"email": "boss@example.com"}, creator={"email": OWNER})
+    assert normalize_event("primary", invited, OWNER, NOW) is not None

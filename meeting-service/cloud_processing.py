@@ -376,7 +376,8 @@ def process_step(store, execution, scheduler, *, clock=time.time):
                                           configured_providers(store=delivery_store), calendar_service, time.time,
                                           deadline=started + 570, slack=configured_slack_recaps(), retry_slack=True, defer_slack=not is_slack_retry,
                                           followup_items=summary.get('action_items'),
-                                          calendar_selection=lambda: selected_calendar_ids(store, owner, owner_id))
+                                          calendar_selection=lambda: selected_calendar_ids(store, owner, owner_id),
+                                          invited=record.get('attendees') if isinstance(record.get('attendees'), list) else None)
                     except CalendarSelectionRequired:
                         if is_slack_retry:
                             record['slack_pending_result'] = False

@@ -51,8 +51,20 @@ def canonical_occurrence(event):
 
 
 def participant_emails(event):
-    participants = list(event.get('attendees') or []) + [event.get('organizer') or {}]
-    return {str(person.get('email') or '').strip().lower() for person in participants} - {''}
+    """Everyone invited, including people who declined (they still get the notes), but not rooms."""
+    participants = [person for person in event.get('attendees') or []
+                    if isinstance(person, dict) and person.get('resource') is not True]
+    participants.append(event.get('organizer') or {})
+    return ({str(person.get('email') or '').strip().lower() for person in participants} - {''}
+            - {e for e in (str(p.get('email') or '').lower() for p in participants) if e.endswith('@resource.calendar.google.com')})
+
+
+def notion_filing_allowed(owner, recipients=()):
+    """Notion databases are readable by everyone with access to them, not just the people on a call,
+    so a meeting is filed there only when a listed person was invited to it (all, when the setting is absent)."""
+    listed = {e.strip().lower() for e in os.getenv('NOTION_DELIVERY_OWNERS', '').split(',') if e.strip()}
+    people = {owner.strip().lower(), *(str(r).strip().lower() for r in recipients)}
+    return not listed or bool(listed & people)
 
 
 def internal_recipients(event):
@@ -98,6 +110,10 @@ def selected_calendar_ids(store, owner_email, owner_uid):
     state = state or {}
     identity, config = state.get('identity') or {}, state.get('config') or {}
     bindings = {uid for uid in (identity.get('owner_uid'), config.get('owner_uid')) if uid}
+    # An organisation-enrolled colleague's id comes from their company email (see calendar_meetings.org_placeholder_uid).
+    enrolled = 'org-' + hashlib.sha256(owner_email.strip().lower().encode()).hexdigest()[:40]
+    if bindings == {enrolled} and owner_uid and config.get('consent_basis') == 'organization':
+        bindings = {owner_uid}
     if not owner_uid or bindings != {owner_uid} or identity.get('owner_email', owner_email) != owner_email:
         return ()
     ids = config.get('calendar_ids')
@@ -803,9 +819,11 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
             name = workspace._folder_name(body['rename'])
             workspace.change_folder(note_store(), folder['id'], lambda state: state.update(name=name))
         elif 'add_member' in body:
-            if not editor:
+            # Only the folder's owner adds people, so access never spreads through people who
+            # were added later. New members can read; the owner can make them editors.
+            if folder.get('owner') != email:
                 raise PermissionError
-            member, role = str(body['add_member']).strip().lower(), body.get('role', 'editor')
+            member, role = str(body['add_member']).strip().lower(), body.get('role', 'viewer')
             if not is_internal_email(member) or role not in workspace.ROLES:
                 raise workspace.WorkspaceError('Folders can be shared only inside your organization')
             if member not in folder['members'] and len(folder['members']) >= workspace.MAX_FOLDER_MEMBERS:
@@ -1487,7 +1505,7 @@ class ProviderRejected(ProviderPending):
 
 
 def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=None, *, slack=None,
-            followup_items=None, calendar_selection=None, retry_slack=False, defer_slack=False):
+            followup_items=None, calendar_selection=None, retry_slack=False, defer_slack=False, invited=None):
     """File and share verified notes, then deliver the recap."""
     recording_id, content_hash = validate_payload(payload)
     deadline = deadline or clock() + 570  # Gunicorn kills the synchronous worker at 600s.
@@ -1511,6 +1529,10 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
         calendar_context = {'event_id': event.get('id') or '', 'series_id': event.get('recurringEventId') or '',
                             'ical_uid': ical_uid, 'original_start': original_start}
         recipients = internal_recipients(event)
+        if invited is not None:
+            # Only people already invited when the recording started; someone added afterwards gets nothing.
+            invited_set = {str(e).strip().lower() for e in invited} | {owner}
+            recipients = [email for email in recipients if email in invited_set]
         title = str(event.get('summary') or payload['title'])
     occurrence_key = 'occurrence/' + digest_key(*identity)
     recording_key = digest_key(owner, recording_id)
@@ -1591,7 +1613,10 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                     state = save(notes_url=notes_url)
                 elif state.get('notes_published'):
                     raise ProviderPending('Canonical meeting note is unavailable')
-            page = state.get('notion')
+            if 'notion_filing' not in state:
+                state = save(notion_filing=notion_filing_allowed(owner, recipients) or bool(state.get('notion')))
+            file_in_notion = state['notion_filing'] is not False
+            page = state.get('notion') if file_in_notion else {'page_id': '', 'url': ''}
             if not page:
                 if state.get('notion_create_uncertain') is False and state.get('notion_retry_after', 0) > clock():
                     raise Conflict('Notion requested a later retry')
@@ -1622,6 +1647,8 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 state = save(notion=page, notion_create_uncertain=False)
 
             def verify_page():
+                if not file_in_notion:
+                    return None
                 verify_link = getattr(providers, 'verify_notion_with_notes_url', None)
                 if verify_link:
                     return verify_link(page, meeting_id, transcript, notes_url)
@@ -1635,8 +1662,11 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 notes_url = archived_url or configured_notes_url(meeting_id)
                 state = save(notes_url=notes_url)
             route = state.get('route')
+            if not file_in_notion and not route:
+                route = {'kind': 'reel'}
+                state = save(route=route, route_verified=True)
             people = [email for email in attendees if not email.endswith('@resource.calendar.google.com')]
-            if len(people) == 2 and all(is_internal_email(email) for email in people):
+            if file_in_notion and len(people) == 2 and all(is_internal_email(email) for email in people):
                 if not route or route.get('kind') != 'private':
                     route = {'kind':'private'}
                     state = save(route=route, route_verified=False, route_retry_after=0)
@@ -1647,7 +1677,7 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                 if route is None:
                     route = providers.choose_route(title, attendees, payload['calendar'] is None)
                 state = save(route=route)
-            if not state.get('route_verified'):
+            if file_in_notion and not state.get('route_verified'):
                 if state.get('route_retry_after', 0) > clock():
                     raise Conflict('Notion routing is still settling; retry shortly')
                 save(route_retry_after=clock() + 60)
