@@ -11,7 +11,7 @@ public struct OrganizationState {
     public var sessionService: String { defaultsSuite + ".firebase" }
     public var notionService: String { defaultsSuite + ".notion" }
 
-    public init(config: CloudConfig, bundleID: String = Bundle.main.bundleIdentifier ?? "org.reel.app") {
+    public init(config: CloudConfig, bundleID: String = ReelProduct.stateBundleID) {
         if config.isConfigured {
             // A digest keeps even a maximum-length email domain within filesystem name limits.
             let identity = Data("\(config.projectID)\n\(config.allowedEmailDomain)".utf8)

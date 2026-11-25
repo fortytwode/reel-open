@@ -19,6 +19,9 @@ enum Recovery {
         model.reloadLibrary()
         var outcome = Outcome()
         for r in model.recordings where r.discardRequested == true || r.captureState == .recording || r.captureState == .finalizing {
+            // Each app recovers only its own kind, and never a recording another
+            // Reel process is still capturing.
+            guard ProductOwnership.owns(r), !model.library.isCaptureLive(r.id) else { continue }
             if r.discardRequested == true {
                 await Publisher.shared.delete(r)
                 if model.recording(id: r.id) == nil { outcome.discarded.append(r.id) }

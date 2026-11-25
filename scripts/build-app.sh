@@ -3,9 +3,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Reel"
+# One executable, two apps: Reel Recorder (screen recordings) and Reel Notetaker (meetings).
+PRODUCT="${REEL_PRODUCT:-recorder}"
+case "$PRODUCT" in
+  recorder) BUNDLE_NAME="Reel" ;;
+  notetaker) BUNDLE_NAME="Reel Notetaker" ;;
+  *) echo "REEL_PRODUCT must be recorder or notetaker" >&2; exit 2 ;;
+esac
 DIST_DIR="${REEL_DIST_DIR:-$ROOT_DIR/dist}"
-APP_PATH="$DIST_DIR/$APP_NAME.app"
-INSTALL_PATH="/Applications/$APP_NAME.app"
+APP_PATH="$DIST_DIR/$BUNDLE_NAME.app"
+INSTALL_PATH="/Applications/$BUNDLE_NAME.app"
 INSTALL=false
 CONFIG="${CONFIG:-release}"
 
@@ -13,9 +20,10 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/build-app.sh [--install]
 
-Builds the Reel release executable and packages it as dist/Reel.app.
-With --install, copies the app to /Applications/Reel.app after checking
-that an existing installation is not running.
+Builds the Reel release executable and packages it as dist/Reel.app
+(Reel Recorder) or, with REEL_PRODUCT=notetaker, dist/Reel Notetaker.app.
+With --install, copies the app to /Applications after checking that an
+existing installation is not running.
 
 Environment:
   REEL_SIGN_IDENTITY  codesigning identity (default: first "Developer ID Application", then "Apple Development"
@@ -28,7 +36,10 @@ Environment:
   REEL_VERSION / REEL_BUILD_NUMBER
                       CFBundleShortVersionString / CFBundleVersion (default: VERSION file /
                       git commit count). Sparkle compares CFBundleVersion.
-  REEL_BUNDLE_ID     application identifier (default: org.reel.app).
+  REEL_PRODUCT       recorder (default) or notetaker. Both apps can be installed together.
+  REEL_BUNDLE_ID     Reel Recorder's application identifier (default: org.reel.app).
+                      Reel Notetaker uses it with ".notetaker" appended and shares
+                      the Recorder's sign-in and meeting choices.
   REEL_APPCAST_URL / REEL_SPARKLE_PUBLIC_KEY
                       optional HTTPS update feed and its matching public key.
                       Automatic updates are disabled when no feed is supplied.
@@ -62,16 +73,17 @@ ICONSET_PATH="$DIST_DIR/AppIcon.iconset"
 mkdir -p "$DIST_DIR"
 if [[ -d "$APP_PATH" ]]; then
   mkdir -p "$DIST_DIR/build-backups"
-  mv "$APP_PATH" "$DIST_DIR/build-backups/Reel-$(date +%Y%m%d-%H%M%S).app.disabled"
+  mv "$APP_PATH" "$DIST_DIR/build-backups/${BUNDLE_NAME// /-}-$(date +%Y%m%d-%H%M%S).app.disabled"
   # Keep only the five most recent backups.
-  ls -1dt "$DIST_DIR"/build-backups/Reel-*.app.disabled 2>/dev/null | tail -n +6 | while read -r old; do rm -rf "$old"; done
+  ls -1dt "$DIST_DIR"/build-backups/"${BUNDLE_NAME// /-}"-2*.app.disabled 2>/dev/null | tail -n +6 | while read -r old; do rm -rf "$old"; done
 fi
 mkdir -p "$APP_PATH/Contents/MacOS" "$APP_PATH/Contents/Resources"
 if [[ -f "$ROOT_DIR/.reel/organization.json" ]]; then
   cp "$ROOT_DIR/.reel/organization.json" "$APP_PATH/Contents/Resources/organization.json"
 fi
 cp "$PRODUCT_PATH" "$APP_PATH/Contents/MacOS/$APP_NAME"
-swift "$ROOT_DIR/scripts/make-icon.swift" "$ICONSET_PATH"
+rm -rf "$ICONSET_PATH"
+swift "$ROOT_DIR/scripts/make-icon.swift" "$ICONSET_PATH" "$PRODUCT"
 iconutil -c icns "$ICONSET_PATH" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
 
 VERSION="${REEL_VERSION:-$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo 1.0)}"
@@ -79,23 +91,28 @@ BUILD="${REEL_BUILD_NUMBER:-$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/nu
 APPCAST_URL="${REEL_APPCAST_URL:-}"
 SPARKLE_PUBLIC_KEY="${REEL_SPARKLE_PUBLIC_KEY:-}"
 BUNDLE_ID="${REEL_BUNDLE_ID:-org.reel.app}"
-python3 - "$APP_PATH/Contents/Info.plist" "$VERSION" "$BUILD" "$APPCAST_URL" "$SPARKLE_PUBLIC_KEY" "$BUNDLE_ID" "${REEL_SOURCE_REVISION:-$(git -C "$ROOT_DIR" rev-parse HEAD)}" <<'PYINFO'
+python3 - "$APP_PATH/Contents/Info.plist" "$VERSION" "$BUILD" "$APPCAST_URL" "$SPARKLE_PUBLIC_KEY" "$BUNDLE_ID" "${REEL_SOURCE_REVISION:-$(git -C "$ROOT_DIR" rev-parse HEAD)}" "$PRODUCT" <<'PYINFO'
 import plistlib
 import re
 import sys
 from urllib.parse import urlsplit
-path, version, build, feed, key, bundle, revision = sys.argv[1:]
+path, version, build, feed, key, bundle, revision, product = sys.argv[1:]
 if not re.fullmatch(r"[A-Za-z0-9-]+(?:[.][A-Za-z0-9-]+)+", bundle):
     raise SystemExit("Invalid REEL_BUNDLE_ID")
 if feed:
     parts = urlsplit(feed)
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or not key:
         raise SystemExit("Auto-updates need an HTTPS REEL_APPCAST_URL and REEL_SPARKLE_PUBLIC_KEY")
+notetaker = product == "notetaker"
+name = "Reel Notetaker" if notetaker else "Reel Recorder"
 info = {
-    "CFBundleName": "Reel", "CFBundleDisplayName": "Reel Recorder", "CFBundleIdentifier": bundle,
+    "CFBundleName": name if notetaker else "Reel", "CFBundleDisplayName": name,
+    "CFBundleIdentifier": bundle + ".notetaker" if notetaker else bundle,
+    # Both apps keep one sign-in and one set of meeting choices: the Recorder's.
+    "ReelProduct": product, "ReelStateBundleID": bundle,
     "ReelSourceRevision": revision,
     "CFBundleExecutable": "Reel", "CFBundlePackageType": "APPL", "CFBundleVersion": build,
-    "CFBundleShortVersionString": version, "LSMinimumSystemVersion": "15.0", "LSUIElement": True,
+    "CFBundleShortVersionString": version, "LSMinimumSystemVersion": "15.0", "LSUIElement": not notetaker,
     "NSHighResolutionCapable": True, "CFBundleIconFile": "AppIcon",
     "LSApplicationCategoryType": "public.app-category.productivity",
     "NSScreenCaptureUsageDescription": "Reel records the screen or window you choose and shares it when you stop.",
@@ -103,10 +120,18 @@ info = {
     "NSMicrophoneUsageDescription": "Reel records your voice with your screen recordings.",
     "NSCalendarsFullAccessUsageDescription": "Choose which calendars Reel reads for meeting links. Screen recording works without calendar access.",
     "NSSpeechRecognitionUsageDescription": "Reel transcribes recordings on this Mac (older macOS versions only).",
-    "CFBundleURLTypes": [{"CFBundleURLName": "Reel", "CFBundleURLSchemes": ["reel"]}],
+    "CFBundleURLTypes": [{"CFBundleURLName": name, "CFBundleURLSchemes": ["reel-notetaker" if notetaker else "reel"]}],
     "SUEnableAutomaticChecks": bool(feed), "SUAllowsAutomaticUpdates": bool(feed),
     "SUScheduledCheckInterval": 86400,
 }
+if notetaker:
+    info.update(
+        NSScreenCaptureUsageDescription="Reel Notetaker records the meeting window you choose so it can write notes.",
+        NSCameraUsageDescription="Reel Notetaker does not record your camera unless you turn it on.",
+        NSMicrophoneUsageDescription="Reel Notetaker records your voice in meetings you choose to record.",
+        NSCalendarsFullAccessUsageDescription="Choose which calendars Reel Notetaker reads for meeting links.",
+        NSSpeechRecognitionUsageDescription="Reel Notetaker transcribes meetings on this Mac (older macOS versions only).",
+    )
 if feed:
     info.update(SUFeedURL=feed, SUPublicEDKey=key)
 with open(path, "wb") as output:
@@ -151,13 +176,13 @@ echo "Built $APP_PATH"
 
 if [[ "$INSTALL" == true ]]; then
   if [[ -d "$INSTALL_PATH" ]] && pgrep -f "$INSTALL_PATH/Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
-    echo "Reel is running from $INSTALL_PATH; quit it before installing." >&2
+    echo "$BUNDLE_NAME is running from $INSTALL_PATH; quit it before installing." >&2
     exit 1
   fi
   if [[ -d "$INSTALL_PATH" ]]; then
     UPDATE_BACKUPS="$HOME/Library/Application Support/Reel/app-updates"
     mkdir -p "$UPDATE_BACKUPS"
-    mv "$INSTALL_PATH" "$UPDATE_BACKUPS/Reel-$(date +%Y%m%d-%H%M%S).app.disabled"
+    mv "$INSTALL_PATH" "$UPDATE_BACKUPS/${BUNDLE_NAME// /-}-$(date +%Y%m%d-%H%M%S).app.disabled"
   fi
   ditto "$APP_PATH" "$INSTALL_PATH"
   echo "Installed $INSTALL_PATH"

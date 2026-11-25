@@ -30,6 +30,7 @@ final class Publisher {
 
     /// Backfills recordings uploaded by earlier app versions. No local-only video is listed.
     func syncCloudLibrary() async {
+        guard ProductOwnership.ownsClips else { return }
         guard let cloud = try? await CloudAuth.shared.validSession() else { return }
         do {
             let client = FirestoreClient(cloud: cloud)
@@ -227,6 +228,7 @@ final class Publisher {
 
     /// Only new recordings or an explicit delivery action enter the automatic queue.
     func resumeMeetingProcessing() {
+        guard ProductOwnership.ownsMeetings else { return }
         guard let owner = model.account?.userID else { return }
         for r in model.recordings where r.canResumeMeetingProcessing(owner: owner) {
             guard transcriptions[r.id] == nil, deliveries[r.id] == nil, !deleting.contains(r.id) else { continue }

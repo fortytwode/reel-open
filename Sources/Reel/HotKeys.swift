@@ -77,6 +77,8 @@ final class HotKeys {
     }
 
     func registerMain(_ shortcut: Shortcut) {
+        // The global record shortcut belongs to Reel Recorder; two apps cannot share it.
+        guard ReelProduct.current == .recorder else { return }
         register(.startStop, shortcut) {
             if let app = NSApp.delegate as? AppDelegate { app.handleRecordShortcut() }
             else { RecorderController.shared.toggle() }
