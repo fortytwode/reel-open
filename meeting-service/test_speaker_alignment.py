@@ -251,3 +251,30 @@ def test_partial_capture_is_labelled_partial_and_thin_captions_keep_the_asr_tran
     thin = align(asr, caption(60, 75, LONG_AVA, 'Ava'))
     assert thin['text'] == asr
     assert thin['speaker_attribution'] == 'partial' and thin['speaker_coverage'] < 1
+
+
+def test_caption_lines_that_meet_shows_again_appear_once():
+    line = ('Yeah I think the important thing to know about our company is that we focus on retention and '
+            'monetisation rather than acquisition and that shapes every decision we make about pricing')
+    grown = line + ' and about which markets we enter first next year'
+    result = align('Short chunk.',
+                   caption(10, 20, line, 'Asya'),
+                   caption(21, 22, 'Right', 'Sam'),
+                   caption(23, 40, grown, 'Asya'),            # the same line, grown longer
+                   caption(41, 42, line, 'Asya'),             # shown again after it scrolled
+                   caption(60, 75, LONG_BEN, 'Sam'),
+                   caption(80, 95, ' '.join(grown.split()[12:]) + ' and that is all', 'Asya'))  # re-shows the tail
+    text = result['text']
+    assert text.count('focus on retention') == 1
+    assert text.count('which markets we enter first') == 1
+    assert 'and that is all' in text
+    assert [part['speaker_name'] for part in result['segments']][0] == 'Asya' and result['segments'][-1]['speaker_name'] == 'Asya'
+    assert 'Right' in text and LONG_BEN in text
+    assert all(a['start'] <= a['end'] <= b['start'] for a, b in zip(result['segments'], result['segments'][1:]))
+
+
+def test_a_repeat_long_after_the_line_is_kept_as_new_speech():
+    line = 'We should revisit the pricing page experiment once the January numbers are in and agreed'
+    result = align('Short chunk.', caption(10, 20, line, 'Ava'), caption(30, 45, LONG_BEN, 'Ben'),
+                   caption(900, 910, line, 'Ava'), caption(911, 930, LONG_AVA, 'Ava'), duration=1000)
+    assert result['text'].count('revisit the pricing page') == 2

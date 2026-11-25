@@ -202,6 +202,96 @@ CAPTION_TURN_GAP = 20
 CAPTION_PART_CHARS = 4_000
 
 
+CAPTION_REPEAT_WINDOW = 600
+CAPTION_OVERLAP_WORDS = 6
+
+
+def _words(text):
+    return [word.casefold() for word in WORD.findall(text)]
+
+
+def _contains(longer, shorter):
+    if len(shorter) > len(longer):
+        return False
+    return any(longer[index:index + len(shorter)] == shorter for index in range(len(longer) - len(shorter) + 1))
+
+
+CAPTION_REPEAT_WORDS = 10
+
+
+def _without_repeats(turn, words, said):
+    """Remove every stretch of the row covered by a CAPTION_REPEAT_WORDS window already said."""
+    if len(words) < CAPTION_REPEAT_WORDS or not said:
+        return turn, words
+    covered = [False] * len(words)
+    for i in range(len(words) - CAPTION_REPEAT_WORDS + 1):
+        if tuple(words[i:i + CAPTION_REPEAT_WORDS]) in said:
+            covered[i:i + CAPTION_REPEAT_WORDS] = [True] * CAPTION_REPEAT_WORDS
+    if not any(covered):
+        return turn, words
+    matches = list(WORD.finditer(turn['text']))
+    pieces, index = [], 0
+    while index < len(words):
+        if covered[index]:
+            index += 1
+            continue
+        end = index
+        while end < len(words) and not covered[end]:
+            end += 1
+        start_char = matches[index].start() if index else 0
+        end_char = matches[end].start() if end < len(words) else len(turn['text'])
+        pieces.append(turn['text'][start_char:end_char].strip())
+        index = end
+    text = ' '.join(piece for piece in pieces if piece)
+    return {**turn, 'text': text}, [word for word, gone in zip(words, covered) if not gone]
+
+
+def _unique_caption_rows(turns):
+    """Meet keeps re-showing a caption line while it grows and after it scrolls, so the
+    same words arrive several times. Keep each passage once, in its fullest form."""
+    kept, heard = [], []
+    for turn in sorted(turns, key=lambda turn: (turn['start'], turn['end'])):
+        words = _words(turn['text'])
+        if not words:
+            continue
+        # Compare with every row as originally shown, not as trimmed, so a later
+        # copy of a row that was itself trimmed is still recognised.
+        recent = [(start, raw) for start, speaker, raw in heard
+                  if speaker == turn['speaker_name'] and turn['start'] - start <= CAPTION_REPEAT_WINDOW]
+        heard.append((turn['start'], turn['speaker_name'], words))
+        if any(_contains(raw, words) for _, raw in recent):
+            continue
+        duplicate = False
+        for earlier in reversed(kept):
+            if turn['start'] - earlier['row']['start'] > CAPTION_REPEAT_WINDOW:
+                break
+            if earlier['row']['speaker_name'] != turn['speaker_name']:
+                continue
+            if _contains(earlier['words'], words):
+                # Already said: a repeat or an earlier, shorter view of the same line.
+                # A late re-display says nothing about when the words were spoken.
+                duplicate = True
+                break
+            if _contains(words, earlier['words']) or words[:CAPTION_OVERLAP_WORDS * 2] == earlier['words'][:CAPTION_OVERLAP_WORDS * 2]:
+                # The same line, grown longer: keep the fuller text where it first appeared.
+                grew_live = turn['start'] - earlier['row']['end'] <= CAPTION_TURN_GAP
+                earlier['row'] = {**earlier['row'], 'text': turn['text'],
+                                  'end': max(earlier['row']['end'], turn['end']) if grew_live else earlier['row']['end']}
+                earlier['words'] = words
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        # Meet also re-shows parts of a long line inside later rows. Drop any run of
+        # CAPTION_REPEAT_WORDS or more words this speaker already said recently.
+        said = {tuple(raw[i:i + CAPTION_REPEAT_WORDS]) for _, raw in recent for i in range(len(raw) - CAPTION_REPEAT_WORDS + 1)}
+        turn, words = _without_repeats(turn, words, said)
+        if not words:
+            continue
+        kept.append({'row': turn, 'words': words})
+    return [entry['row'] for entry in kept]
+
+
 def _caption_led_parts(turns):
     """One part per run of caption rows from the same speaker, in spoken order.
 
@@ -209,7 +299,7 @@ def _caption_led_parts(turns):
     the name the meeting itself showed for those words. Nothing is inferred.
     """
     parts = []
-    for turn in sorted(turns, key=lambda turn: (turn['start'], turn['end'])):
+    for turn in _unique_caption_rows(turns):
         text = ' '.join(turn['text'].split())
         if not text:
             continue
@@ -241,7 +331,8 @@ def _caption_led(result, caption_artifact, asr_word_count):
     already attributed by the platform.
     """
     turns = caption_artifact['turns']
-    caption_words = sum(len(WORD.findall(turn['text'])) for turn in turns)
+    # Compare like with like: repeated caption rows would make the captions look fuller than they are.
+    caption_words = sum(len(WORD.findall(turn['text'])) for turn in _unique_caption_rows(turns))
     # A caption row is a sentence or two. Anything far longer is not caption evidence.
     if (caption_words < max(CAPTION_LED_MIN_WORDS, CAPTION_LED_RATIO * asr_word_count)
             or any(len(turn['text']) > CAPTION_PART_CHARS for turn in turns)):
