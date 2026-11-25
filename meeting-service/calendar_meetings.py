@@ -195,6 +195,9 @@ def normalize_event(calendar_id, event, owner_email, now=None):
             "attendees": [str(x.get("email", ""))[:320] for x in attendees[:100] if x.get("email")],
             "join_url": url, "passcode": passcode, "status": "scheduled",
             "attempted": False, "task_name": ""}
+    if owner_attendee and owner_attendee.get("responseStatus") in ("accepted", "tentative", "needsAction"):
+        # The owner's own reply, so the page can show "Maybe" beside the meeting.
+        normalized["response"] = owner_attendee["responseStatus"]
     uid = event.get("iCalUID")
     organizer_email = str(organizer.get("email", "")).strip().lower()
     roster = {owner.strip(), organizer_email, *(str(x.get("email", "")).strip().lower() for x in attendees)}
@@ -473,6 +476,10 @@ class CalendarMeetings:
                 old = existing.get(identity)
                 if old and old.get("status") == "cancelled" and not old.get("calendar_excluded"):
                     continue
+                if old:
+                    # The reply can change without the meeting itself changing.
+                    if "response" in new: old["response"] = new["response"]
+                    else: old.pop("response", None)
                 if old and "desktop_occurrence_start" in new:
                     # Backfill calendars saved before desktop capture was coordinated.
                     old["desktop_occurrence_start"] = new["desktop_occurrence_start"]
@@ -552,6 +559,8 @@ class CalendarMeetings:
     @staticmethod
     def _public(event, owner=""):
         public = {k: event[k] for k in ("id", "title", "start", "end", "attendees", "status", "calendar_id") if k in event}
+        # The meeting link itself stays on the server: this projection never carries it.
+        if event.get("response"): public["response"] = event["response"]
         public["capture_provider"] = ("desktop" if event.get("capture_source") == "desktop" else
                                       "cloud" if event.get("execution_id") or event.get("attempted")
                                       or cloud_capture_enabled(owner, event.get("join_url")) else "desktop")

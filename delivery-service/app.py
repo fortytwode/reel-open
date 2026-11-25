@@ -17,8 +17,10 @@ from reel_organization import _safe_url, firebase_project, is_internal_email, no
 
 if __package__:
     from .slack_recaps import SlackError, SlackRecaps
+    from . import workspace
 else:
     from slack_recaps import SlackError, SlackRecaps
+    import workspace
 
 logger = logging.getLogger(__name__)
 
@@ -581,6 +583,118 @@ def create_app(auth_verifier=verify_firebase, calendar_factory=calendar_service,
             app.logger.error('Meeting note unavailable')
             return jsonify(error='Meeting notes unavailable'), 503
 
+    def workspace_request(meeting_id=None, *, edit=False, share=False):
+        """Authenticate, then return (email, note, body). Raises LookupError for 404, PermissionError for 403."""
+        email = owner()
+        body = request.get_json(silent=True)
+        if request.method == 'POST' and not isinstance(body, dict):
+            raise workspace.WorkspaceError('Invalid request')
+        if meeting_id is None:
+            return email, None, body
+        if not re.fullmatch(r'reel_[0-9a-f]{64}', meeting_id):
+            raise LookupError
+        note = read_shared_note(note_store(), meeting_id, email)
+        if note is None:
+            raise LookupError
+        view = note['workspace']
+        if (edit and not view['can_edit']) or (share and not view['can_share']):
+            raise PermissionError
+        return email, note, body
+
+    def workspace_route(handler):
+        from functools import wraps
+        @wraps(handler)
+        def run(*args, **kwargs):
+            try:
+                return handler(*args, **kwargs)
+            except LookupError:
+                return jsonify(error='Not found'), 404
+            except PermissionError:
+                return jsonify(error='You can read this note but not change it'), 403
+            except workspace.WorkspaceError as exc:
+                return jsonify(error=str(exc)), 400
+            except DeliveryError as exc:
+                if str(exc) in ('Authentication required', 'Organization delivery is unavailable'):
+                    return jsonify(error='Authentication required'), 401
+                app.logger.error('Meeting workspace unavailable')
+                return jsonify(error='Meeting notes unavailable'), 503
+            except Exception:
+                app.logger.error('Meeting workspace unavailable')
+                return jsonify(error='Meeting notes unavailable'), 503
+        return run
+
+    def refreshed(meeting_id, email):
+        return jsonify(meeting=read_shared_note(note_store(), meeting_id, email))
+
+    @app.post('/delivery/meetings/<meeting_id>/tasks')
+    @workspace_route
+    def meeting_tasks(meeting_id):
+        email, _, body = workspace_request(meeting_id, edit=True)
+        if 'add' in body:
+            workspace.add_task(note_store(), meeting_id, email, body['add'], int(clock()))
+        elif 'remove' in body:
+            workspace.remove_task(note_store(), meeting_id, str(body['remove']))
+        else:
+            workspace.set_task(note_store(), meeting_id, email, body.get('task'), body.get('done'), int(clock()))
+        return refreshed(meeting_id, email)
+
+    @app.post('/delivery/meetings/<meeting_id>/summary')
+    @workspace_route
+    def meeting_summary(meeting_id):
+        email, _, body = workspace_request(meeting_id, edit=True)
+        workspace.set_summary(note_store(), meeting_id, email, None if body.get('restore') is True else body.get('text'), int(clock()))
+        return refreshed(meeting_id, email)
+
+    @app.post('/delivery/meetings/<meeting_id>/notes')
+    @workspace_route
+    def meeting_private_notes(meeting_id):
+        email, _, body = workspace_request(meeting_id)
+        workspace.set_private_note(note_store(), email, meeting_id, body.get('text'))
+        return refreshed(meeting_id, email)
+
+    @app.post('/delivery/meetings/<meeting_id>/folder')
+    @workspace_route
+    def meeting_folder(meeting_id):
+        email, _, body = workspace_request(meeting_id)
+        folder = body.get('folder_id')
+        if folder is not None and not isinstance(folder, str):
+            raise workspace.WorkspaceError('Invalid folder')
+        workspace.place_in_folder(note_store(), email, meeting_id, folder)
+        return refreshed(meeting_id, email)
+
+    @app.post('/delivery/meetings/<meeting_id>/share')
+    @workspace_route
+    def meeting_share(meeting_id):
+        email, note, body = workspace_request(meeting_id, share=True)
+        add, remove = body.get('add', []), body.get('remove', [])
+        if not isinstance(add, list) or not isinstance(remove, list) or len(add) + len(remove) > 50:
+            raise workspace.WorkspaceError('Invalid people')
+        before = set(note['workspace']['shared_with'])
+        # Unlist first: a list entry without access is an integrity error, the reverse is only a missing row.
+        for removed in before & {str(value).strip().lower() for value in remove}:
+            if removed not in note['recipients']:
+                remove_note_index(note_store(), meeting_id, removed)
+        state = workspace.share(note_store(), meeting_id, note, add, remove, body.get('link_access'))
+        # Invited people find the note in their own list, marked as shared with them.
+        for invited in state['shared_with']:
+            update_note_index(note_store(), meeting_id, invited, None, lambda: None)
+        return refreshed(meeting_id, email)
+
+    @app.route('/delivery/folders', methods=['GET', 'POST'])
+    @workspace_route
+    def folders():
+        email, _, body = workspace_request()
+        if request.method == 'POST':
+            if 'create' in body:
+                workspace.create_folder(note_store(), email, body['create'])
+            elif 'delete' in body:
+                workspace.delete_folder(note_store(), email, str(body['delete']))
+            elif isinstance(body.get('rename'), dict):
+                workspace.rename_folder(note_store(), email, str(body['rename'].get('id')), body['rename'].get('name'))
+            else:
+                raise workspace.WorkspaceError('Invalid request')
+        return jsonify(folders=workspace.load_user(note_store(), email)['folders'])
+
     @app.post('/delivery/complete')
     def complete():
         try:
@@ -757,15 +871,23 @@ def read_shared_note(store, meeting_id, email):
     if note is None:
         return None
     _validate_note(note, meeting_id)
-    if email not in note['recipients']:
+    extra = workspace.load_extra(store, meeting_id)
+    level = workspace.access_level(note, extra, email)
+    if level is None:
         return None
-    index, _ = store.load(_index_key(email))
-    if not isinstance(index, dict) or not isinstance(index.get('meetings'), dict):
-        raise DeliveryError('Invalid meeting index')
-    ids = index['meetings'].get(meeting_id)
-    if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
-        raise DeliveryError('Invalid meeting index entry')
-    return {**note, 'local_recording_ids':ids}
+    ids = []
+    if level == 'recipient':
+        index, _ = store.load(_index_key(email))
+        if not isinstance(index, dict) or not isinstance(index.get('meetings'), dict):
+            raise DeliveryError('Invalid meeting index')
+        ids = index['meetings'].get(meeting_id)
+        if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
+            raise DeliveryError('Invalid meeting index entry')
+    if level == 'organization':
+        # A link opens the summary. The transcript is for people who were invited.
+        note = {**note, 'segments': [], 'transcript_text': ''}
+    return {**note, 'local_recording_ids': ids,
+            'workspace': workspace.view(note, extra, workspace.load_user(store, email), level)}
 
 
 def list_shared_notes(store, email):
@@ -774,6 +896,7 @@ def list_shared_notes(store, email):
         return []
     if not isinstance(index.get('meetings'), dict):
         raise DeliveryError('Invalid meeting index')
+    user = workspace.load_user(store, email)
     def read_entry(meeting_id):
         if not re.fullmatch(r'reel_[0-9a-f]{64}', meeting_id):
             raise DeliveryError('Invalid meeting index entry')
@@ -781,13 +904,22 @@ def list_shared_notes(store, email):
         if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
             raise DeliveryError('Invalid meeting index entry')
         note, _ = store.load('notes/' + meeting_id)
-        if note is None or email not in _validate_note(note, meeting_id)['recipients']:
+        if note is None:
             raise DeliveryError('Invalid meeting index entry')
-        return {**{k:v for k,v in note.items() if k not in ('segments', 'transcript_text')}, 'local_recording_ids':ids}
+        _validate_note(note, meeting_id)
+        extra = workspace.load_extra(store, meeting_id)
+        level = workspace.access_level(note, extra, email)
+        if level not in ('recipient', 'shared'):
+            raise DeliveryError('Invalid meeting index entry')
+        open_tasks = sum(1 for state in extra['tasks'].values() if state.get('done')) + sum(1 for task in extra['added'] if task.get('done'))
+        return {**{k:v for k,v in note.items() if k not in ('segments', 'transcript_text')}, 'local_recording_ids':ids,
+                'shared_with_me': level == 'shared', 'folder_id': user['meeting_folders'].get(meeting_id),
+                'tasks_done': open_tasks, 'tasks_added': len(extra['added']),
+                **({'summary': extra['summary']['text'], 'summary_edited': True} if extra['summary'] else {})}
     # Each note still gets its own authoritative recipient check. Bound concurrency
     # so a large index doesn't turn one request into unbounded storage traffic.
     with ThreadPoolExecutor(max_workers=8) as pool:
-        result = list(pool.map(read_entry, index['meetings']))
+        result = [entry for entry in pool.map(read_entry, index['meetings']) if entry]
     return sorted(result, key=lambda item:(item['started_at'], item['id']), reverse=True)
 
 
@@ -840,6 +972,23 @@ def update_note_index(store, meeting_id, email, recording_id, fence):
             fence()
             store.cas(key, index, generation)
             fence()
+            return
+        except PreconditionFailed:
+            continue
+    raise Conflict('Meeting index changed repeatedly')
+
+
+def remove_note_index(store, meeting_id, email):
+    """Drop a note from the list of someone it is no longer shared with."""
+    from google.api_core.exceptions import PreconditionFailed
+    key = _index_key(email)
+    for _ in range(20):
+        index, generation = store.load(key)
+        if not isinstance(index, dict) or not isinstance(index.get('meetings'), dict) or meeting_id not in index['meetings']:
+            return
+        del index['meetings'][meeting_id]
+        try:
+            store.cas(key, index, generation)
             return
         except PreconditionFailed:
             continue

@@ -30,7 +30,8 @@ let participantMeetings = [], participantLoading = false, participantError = "",
 let note = null, noteLoading = false, noteError = "", noteLoadNumber = 0;
 let calendar = null;
 let upcomingEvents = [], upcomingLoading = false, upcomingLoaded = false, upcomingLoadNumber = 0, showAllUpcoming = false, noteTab = "Summary";
-let pastRange = "any", pastPerson = "", noteSearch = "";
+let pastRange = "any", pastPerson = "", noteSearch = "", pastSource = "all", pastFolder = "", noteFolders = [], namingFolder = false;
+let editingSummary = false, sharingOpen = false, workspaceBusy = false;
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
 const validUser = (u) => !!u;
@@ -438,7 +439,7 @@ const captureStates = {
   requesting_entry: ["Asking to join", "nt-chip-live"], awaiting_admission: ["Waiting to be let in", "nt-chip-live"],
   cancelled: ["Not recording", "nt-chip-off"], declined: ["Not recording", "nt-chip-off"], failed: ["Not recorded", "nt-chip-off"],
 };
-function eventRow(event, now) {
+function eventRow(event, now, conflicts = new Set()) {
   const start = new Date(event.start), end = new Date(event.end);
   const live = start <= now && end > now, minutes = Math.round((start - now) / 60000);
   const row = node("a", "nt-row nt-upcoming" + (live ? " nt-live" : ""));
@@ -447,6 +448,8 @@ function eventRow(event, now) {
   const main = node("span", "nt-main"); const title = node("strong", "", event.title);
   if (live) title.prepend(node("span", "nt-now", "Now"));
   else if (minutes > 0 && minutes <= 60) title.append(node("span", "nt-soon", `In ${minutes} min`));
+  if (conflicts.has(event.id)) title.append(node("span", "nt-soon nt-conflict", "Conflict"));
+  if (event.response === "tentative") title.append(node("span", "nt-soon nt-maybe", "Maybe"));
   main.append(title);
   const [label, tone] = captureStates[event.status] || [event.status, "nt-chip-off"];
   row.append(main, peopleChips(event.attendees), node("span", `nt-chip ${tone}`, label));
@@ -468,7 +471,8 @@ function renderMeetings() {
   const term = el("search").value.trim().toLocaleLowerCase();
   const matches = (m) => !term || [m.title, m.summary, ...(Array.isArray(m.attendees) ? m.attendees : [])].some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(term));
   const since = pastRange === "today" ? new Date().setHours(0, 0, 0, 0) : pastRange === "7" ? Date.now() - 7 * 864e5 : pastRange === "30" ? Date.now() - 30 * 864e5 : 0;
-  const withPerson = (m) => !pastPerson || (Array.isArray(m.attendees) && m.attendees.includes(pastPerson));
+  const withPerson = (m) => (!pastPerson || (Array.isArray(m.attendees) && m.attendees.includes(pastPerson)))
+    && (pastSource === "all" || (pastSource === "shared") === !!m.shared_with_me) && (!pastFolder || m.folder_id === pastFolder);
   const filtered = combined.filter((m) => matches(m) && withPerson(m) && Date.parse(m.started_at) >= since).sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
   const busy = meetingLoading || participantLoading;
   el("result-count").textContent = busy ? "Loading…" : term ? `${filtered.length} of ${combined.length} meetings` : `${combined.length} meetings`;
@@ -486,11 +490,13 @@ function renderMeetings() {
     if (!upcoming.length) section.append(node("p", "nt-empty", upcomingLoading || !upcomingLoaded ? "Loading your calendar…"
       : term ? "No upcoming meetings match your search." : future.length ? "No more meetings today or tomorrow." : "No upcoming meetings. Check that your calendar is connected under Calendar and joining."));
     const shown = showAllUpcoming || term ? upcoming : upcoming.slice(0, 3);
+    const conflicts = new Set();
+    upcoming.forEach((a, index) => { for (const b of upcoming.slice(index + 1)) if (Date.parse(b.start) < Date.parse(a.end) && Date.parse(a.start) < Date.parse(b.end)) { conflicts.add(a.id); conflicts.add(b.id); } });
     let day = "";
     for (const event of shown) {
       const label = dayLabel(new Date(event.start));
       if (label !== day) { day = label; section.append(node("h3", "nt-day", label)); }
-      section.append(eventRow(event, now));
+      section.append(eventRow(event, now, conflicts));
     }
     if (upcoming.length > 3 && !term) {
       const more = node("button", "nt-more-button secondary", showAllUpcoming ? "Show less" : `Show ${upcoming.length - 3} more`); more.type = "button";
@@ -508,8 +514,27 @@ function renderMeetings() {
   const filters = node("div", "nt-filters");
   filters.append(
     filterControl("Filter by date", pastRange, [["any", "Any time"], ["today", "Today"], ["7", "Last 7 days"], ["30", "Last 30 days"]], (value) => { pastRange = value; render(); }),
-    filterControl("Filter by attendee", pastPerson, [["", "Everyone"], ...people], (value) => { pastPerson = value; render(); }));
+    filterControl("Filter by attendee", pastPerson, [["", "Everyone"], ...people], (value) => { pastPerson = value; render(); }),
+    filterControl("Filter by source", pastSource, [["all", "All notes"], ["mine", "My meetings"], ["shared", "Shared with me"]], (value) => { pastSource = value; render(); }),
+    filterControl("Filter by folder", pastFolder, [["", "All folders"], ...noteFolders.map((folder) => [folder.id, folder.name]), ["+", "New folder…"]], (value) => {
+      if (value === "+") namingFolder = true; else pastFolder = value;
+      render();
+    }));
+  if (pastFolder && !noteFolders.some((folder) => folder.id === pastFolder)) pastFolder = "";
   pastHead.append(filters); past.append(pastHead);
+  if (namingFolder) {
+    const form = node("form", "nt-inline-form"), input = node("input"), save = node("button", "", "Create folder"), cancel = node("button", "secondary", "Cancel");
+    input.id = "new-note-folder"; input.maxLength = 80; input.required = true; input.placeholder = "Folder name"; input.setAttribute("aria-label", "Folder name");
+    save.type = "submit"; cancel.type = "button";
+    cancel.addEventListener("click", () => { namingFolder = false; render(); });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = await deliveryPost("/delivery/folders", { create: input.value });
+      if (data?.folders) { noteFolders = data.folders; pastFolder = data.folders.at(-1)?.id || ""; }
+      namingFolder = false; render();
+    });
+    form.append(input, save, cancel); past.append(form);
+  }
   let pastDay = "";
   for (const m of filtered) {
     const started = new Date(m.started_at);
@@ -523,6 +548,8 @@ function renderMeetings() {
     if (preview) main.append(node("span", "nt-preview", preview));
     const ready = m.participantNote && String(m.summary || "").trim();
     if (m.participantNote && !ready) main.append(node("span", "nt-preview", "No summary yet"));
+    if (m.shared_with_me) main.querySelector("strong").append(node("span", "nt-soon nt-maybe", "Shared with you"));
+    if (m.tasks_done) main.querySelector("strong").append(node("span", "nt-soon nt-done", `${m.tasks_done} done`));
     row.append(main, peopleChips(m.attendees), node("span", "nt-length", lengthLabel(m.duration_seconds)));
     if (!ready) row.append(node("span", "nt-chip nt-chip-off", m.participantNote ? "No notes" : "On this Mac"));
     past.append(row);
@@ -575,6 +602,25 @@ function noteMarkdown(blocks, people, meta, transcriptText) {
   if (transcriptText) lines.push("", "## Transcript", "", transcriptText);
   return lines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
+async function deliveryPost(path, body) {
+  if (!validUser(currentUser) || workspaceBusy) return null;
+  workspaceBusy = true;
+  try {
+    const token = await currentUser.getIdToken();
+    const response = await fetch(organization.deliveryServiceURL + path, { method: "POST", cache: "no-store",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) { message(data?.error || "Couldn't save that change. Try again.", true); return null; }
+    return data;
+  } catch { message("Couldn't save that change. Check your connection and try again.", true); return null; }
+  finally { workspaceBusy = false; }
+}
+// Every change to a note returns the note as it now stands for this reader.
+async function noteChange(path, body) {
+  const id = note?.id; if (!id) return;
+  const data = await deliveryPost(`/delivery/meetings/${id}/${path}`, body);
+  if (data?.meeting?.id === id && selectedNote() === id) { note = data.meeting; render(); }
+}
 function renderNote() {
   const list = el("recordings"); list.classList.add("nt-home");
   el("result-count").textContent = "";
@@ -583,69 +629,157 @@ function renderNote() {
   if (noteError) { message(noteError, true); return; }
   if (!note) return;
   message("");
+  const ws = note.workspace && typeof note.workspace === "object" ? note.workspace : null;
+  const canEdit = !!ws?.can_edit;
   const article = node("article", "nt-note");
   const back = node("a", "nt-link", "← All meetings"); back.href = libraryURL("meetings");
   const started = new Date(note.started_at);
   const meta = Number.isNaN(started.getTime()) ? "Date unavailable" : `${dayLabel(started)}, ${started.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })} · ${timeOf(started)} · ${lengthLabel(note.duration_seconds)}`;
   const head = node("header", "nt-note-head"); head.append(node("h2", "", note.title), node("p", "nt-meta", meta));
   const unique = (value) => [...new Set((Array.isArray(value) ? value : []).filter((item) => typeof item === "string" && item))];
-  const people = unique(note.attendees), recipients = unique(note.recipients);
+  const people = unique(note.attendees), recipients = unique(note.recipients), invited = unique(ws?.shared_with);
   if (people.length) {
     const chips = node("div", "nt-attendees");
     for (const person of people) { const chip = node("span", "nt-person", personName(person)); chip.title = person; chips.append(chip); }
     head.append(chips);
   }
-  if (recipients.length) { const shared = node("p", "nt-shared", `Notes shared with ${recipients.length === 1 ? "1 person" : `${recipients.length} people`}`); shared.title = recipients.join(", "); head.append(shared); }
+  const reach = recipients.length + invited.length;
+  if (reach) {
+    const shared = node("p", "nt-shared", `Notes shared with ${reach === 1 ? "1 person" : `${reach} people`}${ws?.link_access === "organization" ? ", and anyone at your company who has the link" : ""}`);
+    shared.title = [...recipients, ...invited].join(", "); head.append(shared);
+  }
+  if (ws?.access === "organization") head.append(node("p", "nt-banner", "You opened this note from a link. You can read the summary. Ask someone who was in the meeting to invite you for the transcript."));
+  if (ws?.access === "shared") head.append(node("p", "nt-banner", "This note was shared with you."));
+
   const transcriptText = typeof note.transcript_text === "string" && note.transcript_text ? note.transcript_text
     : Array.isArray(note.segments) ? note.segments.map((s) => s.text || "").join("\n") : "";
-  const summaryText = typeof note.summary === "string" ? note.summary : "";
+  const original = typeof note.summary === "string" ? note.summary : "";
+  const edited = ws?.summary && typeof ws.summary.text === "string" ? ws.summary : null;
+  const summaryText = edited ? edited.text : original;
   const blocks = summaryBlocks(summaryText);
   const tasks = blocks.filter((block) => block.type === "todo").map((block) => block.text);
+
   const actions = node("div", "nt-actions");
-  const action = (label, run) => { const button = node("button", "secondary", label); button.type = "button"; button.addEventListener("click", () => run(button)); actions.append(button); };
+  const action = (label, run, className = "secondary") => { const button = node("button", className, label); button.type = "button"; button.addEventListener("click", () => run(button)); actions.append(button); return button; };
+  if (ws?.can_share) action(sharingOpen ? "Close sharing" : "Share", () => { sharingOpen = !sharingOpen; render(); }, "");
   if (summaryText) action("Copy summary", (button) => copyText(button, `${note.title}\n\n${summaryText}`));
   if (transcriptText) action("Copy transcript", (button) => copyText(button, transcriptText));
   action("Copy as Markdown", (button) => copyText(button, noteMarkdown(blocks, people, meta, transcriptText)));
   action("Copy link", (button) => copyText(button, location.href));
   const notion = validNotionURL(note.notes_url) || validNotionURL(note.notion_url);
   if (notion) { const link = node("a", "button secondary", "Open in Notion"); link.href = notion.href; link.target = "_blank"; link.rel = "noopener noreferrer"; actions.append(link); }
+  if (ws && ws.access !== "organization") {
+    actions.append(filterControl("Folder for this note", ws.folder_id || "", [["", "No folder"], ...noteFolders.map((folder) => [folder.id, folder.name])],
+      (value) => noteChange("folder", { folder_id: value || null })));
+  }
+
+  let sharing = null;
+  if (ws?.can_share && sharingOpen) {
+    sharing = node("section", "nt-share"); sharing.setAttribute("aria-label", "Share notes");
+    sharing.append(node("h3", "", "Share notes"));
+    const peopleList = node("ul", "nt-share-list");
+    for (const person of recipients) { const item = node("li"); item.append(node("span", "", person), node("span", "nt-role", "In the meeting")); peopleList.append(item); }
+    for (const person of invited) {
+      const item = node("li"), remove = node("button", "secondary", "Remove"); remove.type = "button";
+      remove.addEventListener("click", () => noteChange("share", { remove: [person] }));
+      item.append(node("span", "", person), node("span", "nt-role", "Invited"), remove); peopleList.append(item);
+    }
+    const form = node("form", "nt-inline-form"), input = node("input"), invite = node("button", "", "Invite");
+    input.type = "email"; input.id = "share-email"; input.required = true; input.placeholder = `name@${organization.allowedEmailDomain || "company.com"}`; input.setAttribute("aria-label", "Email to invite");
+    invite.type = "submit";
+    form.addEventListener("submit", (event) => { event.preventDefault(); noteChange("share", { add: [input.value.trim()] }); });
+    form.append(input, invite);
+    const visibility = node("label", "nt-visibility", "Who can open the link ");
+    visibility.append(filterControl("Who can open the link", ws.link_access === "organization" ? "organization" : "invited",
+      [["invited", "Only people invited"], ["organization", `Anyone at ${organization.allowedEmailDomain || "your company"} with the link`]],
+      (value) => noteChange("share", { link_access: value })));
+    sharing.append(peopleList, form, visibility,
+      node("p", "nt-read", "People you invite can read the summary and transcript and tick off action items. Link viewers see the summary only. Notes are never shared outside your company."));
+  }
 
   const bar = node("div", "nt-tabbar");
   const tabs = node("div", "nt-tabs"); tabs.setAttribute("role", "tablist");
   const find = node("input", "nt-find"); find.type = "search"; find.id = "note-search"; find.placeholder = "Search this note…"; find.setAttribute("aria-label", "Search this note"); find.value = noteSearch;
   bar.append(tabs, find);
   const panels = {};
+
   const summary = node("section", "nt-panel"); panels.Summary = summary;
-  const words = summaryText.split(/\s+/).filter(Boolean).length;
-  if (words) summary.append(node("p", "nt-read", `${Math.max(1, Math.round(words / 200))} min read`));
-  if (!blocks.length) summary.append(node("p", "nt-empty", "No summary for this meeting. There may have been no speech to summarise."));
-  let listNode = null;
-  for (const block of blocks) {
-    if (block.type === "bullet" || block.type === "todo") {
-      const kind = block.type === "todo" ? "nt-todo" : "nt-points";
-      if (!listNode || listNode.className !== kind) { listNode = node("ul", kind); summary.append(listNode); }
-      const item = node("li"); if (block.label) item.append(node("strong", "", block.label + ": ")); item.append(block.text); listNode.append(item);
-      continue;
+  if (editingSummary && canEdit) {
+    const area = node("textarea", "nt-editor"); area.id = "summary-editor"; area.value = summaryText; area.setAttribute("aria-label", "Summary");
+    const buttons = node("div", "nt-actions"), save = node("button", "", "Save summary"), cancel = node("button", "secondary", "Cancel");
+    save.type = cancel.type = "button";
+    save.addEventListener("click", async () => { editingSummary = false; await noteChange("summary", { text: area.value }); });
+    cancel.addEventListener("click", () => { editingSummary = false; render(); });
+    buttons.append(save, cancel);
+    summary.append(node("p", "nt-read", "Put a section name on its own line, start points with \"-\", and list tasks under \"Action items\". Everyone on this note sees your edit."), area, buttons);
+  } else {
+    const words = summaryText.split(/\s+/).filter(Boolean).length;
+    const info = node("p", "nt-read", words ? `${Math.max(1, Math.round(words / 200))} min read` : "");
+    if (edited) info.append(` · Edited by ${personName(edited.by)}`);
+    if (canEdit) {
+      const edit = node("button", "nt-text-button", "Edit summary"); edit.type = "button"; edit.addEventListener("click", () => { editingSummary = true; noteTab = "Summary"; render(); });
+      info.append(" · ", edit);
+      if (edited) { const restore = node("button", "nt-text-button", "Restore original"); restore.type = "button"; restore.addEventListener("click", () => noteChange("summary", { restore: true })); info.append(" · ", restore); }
     }
-    listNode = null;
-    summary.append(node(block.type === "heading" ? "h3" : "p", "", block.text));
+    summary.append(info);
+    if (!blocks.length) summary.append(node("p", "nt-empty", "No summary for this meeting. There may have been no speech to summarise."));
+    let listNode = null;
+    for (const block of blocks) {
+      if (block.type === "bullet" || block.type === "todo") {
+        const kind = block.type === "todo" ? "nt-todo" : "nt-points";
+        if (!listNode || listNode.className !== kind) { listNode = node("ul", kind); summary.append(listNode); }
+        const item = node("li"); if (block.label) item.append(node("strong", "", block.label + ": ")); item.append(block.text); listNode.append(item);
+        continue;
+      }
+      listNode = null;
+      summary.append(node(block.type === "heading" ? "h3" : "p", "", block.text));
+    }
   }
-  const taskName = `Action items${tasks.length ? ` (${tasks.length})` : ""}`;
+
+  const added = Array.isArray(ws?.added_tasks) ? ws.added_tasks.filter((task) => task && typeof task.text === "string" && typeof task.id === "string") : [];
+  const local = ws ? null : doneTasks(note.id);
+  const isDone = (text) => ws ? ws.tasks?.[text]?.done === true : local.has(text);
+  const total = tasks.length + added.length;
+  const taskName = `Action items${total ? ` (${total})` : ""}`;
   const taskPanel = node("section", "nt-panel"); panels[taskName] = taskPanel;
-  if (!tasks.length) taskPanel.append(node("p", "nt-empty", "No action items were recorded for this meeting."));
+  if (!total) taskPanel.append(node("p", "nt-empty", "No action items were recorded for this meeting."));
   else {
-    const done = doneTasks(note.id), progress = node("p", "nt-read"), checklist = node("ul", "nt-checklist");
-    const count = () => { progress.textContent = `${tasks.filter((task) => done.has(task)).length} of ${tasks.length} done. Ticks are saved in this browser only.`; };
-    tasks.forEach((task, index) => {
-      const item = node("li"), box = node("input"), label = node("label", "", task);
-      box.type = "checkbox"; box.id = `note-task-${index}`; box.checked = done.has(task); label.htmlFor = box.id;
-      box.addEventListener("change", () => { if (box.checked) done.add(task); else done.delete(task); saveTasks(note.id, done); item.classList.toggle("done", box.checked); count(); });
-      item.classList.toggle("done", box.checked); item.append(box, label); checklist.append(item);
-    });
-    count(); taskPanel.append(progress, checklist);
+    const doneCount = tasks.filter(isDone).length + added.filter((task) => task.done).length;
+    taskPanel.append(node("p", "nt-read", `${doneCount} of ${total} done. ${ws ? "Everyone on this note sees what is ticked." : "Ticks are saved in this browser only."}`));
+    const checklist = node("ul", "nt-checklist");
+    const line = (key, text, done, who, removable) => {
+      const item = node("li"), box = node("input"), label = node("label", "", text);
+      box.type = "checkbox"; box.id = `note-task-${checklist.children.length}`; box.checked = done; box.disabled = !!ws && !canEdit; label.htmlFor = box.id;
+      box.addEventListener("change", () => {
+        if (ws) noteChange("tasks", { task: key, done: box.checked });
+        else { if (box.checked) local.add(key); else local.delete(key); saveTasks(note.id, local); render(); }
+      });
+      item.classList.toggle("done", done); item.append(box, label);
+      if (done && who) item.append(node("span", "nt-role", personName(who)));
+      if (removable && canEdit) { const remove = node("button", "nt-text-button", "Remove"); remove.type = "button"; remove.addEventListener("click", () => noteChange("tasks", { remove: key })); item.append(remove); }
+      checklist.append(item);
+    };
+    for (const task of tasks) line(task, task, isDone(task), ws?.tasks?.[task]?.by, false);
+    for (const task of added) line(task.id, task.text, task.done === true, task.by, true);
+    taskPanel.append(checklist);
   }
+  if (canEdit) {
+    const form = node("form", "nt-inline-form"), input = node("input"), add = node("button", "secondary", "Add action item");
+    input.id = "new-task"; input.maxLength = 500; input.required = true; input.placeholder = "Add an action item"; input.setAttribute("aria-label", "New action item"); add.type = "submit";
+    form.addEventListener("submit", (event) => { event.preventDefault(); noteChange("tasks", { add: input.value }); });
+    form.append(input, add); taskPanel.append(form);
+  }
+
+  if (ws) {
+    const mine = node("section", "nt-panel"); panels["My notes"] = mine;
+    const area = node("textarea", "nt-editor"); area.id = "my-notes"; area.value = typeof ws.my_notes === "string" ? ws.my_notes : ""; area.placeholder = "Write your own notes on this meeting."; area.setAttribute("aria-label", "My notes");
+    const save = node("button", "", "Save my notes"); save.type = "button"; save.addEventListener("click", () => noteChange("notes", { text: area.value }));
+    mine.append(node("p", "nt-read", "Only you can see these. They are not included when the note is shared."), area, save);
+  }
+
   const transcript = node("section", "nt-panel"); panels.Transcript = transcript;
-  transcript.append(transcriptBlocks() || node("p", transcriptText ? "nt-plain" : "nt-empty", transcriptText || "Transcript unavailable."));
+  transcript.append(transcriptBlocks() || node("p", transcriptText ? "nt-plain" : "nt-empty",
+    transcriptText || (ws?.access === "organization" ? "The transcript is available to people invited to this note." : "Transcript unavailable.")));
   const names = Object.keys(panels);
   const applySearch = () => {
     const needle = noteSearch.trim().toLocaleLowerCase(); let hits = 0;
@@ -663,7 +797,7 @@ function renderNote() {
   };
   for (const name of names) { const tab = node("button", "nt-tab", name); tab.type = "button"; tab.setAttribute("role", "tab"); tab.addEventListener("click", () => show(name)); tabs.append(tab); }
   find.addEventListener("input", () => { noteSearch = find.value; applySearch(); });
-  article.append(back, head, actions, bar, ...Object.values(panels)); list.append(article);
+  article.append(back, head, actions, ...(sharing ? [sharing] : []), bar, ...Object.values(panels)); list.append(article);
   show(names.find((name) => name === noteTab || (noteTab === "Action items" && name.startsWith("Action items"))) || "Summary");
 }
 async function loadUpcoming() {
@@ -684,7 +818,7 @@ async function loadUpcoming() {
 async function loadNote() {
   const id = selectedNote(); if (publicSignup || !id || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++noteLoadNumber;
-  note = null; noteError = ""; noteLoading = true; noteSearch = ""; render();
+  note = null; noteError = ""; noteLoading = true; noteSearch = ""; editingSummary = false; sharingOpen = false; render();
   const current = () => number === noteLoadNumber && currentUser?.uid === uid && auth.currentUser?.uid === uid && selectedNote() === id;
   try {
     const token = await user.getIdToken(); if (!current()) return;
@@ -716,6 +850,11 @@ async function loadParticipantMeetings() {
       if (cursor !== null) seen.add(cursor);
     } while (cursor !== null);
     participantMeetings = [...results.values()]; participantLoading = false; render();
+    try {
+      const response = await fetch(organization.deliveryServiceURL + "/delivery/folders", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      const data = response.ok ? await response.json() : null;
+      if (current() && Array.isArray(data?.folders)) { noteFolders = data.folders.filter((folder) => folder && typeof folder.id === "string" && typeof folder.name === "string"); render(); }
+    } catch { /* folders are optional; the list works without them */ }
   } catch { if (current()) { participantLoading = false; participantError = "Couldn't load participant notes. Check your connection and click Refresh."; render(); } }
 }
 function validNotionURL(value) {
