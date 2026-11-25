@@ -207,3 +207,13 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { 
 .meeting-note h2 { margin: 24px 0 8px; }
 .meeting-note h3 { margin: 28px 0 10px; }
 .meeting-note-text { white-space: pre-wrap; line-height: 1.6; }
+
+/* Two products, one shell: each page shows only its own navigation. */
+html[data-product="notetaker"] :is(#nav-library,#nav-recent,#nav-pinned,#nav-archive,#folder-section,.record-options,#library-footnote) { display: none !important; }
+html:not([data-product="notetaker"]) :is(#nav-meetings,#nav-calendar) { display: none !important; }
+html[data-product="notetaker"] .brand-mark { color: #1f8a70; text-shadow: 0 0 0 #1f8a70; }
+html[data-product="notetaker"] #nav-calendar { margin-left: 0; min-height: 0; color: inherit; font-size: inherit; }
+.other-product { display: block; margin: 0 0 10px; padding: 9px 10px; border: 1px solid #eff0f2; border-radius: 8px; color: #252a31; font-size: 12px; font-weight: 650; text-decoration: none; }
+.other-product:hover { background: #f6f7f9; }
+.other-product small { display: block; color: #888e97; font-size: 11px; font-weight: 400; line-height: 1.35; }
+@media(max-width:900px) { .other-product small { display: none; } }

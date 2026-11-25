@@ -12,7 +12,7 @@ const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const launchOptions = existsSync(chrome) ? { headless: true, executablePath: chrome } : { headless: true };
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://localhost').pathname;
-  const file = path === '/record' ? '/record.html' : path === '/notetaker' ? '/notetaker.html' : path;
+  const file = path === '/record' ? '/record.html' : path === '/notetaker' ? '/notetaker.html' : path === '/notetaker-meetings' ? '/notetaker-meetings.html' : path;
   try { const data = await readFile(join(web, file)); res.writeHead(200, { 'Content-Type': types[extname(file)] || 'application/json' }); res.end(data); }
   catch { res.writeHead(404); res.end(); }
 });
@@ -137,46 +137,36 @@ test('the tab handoff asks for a tab first and keeps the saved recording mode', 
 });
 
 
-test('signed-in notes use the scoped token and clear on account change', async () => {
+test('team deployments open the full Notetaker workspace and keep deep links', async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const browser = await chromium.launch(launchOptions);
   try {
     const page = await browser.newPage();
+    const origin = `http://127.0.0.1:${server.address().port}`;
     const example = JSON.parse(await readFile(new URL('../../organization.example.json', import.meta.url), 'utf8'));
-    await page.route('**/organization.json', route => route.fulfill({ json: example }));
-    await page.route('https://www.gstatic.com/firebasejs/**/firebase-app.js', route => route.fulfill({ contentType: 'text/javascript', body: 'export function initializeApp() { return {}; }' }));
-    await page.route('https://www.gstatic.com/firebasejs/**/firebase-auth.js', route => route.fulfill({ contentType: 'text/javascript', body: `
-      const auth = {}; export function getAuth() { return auth; }
-      export function onAuthStateChanged(auth, callback) { window.setFakeUser = callback; callback(null); }
-      export function signOut() { window.setFakeUser(null); }
-      export class GoogleAuthProvider { setCustomParameters() {} }
-      export function signInWithPopup() {}` }));
-    let release, received, requestCount = 0;
-    const requestReceived = new Promise(resolve => { received = resolve; });
-    const blocked = new Promise(resolve => { release = resolve; });
-    await page.route('https://delivery.northwind.example/delivery/meetings**', async route => {
-      assert.equal(route.request().headers().authorization, 'Bearer token-a');
-      requestCount++;
-      if (requestCount === 1) { received(); await blocked; }
-      await route.fulfill({ json: { meetings: [{ id: 'reel_' + 'a'.repeat(64), title: 'Private meeting', started_at: '2026-11-19T12:00:00Z' }], next_cursor: null }, headers: { 'access-control-allow-origin': '*' } });
-    });
-    await page.route('https://meetings.northwind.example/**', route => route.fulfill({ json: {}, headers: { 'access-control-allow-origin': '*' } }));
-    await page.goto(`http://127.0.0.1:${server.address().port}/notetaker`);
-    await page.waitForFunction(() => !!window.setFakeUser);
-    await page.evaluate(() => window.setFakeUser({ uid: 'a', email: 'a@northwind.example', emailVerified: true, getIdToken: async () => 'token-a' }));
-    await requestReceived;
-    await page.evaluate(() => window.setFakeUser(null));
-    release();
-    await page.waitForTimeout(100);
-    assert.equal(await page.locator('#notes-list').textContent(), '');
-    assert.match(await page.locator('#notes-status').textContent(), /Sign in/);
-    await page.evaluate(() => window.setFakeUser({ uid: 'a', email: 'a@northwind.example', emailVerified: true, getIdToken: async () => 'token-a' }));
-    const note = page.locator('#notes-list a');
-    await note.waitFor();
-    assert.equal(await note.textContent(), 'Private meeting');
-    assert.equal(await note.getAttribute('href'), example.notesBaseURL + '#meetings/reel_' + 'a'.repeat(64));
-    await page.evaluate(() => window.setFakeUser(null));
-    assert.equal(await page.locator('#notes-list').textContent(), '');
+    // Library and Notetaker on one origin: Notetaker is its own page.
+    await page.route('**/organization.json', route => route.fulfill({ json: { ...example, webBase: origin, notesBaseURL: origin + '/library' } }));
+    await page.route('https://**', route => route.abort());
+    await page.goto(`${origin}/notetaker#calendar-meeting=event-1`);
+    await page.waitForURL(`${origin}/notetaker-meetings#calendar-meeting=event-1`);
+    await page.locator('#nav-meetings').waitFor();
+    assert.equal(await page.locator('html').getAttribute('data-product'), 'notetaker');
+    assert.equal(await page.locator('#view-title').textContent(), 'Meeting calendar');
+    assert.equal(await page.locator('#nav-library').isVisible(), false);
+    await page.goto(`${origin}/notetaker`);
+    await page.waitForURL(`${origin}/notetaker-meetings`);
+    await page.locator('#nav-meetings[aria-current="page"]').waitFor();
+    assert.equal(await page.title(), 'Meetings · Reel Notetaker');
+    assert.equal(await page.locator('#other-product').getAttribute('href'), origin + '/library');
+    // Library proxied on another origin: Notetaker opens there, where people are already signed in.
+    await page.unroute('**/organization.json');
+    await page.unroute('https://**');
+    const hub = 'https://hub.northwind.example/reel';
+    await page.route('**/organization.json', route => route.fulfill({ json: { ...example, notesBaseURL: hub } }));
+    await page.route(hub, route => route.fulfill({ contentType: 'text/html', body: '<title>proxied</title>' }));
+    await page.goto('about:blank');
+    await page.goto(`${origin}/notetaker#meetings/reel_${'a'.repeat(64)}`);
+    await page.waitForURL(`${hub}#meetings/reel_${'a'.repeat(64)}`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 });
 
@@ -215,7 +205,7 @@ test('failed cloud recording recovery keeps its failed status and offers private
         ? { events: [event], capabilities: { calendar: true, bot: true } } : { meetings: [] }, headers });
     });
     const origin = `http://127.0.0.1:${server.address().port}`;
-    await page.goto(origin + '/notetaker');
+    await page.goto(origin + '/notetaker-meetings');
     await page.evaluate(async () => {
       const { mountMeetingCalendar } = await import('/meeting-calendar.js');
       const container = document.createElement('div');

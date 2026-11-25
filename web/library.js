@@ -60,10 +60,48 @@ function rememberRecording(id) {
   try { localStorage.setItem(recentStorageKey(currentUser.uid), JSON.stringify(recent)); }
   catch { /* Storage may be disabled; keep Recent working for this visit. */ }
 }
-const isRecent = () => location.hash === "#recent";
-const isCalendar = () => location.hash === "#calendar";
+// One shell serves two products. Reel Recorder holds screen recordings; Reel
+// Notetaker holds meetings, notes and the meeting calendar. Each shows only its
+// own navigation. notetaker-meetings.html is always Notetaker. Where a host
+// proxies only the library page (Mission Control), meeting links switch this
+// page to Notetaker in place, so the existing sign-in keeps working.
+const fixedNotetaker = document.documentElement.dataset.product === "notetaker";
+const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
+const proxied = !fixedNotetaker && !!organization && sameOrigin(location.href, organization.notesBaseURL) && !sameOrigin(location.href, organization.webBase);
+const meetingHash = () => /^#(?:meetings(?:\/.*)?|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
+let notetaker = fixedNotetaker || (proxied && meetingHash());
+// Where the library is served from another origin, open Notetaker there too so
+// people sign in once for both products.
+if (fixedNotetaker && organization?.notesBaseURL && organization.webBase && !publicSignup
+    && sameOrigin(organization.notesBaseURL, organization.notesBaseURL)
+    && !sameOrigin(organization.webBase, organization.notesBaseURL) && !sameOrigin(location.href, organization.notesBaseURL)) {
+  location.replace(organization.notesBaseURL + (location.hash || "#meetings"));
+}
+const productName = () => notetaker ? "Reel Notetaker" : "Reel Recorder";
+const notetakerURL = (hash = "") => !organization ? "/notetaker-meetings" + hash
+  : publicSignup ? organization.webBase + "/notetaker"
+  : proxied ? organization.notesBaseURL + (hash || "#meetings") : organization.webBase + "/notetaker-meetings" + hash;
+const recorderURL = () => !organization ? "/library" : organization.notesBaseURL + (proxied ? "#library" : "");
+function showProduct() {
+  notetaker = fixedNotetaker || (proxied && meetingHash());
+  document.documentElement.dataset.product = notetaker ? "notetaker" : "recorder";
+  const brand = document.querySelector(".brand");
+  brand.lastChild.textContent = " " + productName();
+  brand.href = notetaker ? notetakerURL() : recorderURL();
+  document.querySelector(".library-label").textContent = notetaker ? "MEETINGS" : "LIBRARY";
+  document.querySelector(".workspace small").textContent = notetaker ? "Meeting notes" : "Personal library";
+  document.querySelector(".breadcrumb").firstChild.textContent = notetaker ? "Notetaker " : "Library ";
+  document.querySelector(".personal-library strong").textContent = notetaker ? "Your meetings" : "Personal library";
+  document.querySelector(".personal-library small").textContent = notetaker ? "Private to you and attendees" : "Private to you";
+  const other = el("other-product");
+  other.href = notetaker ? recorderURL() : notetakerURL();
+  other.firstChild.textContent = notetaker ? "Reel Recorder " : "Reel Notetaker ";
+  other.querySelector("small").textContent = notetaker ? "Screen recordings and share links" : "Meetings, notes and calendar";
+}
+const isRecent = () => !notetaker && location.hash === "#recent";
+const isCalendar = () => location.hash === "#calendar" || (notetaker && /^#(?:calendar-meeting|meeting-request)=/.test(location.hash));
 const selectedNote = () => /^#meetings\/(reel_[a-f0-9]{64})$/.exec(location.hash)?.[1] || null;
-const isMeetings = () => location.hash === "#meetings" || !!selectedNote();
+const isMeetings = () => location.hash === "#meetings" || !!selectedNote() || (notetaker && !isCalendar());
 const isArchived = () => location.hash === "#archive";
 const isPinned = () => location.hash === "#pinned";
 const selectedFolder = () => /^#folder=([a-zA-Z0-9_-]{1,80})$/.exec(location.hash)?.[1] || null;
@@ -111,12 +149,14 @@ function setLoading(value) {
   el("recordings").setAttribute("aria-busy", String(value));
 }
 function updateView() {
+  showProduct();
   openManagement.clear();
   const recentView = isRecent();
   const meetingsView = isMeetings();
   const calendarView = isCalendar();
-  if (publicSignup && (meetingsView || calendarView)) {
-    location.replace(organization.webBase + "/notetaker");
+  if (notetaker ? publicSignup : meetingsView || calendarView) {
+    // Meetings live in Reel Notetaker. Old links into the Recorder library keep working.
+    location.replace(notetakerURL(publicSignup ? "" : location.hash));
     return;
   }
   const folder = folders.find((f) => f.id === selectedFolder());
@@ -142,10 +182,10 @@ function updateView() {
     }});
   }
   el("search").placeholder = meetingsView ? "Search meetings" : "Search recordings";
-  document.title = `${title} · Reel`;
+  document.title = `${title} · ${productName()}`;
   for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !calendarView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView], ["nav-calendar", calendarView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
     const url = new URL(location.href); url.hash = id.slice(4) === "library" ? "library" : id.slice(4);
-    el(id).href = publicSignup && id === "nav-meetings" ? organization.webBase + "/notetaker" : url.href;
+    el(id).href = url.href;
     el(id).classList.toggle("active", selected);
     if (selected) el(id).setAttribute("aria-current", "page"); else el(id).removeAttribute("aria-current");
   }
@@ -225,7 +265,7 @@ function render() {
   const folderID = selectedFolder();
   if (folderID) {
     const title = folders.find((f) => f.id === folderID)?.name || "Folder";
-    el("view-title").textContent = title; el("video-tab").textContent = title; document.title = `${title} · Reel`;
+    el("view-title").textContent = title; el("video-tab").textContent = title; document.title = `${title} · ${productName()}`;
   }
   const screenEntries = organizationReady ? entries.map((r) => ({ ...r, title: displayedSharedTitle(preferenceFor(r.id).titleOverride, r.title) })).filter((r) => !meetingShareIDs.has(r.id) && preferenceFor(r.id).archived === isArchived()) : [];
   const available = screenEntries.filter((r) => (!isRecent() || visits.has(r.id)) && (!isPinned() || preferenceFor(r.id).pinned) && (!folderID || preferenceFor(r.id).folderId === folderID));
@@ -563,7 +603,7 @@ try {
     currentUser = user; ++loadNumber; ++meetingLoadNumber; ++participantLoadNumber; ++noteLoadNumber; participantMeetings = []; participantLoading = false; participantError = ""; note = null; noteLoading = false; noteError = ""; loadError = ""; meetingError = ""; entries = []; meetings = []; meetingShareIDs = new Set(); meetingLoading = false; recent = validUser(user) ? readRecent(user.uid) : []; el("recordings").replaceChildren();
     preferences = new Map(); folders = []; organizationReady = false; organizationError = ""; organizationMessage = ""; pendingOrganization.clear(); creatingFolder = false;
     el("folder-form").hidden = true; el("folder-name").value = ""; el("folder-form").querySelector('button[type="submit"]').disabled = false; renderFolders(); organizationStatus();
-    if (selectedFolder()) { el("view-title").textContent = "Folder"; el("video-tab").textContent = "Folder"; document.title = "Folder · Reel"; }
+    if (selectedFolder()) { el("view-title").textContent = "Folder"; el("video-tab").textContent = "Folder"; document.title = `Folder · ${productName()}`; }
     const allowed = validUser(user);
     rejectedAccount = !!candidate && !allowed;
     setLoading(allowed);

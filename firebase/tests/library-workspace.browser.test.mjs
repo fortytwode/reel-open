@@ -13,7 +13,12 @@ const server = createServer(async (req, res) => {
     const html = (await readFile(join(web, 'library.html'), 'utf8')).replace('<head>', '<head><base href="/reel/assets/">');
     res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(html);
   }
+  if (path === '/reel/notetaker') {
+    const html = (await readFile(join(web, 'notetaker-meetings.html'), 'utf8')).replace('<head>', '<head><base href="/reel/assets/">');
+    res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end(html);
+  }
   if (path === '/notetaker') path = '/notetaker.html';
+  if (path === '/notetaker-meetings') path = '/notetaker-meetings.html';
   path = path.replace(/^\/reel\/assets\//, '/');
   if (path === '/organization.json') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -45,15 +50,50 @@ test('Mission Control calendar stays in the workspace and clears on sign out', a
       return route.fulfill({json:{events:[],meetings:[],config:{enabled:true,calendar_ids:['primary']},capabilities:{calendar:true,provider:'desktop'}}});
     });
     await page.route('https://delivery.example.test/**', route => route.fulfill({json:{meetings:[],next_cursor:null}}));
-    await page.goto(`http://127.0.0.1:${server.address().port}/reel#calendar`);
-    await page.locator('#meeting-calendar-panel .mc-card').waitFor();
+    // Reel Recorder's library holds recordings only: meeting links move to Reel Notetaker.
+    await page.route('https://example.test/notetaker-meetings', route => route.fulfill({contentType:'text/html', body:'<title>moved</title>'}));
+    await page.goto(`http://127.0.0.1:${server.address().port}/reel#meetings/reel_${'a'.repeat(64)}`);
+    await page.waitForURL(`https://example.test/notetaker-meetings#meetings/reel_${'a'.repeat(64)}`);
+    await page.goto(`http://127.0.0.1:${server.address().port}/reel`);
+    await page.locator('#nav-library').waitFor();
+    assert.equal(await page.title(), 'Screen recordings · Reel Recorder');
+    assert.equal(await page.locator('#nav-meetings').isVisible(), false);
+    assert.equal(await page.locator('#nav-calendar').isVisible(), false);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), 'https://example.test/notetaker-meetings');
+
+    // A host that proxies only the library switches to Notetaker in place and keeps its sign-in.
+    const hosted = `http://127.0.0.1:${server.address().port}`;
+    const organization = await (await page.request.get(`${hosted}/organization.json`)).json();
+    await page.route('**/organization.json', route => route.fulfill({ json: { ...organization, notesBaseURL: `${hosted}/reel` } }));
+    await page.goto('about:blank');
+    await page.goto(`${hosted}/reel#meetings`);
+    await page.locator('#nav-meetings[aria-current="page"]').waitFor();
     assert.equal(new URL(page.url()).pathname, '/reel');
+    assert.equal(await page.title(), 'Meetings · Reel Notetaker');
+    assert.equal(await page.locator('.brand').textContent(), '● Reel Notetaker');
+    assert.equal(await page.locator('#nav-library').isVisible(), false);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), `${hosted}/reel#library`);
+    await page.locator('#other-product').click();
+    await page.locator('#nav-library[aria-current="page"]').waitFor();
+    assert.equal(await page.title(), 'Screen recordings · Reel Recorder');
+    assert.equal(await page.locator('#nav-meetings').isVisible(), false);
+    assert.equal(await page.locator('#other-product').getAttribute('href'), `${hosted}/reel#meetings`);
+    await page.unroute('**/organization.json');
+    await page.goto('about:blank');
+
+    await page.goto(`http://127.0.0.1:${server.address().port}/reel/notetaker#calendar`);
+    await page.locator('#meeting-calendar-panel .mc-card').waitFor();
+    assert.equal(new URL(page.url()).pathname, '/reel/notetaker');
     assert.equal(await page.locator('#view-title').textContent(), 'Meeting calendar');
+    assert.equal(await page.title(), 'Meeting calendar · Reel Notetaker');
     assert.equal(await page.locator('#meeting-calendar-panel').isVisible(), true);
-    await page.locator('#nav-recent').click();
+    for (const id of ['#nav-library', '#nav-recent', '#nav-pinned', '#nav-archive', '.record-options']) {
+      assert.equal(await page.locator(id).isVisible(), false, id);
+    }
+    await page.locator('#nav-meetings').click();
     await page.locator('#meeting-calendar-panel').waitFor({state:'hidden'});
     assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
-    assert.equal(await page.locator('#view-title').textContent(), 'Recently viewed videos');
+    assert.equal(await page.locator('#view-title').textContent(), 'Meetings');
     await page.locator('#nav-calendar').click();
     await page.locator('#meeting-calendar-panel .mc-card').waitFor();
     const sync = page.locator('[data-action="sync"]');
@@ -95,7 +135,7 @@ test('workspace loads against the existing team Hosting auth modules', async () 
     `}));
     await page.route('https://meetings.example.test/**', route => route.fulfill({json:{events:[],meetings:[],capabilities:{calendar:true}}}));
     await page.route('https://delivery.example.test/**', route => route.fulfill({json:{meetings:[],next_cursor:null}}));
-    await page.goto(`http://127.0.0.1:${server.address().port}/reel#calendar`);
+    await page.goto(`http://127.0.0.1:${server.address().port}/reel/notetaker#calendar`);
     await page.locator('#meeting-calendar-panel .mc-card').waitFor();
     assert.equal(await page.locator('#account').textContent(), 'owner@rocketshiphq.com');
     await page.evaluate(() => window.changeAccount({uid:'other',email:'other@example.com',emailVerified:true}));
