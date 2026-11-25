@@ -207,3 +207,47 @@ def test_unavailable_transcript_preserves_legacy_text_and_segments():
         assert result['speaker_coverage'] == 0.0
         assert result['segments'] == segments
         assert result['text'] == transcript_text(segments) == '  First line.\n\n Next line. '
+
+
+LONG_AVA = ('We reviewed the weekly numbers for the campaign and the install rate held steady while '
+            'the trial conversion stayed lower than the benchmark we agreed on last month')
+LONG_BEN = ('I will send the updated report with the organic figures by Friday and then we can decide '
+            'whether the budget should move toward the newer creative batch next week')
+
+
+def test_fuller_captions_become_the_transcript_with_every_line_named():
+    # The ASR chunk worded things differently and dropped half the conversation.
+    asr = 'We looked at weekly numbers, install rate steady. Report comes Friday.'
+    result = align(asr, caption(60, 75, LONG_AVA, 'Ava'), caption(74, 90, LONG_BEN, 'Ben', speaker_id='ben-id'),
+                   caption(91, 92, 'Thanks everyone', 'Ava'))
+    parts = result['segments']
+    assert [part['speaker_name'] for part in parts] == ['Ava', 'Ben', 'Ava']
+    assert [part['text'] for part in parts] == [LONG_AVA, LONG_BEN, 'Thanks everyone']
+    assert {part['speaker_source'] for part in parts} == {'google_meet_caption'}
+    assert {part['speaker_match'] for part in parts} == {'caption_text_match'}
+    assert parts[1].get('speaker_id') == 'ben-id' and 'speaker_id' not in parts[0]
+    assert result['speaker_attribution'] == 'platform_captions' and result['speaker_coverage'] == 1.0
+    assert result['text'] == '\n'.join(part['text'] for part in parts)
+    # A caption row revised after the next speaker began must not overlap it.
+    assert all(a['start'] <= a['end'] <= b['start'] for a, b in zip(parts, parts[1:]))
+    assert transcript_text(parts).startswith('Ava: We reviewed') and '\nBen: I will send' in transcript_text(parts)
+
+
+def test_consecutive_rows_from_one_speaker_read_as_one_turn():
+    half = len(LONG_AVA.split()) // 2
+    first, second = ' '.join(LONG_AVA.split()[:half]), ' '.join(LONG_AVA.split()[half:])
+    result = align('Short chunk.', caption(10, 12, first, 'Ava'), caption(13, 15, second, 'Ava'),
+                   caption(16, 30, LONG_BEN, 'Ben'), caption(200, 201, 'One more thing before we close', 'Ben'))
+    parts = result['segments']
+    assert [(part['speaker_name'], part['text']) for part in parts[:2]] == [('Ava', LONG_AVA), ('Ben', LONG_BEN)]
+    # A long silence starts a new turn even for the same speaker.
+    assert parts[2]['speaker_name'] == 'Ben' and parts[2]['start'] == 200
+
+
+def test_partial_capture_is_labelled_partial_and_thin_captions_keep_the_asr_transcript():
+    led = align('Short chunk.', caption(60, 75, LONG_AVA, 'Ava'), caption(76, 90, LONG_BEN, 'Ben'), status='partial')
+    assert led['speaker_attribution'] == 'partial' and led['speaker_coverage'] == 1.0
+    asr = ' '.join([LONG_AVA, LONG_BEN, 'After that the group agreed to pause the older videos and revisit pricing in January'])
+    thin = align(asr, caption(60, 75, LONG_AVA, 'Ava'))
+    assert thin['text'] == asr
+    assert thin['speaker_attribution'] == 'partial' and thin['speaker_coverage'] < 1

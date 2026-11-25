@@ -196,14 +196,79 @@ def _split_segment(segment, words, labels, turns):
         last_word, last_char, last_time = next_word, next_char, next_time
 
 
+CAPTION_LED_MIN_WORDS = 40
+CAPTION_LED_RATIO = 0.8
+CAPTION_TURN_GAP = 20
+CAPTION_PART_CHARS = 4_000
+
+
+def _caption_led_parts(turns):
+    """One part per run of caption rows from the same speaker, in spoken order.
+
+    The platform shows a display name on every caption row, so each part carries
+    the name the meeting itself showed for those words. Nothing is inferred.
+    """
+    parts = []
+    for turn in sorted(turns, key=lambda turn: (turn['start'], turn['end'])):
+        text = ' '.join(turn['text'].split())
+        if not text:
+            continue
+        last = parts[-1] if parts else None
+        if (last and last['speaker_name'] == turn['speaker_name'] and last.get('speaker_id') == turn.get('speaker_id')
+                and turn['start'] - last['end'] <= CAPTION_TURN_GAP
+                and len(last['text']) + len(text) < CAPTION_PART_CHARS):
+            last['text'] += ' ' + text
+            last['end'] = max(last['end'], turn['end'])
+            continue
+        # Caption rows keep being revised after the next speaker starts, so a
+        # row's end can pass the next start. Parts must not overlap.
+        start = max(turn['start'], last['end']) if last else turn['start']
+        part = {'start': start, 'end': max(start, turn['end']), 'text': text,
+                'speaker_name': turn['speaker_name'], 'speaker_source': turn['source'],
+                'speaker_match': 'caption_text_match'}
+        if 'speaker_id' in turn:
+            part['speaker_id'] = turn['speaker_id']
+        parts.append(part)
+    return parts
+
+
+def _caption_led(result, caption_artifact, asr_word_count):
+    """Use the platform's own captions as the transcript when they are the fuller record.
+
+    Chunked ASR has no word timings, so names can only be attached where its
+    wording happens to match the captions exactly. When the captions hold at
+    least as much of the conversation, they are the transcript, each line
+    already attributed by the platform.
+    """
+    turns = caption_artifact['turns']
+    caption_words = sum(len(WORD.findall(turn['text'])) for turn in turns)
+    # A caption row is a sentence or two. Anything far longer is not caption evidence.
+    if (caption_words < max(CAPTION_LED_MIN_WORDS, CAPTION_LED_RATIO * asr_word_count)
+            or any(len(turn['text']) > CAPTION_PART_CHARS for turn in turns)):
+        return None
+    parts = _caption_led_parts(turns)
+    text = '\n'.join(part['text'] for part in parts)
+    if not parts or len(parts) > MAX_SEGMENTS or len(text) > MAX_TRANSCRIPT_CHARS:
+        return None
+    return {**result, 'segments': parts, 'text': text, 'speaker_coverage': 1.0,
+            'speaker_attribution': 'platform_captions' if caption_artifact['status'] == 'captured' else 'partial'}
+
+
 def align_speakers(segments, caption_artifact):
-    """Split ASR chunks at exact caption matches while retaining the plain transcript."""
+    """Attribute the transcript from platform captions.
+
+    Captions that hold the fuller record become the transcript. Otherwise ASR
+    chunks are split at exact caption matches and the plain transcript is kept.
+    """
     result = {'schema_version': 2, 'model': 'OpenAI', 'speaker_attribution': 'unavailable',
               'speaker_timing': 'approximate', 'speaker_coverage': 0.0, 'segments': segments,
               'text': '\n'.join(segment['text'] for segment in segments)}
     if (not caption_artifact or caption_artifact['status'] == 'unavailable'
             or not caption_artifact['turns'] or len(result['text']) > MAX_TRANSCRIPT_CHARS):
         return result
+    led = _caption_led(result, caption_artifact, sum(len(WORD.findall(segment['text'])) for segment in segments))
+    if led:
+        return led
 
     turns = caption_artifact['turns']
     overlaps = _overlapping_turns(turns)
