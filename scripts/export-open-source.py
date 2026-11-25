@@ -61,6 +61,7 @@ delivery-service/slack_recaps.py
 delivery-service/standalone_providers.py
 delivery-service/test_calendar_credentials.py
 delivery-service/test_delivery.py
+delivery-service/test_folders_prompts_mcp.py
 delivery-service/test_gmail_recovery.py
 delivery-service/test_orchestration.py
 delivery-service/test_provider_selection.py
