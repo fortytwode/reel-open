@@ -452,6 +452,21 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             result["bot"] = result["bot"] and result["calendar"]
         return result
 
+    def prefetch(keys):
+        """Load many small objects at once; a missing or unreadable one is left for the caller to load again."""
+        from concurrent.futures import ThreadPoolExecutor
+        keys = list(dict.fromkeys(k for k in keys if k))
+        if not keys:
+            return {}
+        store = store_for_request()
+        def one(key):
+            try:
+                return key, store.load(key)[0]
+            except Exception:
+                return key, None
+        with ThreadPoolExecutor(max_workers=min(16, len(keys))) as pool:
+            return {key: value for key, value in pool.map(one, keys) if value is not None}
+
     def owner_state(claims):
         return store_for_request().load("calendar/" + digest(claims["email"].lower()))
 
@@ -492,13 +507,19 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
             visible = upcoming[:50] + history[:25]
         else:
             visible = sorted(events, key=lambda e: e.get("start", ""))[-100:]
+        # Each event's record lives in its own object. Read them together, not one after another.
+        records = prefetch(["executions/" + e["execution_id"] for e in visible if e.get("execution_id")]
+                           + [e["shared_claim"] for e in visible if not e.get("execution_id") and e.get("shared_claim")])
+        claims_found = [records.get(e["shared_claim"]) for e in visible if not e.get("execution_id") and e.get("shared_claim")]
+        records.update(prefetch(["executions/" + c["execution_id"] for c in claims_found if c and c.get("execution_id")]))
+        load = lambda key: (records[key], 0) if key in records else store_for_request().load(key)
         result = []
         for event in visible:
             public = CalendarMeetings._public(event, claims["email"].lower())
             if event.get("launch_uncertain"):
                 public["detail"] = "Entry request outcome is unconfirmed; a duplicate request is blocked."
             if event.get("execution_id"):
-                record, _ = store_for_request().load("executions/" + event["execution_id"])
+                record, _ = load("executions/" + event["execution_id"])
                 if record and record.get("owner_id") == claims["sub"]:
                     public["notion_status"] = record.get("notion_status", "pending")
                     public["notion_url"] = "" if public_account_access() else record.get("notion_url", "")
@@ -523,8 +544,8 @@ def install_calendar_routes(app, claims_for_request, store_for_request, deliver_
                     elif record.get("processing_status") == "calendar_selection_required":
                         public["detail"] = "Select the meeting calendar and retry to send notes. The recording and transcript are available."
             elif event.get("shared_claim") and not public_account_access():
-                claim, _ = store_for_request().load(event["shared_claim"])
-                record, _ = store_for_request().load("executions/" + claim["execution_id"]) if claim else (None, 0)
+                claim, _ = load(event["shared_claim"])
+                record, _ = load("executions/" + claim["execution_id"]) if claim else (None, 0)
                 if record:
                     public["status"] = record.get("status", public["status"])
                     public["notion_status"] = record.get("notion_status", "pending")

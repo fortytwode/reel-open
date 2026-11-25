@@ -197,6 +197,11 @@ def _first_person_commitment(excerpt, transcript, dialogue, aliases, task):
     commitment = re.search(r"(?<!\w)i(?: (?:will|shall|can|commit to|promise to|agree to)|['’]ll) "
                            + re.escape(task) + r'(?!\w)', occurrence.group())
     if not commitment:
+        # The speaker committed in their own words ("I'll look into this"). Whoever said it
+        # owns the task; the clause checks below still reject qualified or reported promises.
+        commitment = re.search(r"(?<!\w)i(?: (?:will|shall|can|commit to|promise to|agree to|am going to)|['’]ll|['’]m going to)(?!\w)",
+                               occurrence.group())
+    if not commitment:
         return False
 
     start, end = occurrence.start() + commitment.start(), occurrence.start() + commitment.end()
@@ -204,7 +209,10 @@ def _first_person_commitment(excerpt, transcript, dialogue, aliases, task):
     clause_start = max(transcript.rfind(mark, 0, start) for mark in '.!?;…？؟') + 1
     separator = re.search(r'[.!?;…？؟]', transcript[start:])
     clause_end = start + separator.start() if separator else len(transcript)
-    return (not transcript[clause_start:start].strip()
+    # "Okay, I'll …" and "Yeah so I will …" still open with the speaker's own promise.
+    lead_in = re.sub(r"^(?:(?:okay|ok|yes|yeah|yep|sure|so|um|uh|and|alright|right|great|fine)[\s,]+)+", '',
+                     transcript[clause_start:start].strip() + ' ').strip()
+    return (not lead_in
             and end <= clause_end and transcript[clause_end:clause_end + 1] not in ('?', '？', '؟')
             and not re.search(r'\b(?:not|never|cannot|won t|can t|if|unless|provided|providing|assuming|once|when|'
                               r'depending|as long as|subject to|in case|on condition|maybe|perhaps)\b',

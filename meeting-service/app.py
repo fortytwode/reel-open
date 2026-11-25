@@ -2,6 +2,7 @@
 import hashlib
 import io
 import json
+import threading
 import math
 import os
 import re
@@ -347,13 +348,44 @@ def allowed_claims(claims, speech=False):
     return allowed_email(str(claims.get("email", "")).lower(), speech)
 
 
+_VERIFIED_TOKENS = {}
+_VERIFIED_LOCK = threading.Lock()
+_CERT_SESSION = None
+
+
+def _verified_token(token, project):
+    """Verify a Firebase ID token, reusing the result until the token expires.
+
+    Signature checks need Google's public certificates; fetching them on every
+    request added a network round trip to each calendar call.
+    """
+    global _CERT_SESSION
+    key = hashlib.sha256((project + "\0" + token).encode()).hexdigest()
+    now = time.time()
+    with _VERIFIED_LOCK:
+        cached = _VERIFIED_TOKENS.get(key)
+        if cached and cached[0] > now + 30:
+            return dict(cached[1])
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    from google.oauth2 import id_token
+    import requests
+    if _CERT_SESSION is None:
+        _CERT_SESSION = requests.Session()
+    claims = id_token.verify_firebase_token(token, GoogleAuthRequest(session=_CERT_SESSION), audience=project)
+    expires = float(claims.get("exp", 0) or 0)
+    with _VERIFIED_LOCK:
+        if len(_VERIFIED_TOKENS) > 2000:
+            for stale in [k for k, (exp, _) in _VERIFIED_TOKENS.items() if exp <= now] or list(_VERIFIED_TOKENS)[:1000]:
+                _VERIFIED_TOKENS.pop(stale, None)
+        _VERIFIED_TOKENS[key] = (expires, dict(claims))
+    return claims
+
+
 def verify_firebase(token, speech=False):
     project = firebase_project()
     if not project:
         raise BridgeError("Invalid Firebase token", 401)
-    from google.auth.transport.requests import Request as GoogleAuthRequest
-    from google.oauth2 import id_token
-    claims = id_token.verify_firebase_token(token, GoogleAuthRequest(), audience=project)
+    claims = _verified_token(token, project)
     if claims.get("iss") != f"https://securetoken.google.com/{project}" or claims.get("aud") != project:
         raise BridgeError("Invalid Firebase token", 401)
     if not claims.get("sub") or claims.get("email_verified") is not True:
