@@ -66,6 +66,8 @@ delivery-service/test_orchestration.py
 delivery-service/test_provider_selection.py
 delivery-service/test_slack_recaps.py
 delivery-service/test_standalone_providers.py
+delivery-service/test_workspace.py
+delivery-service/workspace.py
 desktop-windows/PACKAGING.md
 desktop-windows/README.md
 desktop-windows/build-portable.ps1
