@@ -9,7 +9,7 @@ For online features, both products can share a self-hosted deployment and accoun
 
 ## Install Reel Recorder for Mac
 
-[Download the signed Mac installer](https://github.com/fortytwode/reel-open/releases/latest). Open the disk image and drag **Reel Recorder** to **Applications**. The same download supports Apple silicon and Intel Macs running macOS 15 or later.
+[Download the signed Mac installer](https://github.com/rocketshiphq/reel-open/releases/latest). Open the disk image and drag **Reel Recorder** to **Applications**. The same download supports Apple silicon and Intel Macs running macOS 15 or later.
 
 The installer saves recordings on your Mac without an account. For share links or online Notetaker features, follow the [self-hosting guide](docs/self-hosting.md). The browser-based Notetaker is available at `/notetaker` on your deployment.
 
