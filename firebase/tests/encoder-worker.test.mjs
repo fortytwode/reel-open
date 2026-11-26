@@ -37,6 +37,50 @@ test("the first video frame after a clock jump still requests the overdue keyfra
   }
 });
 
+test("a video encoder with no startup output drains its queued frames once without blocking capture", async () => {
+  const originals = new Map();
+  const replace = (name, value) => { originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, { configurable: true, writable: true, value }); };
+  let time = 0, tick, encoder, rejectDrain;
+  const drains = [], messages = [];
+  replace("self", { postMessage(message) { messages.push(message); } });
+  replace("OffscreenCanvas", class { getContext() { return { fillRect() {}, drawImage() {} }; } async convertToBlob() {} });
+  replace("VideoFrame", class { close() {} });
+  replace("VideoEncoder", class {
+    static async isConfigSupported() { return { supported: true }; }
+    configure() { this.state = "configured"; this.encodeQueueSize = 0; encoder = this; }
+    encode() { this.encodeQueueSize++; }
+    flush() {
+      drains.push(this.encodeQueueSize);
+      return new Promise((_, reject) => { rejectDrain = reject; });
+    }
+    close() { this.state = "closed"; rejectDrain?.(new DOMException("Encoder closed", "AbortError")); }
+  });
+  replace("setInterval", (fn) => { tick = fn; return 1; });
+  replace("clearInterval", () => {});
+  mock.method(performance, "now", () => time);
+  try {
+    await import("../../web/reel/encoder-worker.js?startup-backlog-test");
+    await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000, audio: false } });
+    await self.onmessage({ data: { type: "begin" } });
+    const advanceTo = (frame) => { time = frame * 1000 / 30 + 0.1; tick(); };
+    for (let frame = 1; frame < 59; frame++) advanceTo(frame);
+    assert.deepEqual(drains, []);
+    advanceTo(59);
+    assert.deepEqual(drains, [60]);
+    for (let frame = 60; frame <= 75; frame++) advanceTo(frame);
+    assert.equal(encoder.encodeQueueSize, 76);
+    assert.deepEqual(drains, [60]);
+    await self.onmessage({ data: { type: "cancel" } });
+    assert.equal(messages.some((message) => message.type === "error"), false);
+  } finally {
+    if (self.onmessage) await self.onmessage({ data: { type: "cancel" } });
+    mock.restoreAll();
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];
+    }
+  }
+});
+
 test("legacy audio ReadableStream is consumed and its frames are closed", async () => {
   const originals = new Map();
   const replace = (name, value) => { originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, { configurable: true, writable: true, value }); };
