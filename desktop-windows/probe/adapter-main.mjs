@@ -1,11 +1,13 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain } from 'electron';
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startAssetServer } from '../src/asset-server.mjs';
 import { createLocalRecordingStore } from '../src/local-recordings.mjs';
 import { createWindowsRecorder } from '../src/recorder.mjs';
+import { createManualWindowCapture } from '../src/manual-window-capture.mjs';
 import { createNativeBridge } from '../src/native-bridge.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -13,6 +15,7 @@ const outArg = process.argv.find(arg => arg.startsWith('--out='));
 const outDir = path.resolve(outArg ? outArg.slice(6) : path.join(here, 'adapter-out'));
 const abortNegative = process.argv.includes('--abort-negative');
 const verifyOutputSwitch = process.argv.includes('--verify-output-switch');
+const manualPicker = process.argv.includes('--manual-picker');
 const ownerUserID = 'synthetic-probe';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
@@ -60,7 +63,7 @@ async function run() {
   await mkdir(outDir, { recursive: true });
   const assets = await startAssetServer();
   const fixture = await fixtureServer();
-  let fixtureWindow, bridge, recorder, activeCapture;
+  let fixtureWindow, bridge, recorder, activeCapture, completedRecording, manualController;
   try {
     fixtureWindow = new BrowserWindow({ width: 840, height: 560, x: 40, y: 40, show: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } });
@@ -84,7 +87,8 @@ async function run() {
     }
     recorder = createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain, store, origin: assets.origin,
       defaultRenderEndpoint: verifyOutputSwitch ? observeOutput : undefined,
-      onFailure: error => failures.push(error.message) });
+      onFailure: error => failures.push(error.message),
+      onCompleted: ({ recording }) => { completedRecording = recording; } });
     const controller = new AbortController();
     const argumentsForCapture = { hwnd: id, pid: process.pid, meeting: { title: 'Fixture' },
       ownerUserID, systemAudio: true, microphone: false, signal: controller.signal };
@@ -105,7 +109,21 @@ async function run() {
         hwnd: id, sourceId: exact[0].id, electron: process.versions.electron };
     }
     const beganAt = Date.now();
-    activeCapture = await recorder.start(argumentsForCapture);
+    let pickerChoice;
+    if (manualPicker) {
+      manualController = createManualWindowCapture({ desktopCapturer, recorder,
+        getProfile: () => ({ userID: ownerUserID }),
+        getExcludedWindowHandles: () => BrowserWindow.getAllWindows()
+          .filter(window => !window.isDestroyed() && window !== fixtureWindow).map(hwnd) });
+      const choices = await manualController.list(ownerUserID);
+      const matches = choices.filter(choice => choice.title.includes('REEL CAPTURE FIXTURE 9C41'));
+      if (matches.length !== 1) throw Error('The manual picker did not expose exactly one synthetic fixture window');
+      [pickerChoice] = matches;
+      await manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true });
+      activeCapture = true;
+    } else {
+      activeCapture = await recorder.start(argumentsForCapture);
+    }
     const captureWindows = BrowserWindow.getAllWindows().filter(window => !window.isDestroyed() && window !== fixtureWindow);
     if (captureWindows.length !== 1 || captureWindows[0].isVisible()) throw Error('Recorder was not one hidden window');
     if (verifyOutputSwitch) {
@@ -120,7 +138,34 @@ async function run() {
     } else {
       await sleep(Math.max(0, 13_500 - (Date.now() - beganAt)));
     }
-    const recording = await recorder.stop(activeCapture);
+    let recording;
+    if (manualPicker) {
+      await manualController.stop(ownerUserID);
+      activeCapture = null;
+      const recordings = store.list(ownerUserID);
+      if (recordings.length !== 1 || recordings[0].processing !== undefined) {
+        throw Error('Manual capture did not save exactly one local-only recording without processing metadata');
+      }
+      if (!completedRecording?.playable || completedRecording.id !== recordings[0].id) {
+        throw Error('The production recorder did not complete a playable local recording');
+      }
+      const directory = path.join(outDir, 'recordings', createHash('sha256').update(ownerUserID).digest('hex'));
+      const filePath = path.join(directory, `${recordings[0].id}.mp4`);
+      const file = await readFile(filePath);
+      const audioSidecar = path.join(directory, `${recordings[0].id}.pcm`);
+      let sidecarExists = true;
+      try { await stat(audioSidecar); } catch (error) { if (error.code === 'ENOENT') sidecarExists = false; else throw error; }
+      if (sidecarExists) throw Error('Manual capture unexpectedly created a transcription audio sidecar');
+      const segmentCount = fragments(file);
+      if (!recordings[0].durationSeconds || segmentCount < 3 || file.length < 10_000 || file.length > 20 * 1024 * 1024 || failures.length) {
+        throw Error('The packaged manual capture did not save a complete local MP4');
+      }
+      recording = completedRecording;
+      return { ok: true, method: 'production-manual-picker-recorder', recording, bytes: file.length,
+        segmentCount, pickerChoiceID: pickerChoice.id, pickerTitle: pickerChoice.title,
+        recorderWindowHidden: true, electron: process.versions.electron, chromium: process.versions.chrome };
+    }
+    recording = await recorder.stop(activeCapture);
     activeCapture = null;
     const bytes = await readFile(recording.path);
     const segmentCount = fragments(bytes);
@@ -131,7 +176,10 @@ async function run() {
       ...(verifyOutputSwitch ? { outputSwitched: true, changeAfterStartSeconds: (changedAt - beganAt) / 1000 } : {}),
       electron: process.versions.electron, chromium: process.versions.chrome };
   } finally {
-    if (activeCapture) await recorder.stop(activeCapture).catch(() => {});
+    if (activeCapture) {
+      if (manualPicker && manualController) await manualController.stop(ownerUserID).catch(() => {});
+      else await recorder.stop(activeCapture).catch(() => {});
+    }
     await bridge?.dispose();
     if (fixtureWindow && !fixtureWindow.isDestroyed()) fixtureWindow.destroy();
     await fixture.close(); await assets.close();

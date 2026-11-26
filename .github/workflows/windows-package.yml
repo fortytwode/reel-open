@@ -88,6 +88,9 @@ jobs:
           node desktop-windows/probe/node_modules/electron/install.js
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm ci --prefix firebase/tests
+      - name: Install media verifier for packaged capture smoke
+        shell: pwsh
+        run: choco install ffmpeg --no-progress -y
       - name: Verify AAC encoding, decoding and PCM samples
         shell: pwsh
         run: |
@@ -295,3 +298,24 @@ jobs:
       - name: Verify packaged Recorder and Notetaker app entries
         shell: pwsh
         run: node desktop-windows/tests/product-entry-smoke.mjs "$env:RUNNER_TEMP/demo-package"
+      - name: Prepare production manual-capture harness in extracted package
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:RUNNER_TEMP 'demo-package/resources/app'
+          $probe = Join-Path $app 'desktop-windows/probe'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          Copy-Item desktop-windows/probe/adapter-main.mjs, desktop-windows/probe/fixture.html -Destination $probe
+          $manifestPath = Join-Path $app 'package.json'
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $manifest.main = 'desktop-windows/probe/adapter-main.mjs'
+          $utf8 = New-Object Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), $utf8)
+      - name: Record and decode a packaged manual window capture
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'manual-capture-smoke'
+          $executable = Join-Path $env:RUNNER_TEMP 'demo-package/Reel.exe'
+          $process = Start-Process -FilePath $executable -ArgumentList @('--manual-picker', "--out=$out") -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode) { throw "Packaged manual capture smoke exited with $($process.ExitCode)" }
+          node desktop-windows/probe/adapter-verify.mjs --manual-picker "--out=$out"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
