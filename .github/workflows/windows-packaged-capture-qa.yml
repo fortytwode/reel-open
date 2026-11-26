@@ -91,7 +91,9 @@ jobs:
         shell: pwsh
         run: |
           $productionRoot = (Resolve-Path production).Path
+          $qaRoot = (Resolve-Path qa).Path
           & qa/desktop-windows/probe/run-packaged-capture.ps1 `
             -SourceRoot $productionRoot `
+            -QaRoot $qaRoot `
             -PackageRoot $env:PACKAGE_ROOT `
             -ExpectedArchitecture '${{ matrix.arch }}'
