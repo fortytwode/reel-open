@@ -203,14 +203,24 @@ export class FirestoreClient {
     await this.deleteRoom(oldRoom);
   }
   async deleteRoom(roomID) {
-    for (const collection of ["reactions", "comments"]) {
-      for (const d of await this.list(roomID, collection)) {
-        const { res } = await this.call((await this.requests()).delete(roomID, d.name));
-        if (!res.ok && res.status !== 404) throw new CloudError(`Couldn't remove migrated ${collection} (HTTP ${res.status})`);
+    // Firestore can report ABORTED/409 when a concurrent viewer update races
+    // the room delete. Re-list children on retry so a child written during the
+    // first cleanup pass is removed before retrying the parent. Never treat a
+    // conflict as success: a persistent conflict remains a retryable failure.
+    for (let attempt = 1; ; attempt++) {
+      for (const collection of ["reactions", "comments"]) {
+        for (const d of await this.list(roomID, collection)) {
+          const { res, json } = await this.call((await this.requests()).delete(roomID, d.name));
+          if (!res.ok && res.status !== 404)
+            throw new CloudError(`Couldn't remove migrated ${collection} (HTTP ${res.status}) ${JSON.stringify(json?.error ?? json).slice(0, 200)}`);
+        }
       }
+      const { res, json } = await this.call((await this.requests()).delete(roomID));
+      if (res.ok || res.status === 404) return;
+      if (res.status !== 409 || attempt >= 4)
+        throw new CloudError(`Couldn't delete comments room (HTTP ${res.status}) ${JSON.stringify(json?.error ?? json).slice(0, 200)}`);
+      await sleep(100 * 2 ** (attempt - 1));
     }
-    const { res } = await this.call((await this.requests()).delete(roomID));
-    if (!res.ok && res.status !== 404) throw new CloudError(`Couldn't delete comments room (HTTP ${res.status})`);
   }
 }
 
