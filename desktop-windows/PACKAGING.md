@@ -85,7 +85,8 @@ The ZIP contains `Reel.exe` and the Electron runtime, preserving upstream
 `desktop-windows/main.mjs`. Under `resources/app/`, an explicit allowlist copies
 only production desktop main/preload/modules/UI/capture assets, the compiled
 helper and generated public configuration. Shared `web/reel/` content is limited
-to `capture.js`, `core.js`, `audio.js`, `encoder-worker.js` and `fmp4.js`;
+to `capture.js`, `core.js`, `whisper-languages.js`, `audio.js`,
+`encoder-worker.js` and `fmp4.js`;
 `web/vendor/` includes only `mp4-muxer.mjs` and its license. These sibling paths
 match `src/asset-server.mjs`. Probe code, source tests, fixtures, account data,
 tokens and source-tree configuration files are excluded.
