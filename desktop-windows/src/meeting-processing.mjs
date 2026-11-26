@@ -55,6 +55,18 @@ export async function* pcmChunks(info, { startFrame = 0, signal } = {}) {
   } finally { await file.close(); }
 }
 
+/** Convert only the known PCM16LE WAV chunks produced above into Whisper's 16 kHz float input. */
+export async function whisperSamples(blob) {
+  const bytes=Buffer.from(await blob.arrayBuffer());
+  check(bytes.length>=44&&bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,16)==='WAVEfmt '
+    &&bytes.readUInt16LE(20)===1&&bytes.readUInt16LE(22)===1&&bytes.readUInt32LE(24)===RATE
+    &&bytes.readUInt16LE(34)===16&&bytes.toString('ascii',36,40)==='data'&&bytes.readUInt32LE(40)===bytes.length-44,
+  'Meeting audio has an invalid local transcription format.');
+  const samples=new Float32Array((bytes.length-44)/2);
+  for(let i=0;i<samples.length;i++)samples[i]=bytes.readInt16LE(44+i*2)/32768;
+  return samples;
+}
+
 function deliveryID(id) { return `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`; }
 function calendarContext(meeting) {
   if (meeting?.calendar) return meeting.calendar;
@@ -81,12 +93,14 @@ function receiptOK(value, domain, onlyRecipient = null) {
  * Retries preserve transcript/summary and replay the same delivery identity.
  */
 export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThis.fetch,
-  speechURL, deliveryURL, allowedEmailDomain, requestTimeoutMS = 180_000 } = {}) {
+  speechURL, deliveryURL, allowedEmailDomain, requestTimeoutMS = 180_000,
+  localTranscribe, modeForOwner = () => 'cloud' } = {}) {
   check(typeof auth?.getProfile === 'function' && typeof auth?.getIdToken === 'function'
     && typeof auth?.onStateChange === 'function' && typeof store?.getProcessing === 'function'
     && typeof store?.saveProcessing === 'function' && typeof store?.listProcessing === 'function'
     && typeof store?.getAudioInfo === 'function' && typeof fetcher === 'function', 'Invalid meeting processor dependencies.');
   for (const url of [speechURL, deliveryURL]) check(new URL(url).protocol === 'https:', 'Meeting services must use HTTPS.');
+  check(typeof modeForOwner==='function'&&(localTranscribe===undefined||typeof localTranscribe==='function'),'Invalid local transcription dependencies.');
   const jobs = new Map(), listeners = new Set();
   let queue = Promise.resolve(), disposed = false;
   function snapshot(ownerUserID, id) {
@@ -127,6 +141,9 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
       requireCurrent(ownerUserID, id, controller);
       processing = structuredClone(snapshot(ownerUserID, id));
       const meeting = processing.meeting ?? {}, title = String(processing.title ?? meeting.title ?? 'Meeting');
+      const transcriptionMode=processing.transcriptionMode??(processing.phase==='pending'&&!processing.nextFrame?modeForOwner(ownerUserID):'cloud');
+      check(transcriptionMode==='cloud'||transcriptionMode==='local','Meeting transcription mode is invalid.');
+      if(transcriptionMode==='local')check(typeof localTranscribe==='function','Local transcription is unavailable in this build.');
       const calendar = calendarContext(meeting);
       const onlyRecipient = calendar ? null : auth.getProfile()?.email?.toLowerCase();
       check(calendar || internalEmail(onlyRecipient, allowedEmailDomain), 'Sign in with your team account to deliver your recap.');
@@ -138,29 +155,50 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
         const segments = processing.segments ?? [];
         let nextFrame = processing.nextFrame ?? 0;
         check(Array.isArray(segments) && (nextFrame === 0 || segments.length || processing.transcribedFrames === nextFrame), 'Meeting transcript checkpoint is invalid.');
-        processing = { ...processing, phase: 'transcribing', error: null, segments, nextFrame };
+        processing = { ...processing, transcriptionMode, phase: 'transcribing', error: null, segments, nextFrame };
         await save(ownerUserID, id, controller, processing);
         for await (const chunk of pcmChunks(info, { startFrame: nextFrame, signal: controller.signal })) {
           requireCurrent(ownerUserID, id, controller);
-          const form = new FormData(); form.set('audio', chunk.audio, 'meeting.wav'); form.set('language', processing.language ?? 'en');
-          form.set('title', title.slice(0, 200));
-          const keywords = ['Notion', 'Fireflies', 'Sybill', ...attendees.map(email => email.split('@')[0].replace(/[._+-]/g, ' '))];
-          form.set('keywords', JSON.stringify([...new Set(keywords)].slice(0, 50).map(word => word.slice(0, 80))));
-          if (processing.text) form.set('previous_text', processing.text.slice(-1000));
-          const result = await request(ownerUserID, id, controller, speechURL + '/transcription', form);
-          check(typeof result.text === 'string' && result.engine === 'OpenAI gpt-transcribe', 'Meeting transcription returned an invalid response.');
-          const text = result.text.trim();
-          if (text) processing.segments.push({ start: chunk.startFrame / RATE, end: chunk.endFrame / RATE, text });
+          let result,text;
+          if(transcriptionMode==='local'){
+            result=await localTranscribe({ownerUserID,id,samples:await whisperSamples(chunk.audio),language:processing.language??'en',signal:controller.signal});
+            requireCurrent(ownerUserID,id,controller);
+            check(typeof result?.text==='string'&&result.engine==='Whisper large-v3-turbo q8','Local meeting transcription returned an invalid response.');
+            text=result.text.trim();
+            const duration=(chunk.endFrame-chunk.startFrame)/RATE;
+            const segments=(Array.isArray(result.chunks)?result.chunks:[]).map(segment=>{
+              const [start,end]=segment.timestamp??[];
+              return {start:Number.isFinite(start)?Math.max(0,Math.min(duration,start)):0,
+                end:Number.isFinite(end)&&end>start?Math.min(duration,end):duration,text:String(segment.text??'').trim()};
+            }).filter(segment=>segment.text);
+            if(segments.length)processing.segments.push(...segments.map(segment=>({...segment,start:segment.start+chunk.startFrame/RATE,end:segment.end+chunk.startFrame/RATE})));
+            else if(text)processing.segments.push({start:chunk.startFrame/RATE,end:chunk.endFrame/RATE,text});
+          }else{
+            const form = new FormData(); form.set('audio', chunk.audio, 'meeting.wav'); form.set('language', processing.language ?? 'en');
+            form.set('title', title.slice(0, 200));
+            const keywords = ['Notion', 'Fireflies', 'Sybill', ...attendees.map(email => email.split('@')[0].replace(/[._+-]/g, ' '))];
+            form.set('keywords', JSON.stringify([...new Set(keywords)].slice(0, 50).map(word => word.slice(0, 80))));
+            if (processing.text) form.set('previous_text', processing.text.slice(-1000));
+            result = await request(ownerUserID, id, controller, speechURL + '/transcription', form);
+            check(typeof result.text === 'string' && result.engine === 'OpenAI gpt-transcribe', 'Meeting transcription returned an invalid response.');
+            text = result.text.trim();
+            if (text) processing.segments.push({ start: chunk.startFrame / RATE, end: chunk.endFrame / RATE, text });
+          }
           processing = { ...processing, text: processing.segments.map(segment => segment.text).join(' '),
-            nextFrame: chunk.endFrame, transcribedFrames: chunk.endFrame, language: result.languages?.[0]?.code ?? processing.language ?? 'en',
-            engine: result.engine, timingGranularity: 'chunk' };
+            nextFrame: chunk.endFrame, transcribedFrames: chunk.endFrame, language: result.languages?.[0]?.code ?? result.language ?? processing.language ?? 'en',
+            engine: result.engine, timingGranularity: transcriptionMode==='local'?'segment':'chunk' };
           await save(ownerUserID, id, controller, processing);
         }
         processing = { ...processing, transcriptComplete: true };
         await save(ownerUserID, id, controller, processing);
       }
+      if(transcriptionMode==='local'){
+        processing={...processing,phase:'completed',localOnly:true,summary:null,summaryEngine:null,actionItems:[],error:null};
+        await save(ownerUserID,id,controller,processing);
+        return processing;
+      }
       if (!processing.text?.trim()) {
-        processing = { ...processing, phase: 'completed', error: null, noSpeech: true };
+        processing = { ...processing, phase: 'completed', error: null, noSpeech: true, ...(transcriptionMode==='local'?{localOnly:true}:{}) };
         await save(ownerUserID, id, controller, processing); return processing;
       }
       if (!processing.summary) {

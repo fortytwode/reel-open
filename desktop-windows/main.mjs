@@ -14,6 +14,7 @@ import {createLocalRecordingStore} from './src/local-recordings.mjs';
 import {createWindowsRecorder} from './src/recorder.mjs';
 import {createCompanionStartup,createDesktopService,desktopBrowserAppArguments,desktopLaunchAction,desktopProductURL} from './src/desktop-service.mjs';
 import {createMeetingProcessor} from './src/meeting-processing.mjs';
+import {createLocalWhisper} from './src/local-whisper.mjs';
 import {createMeetingShare} from './src/meeting-share.mjs';
 import {createMeetingReminders,meetingReminderIDFromActivation} from './src/meeting-reminders.mjs';
 import {startAssetServer} from './src/asset-server.mjs';
@@ -24,7 +25,7 @@ try {
   org=organizationConfig(JSON.parse(readFileSync(path.join(root,'organization.json'),'utf8')));
 } catch { /* local setup remains available */ }
 
-let window,service,bridge,assets,poll,quitting=false,shutdown=null,queuedReminderMeetingID=null;
+let window,service,bridge,assets,localWhisper,poll,quitting=false,shutdown=null,queuedReminderMeetingID=null;
 function focusMeetingReminder(meetingID) {
   if(typeof meetingID!=='string' || !meetingID || meetingID.length>4096) return;
   if(!window || window.isDestroyed() || !assets || window.webContents.getURL()!==assets.origin+'/') {
@@ -58,7 +59,7 @@ else {
     clearInterval(poll);
     shutdown=(async()=>{
       try {
-        await service?.dispose();await bridge?.dispose();await assets?.close();
+        await service?.dispose();localWhisper?.dispose();await bridge?.dispose();await assets?.close();
         quitting=true;app.quit();
       } catch(cause) {
         shutdown=null;window?.show();
@@ -175,7 +176,9 @@ async function run() {
       }});
     auth.load();
   }
-  const processor=auth ? createMeetingProcessor({auth,store,speechURL:org.speechServiceURL,deliveryURL:org.deliveryServiceURL,allowedEmailDomain:org.allowedEmailDomain}) : null;
+  localWhisper=auth&&typeof ipcMain.on==='function' ? createLocalWhisper({BrowserWindow,ipcMain,origin:assets.localAIOrigin,ownerID:()=>auth?.getProfile()?.userID??null}) : null;
+  const processor=auth ? createMeetingProcessor({auth,store,speechURL:org.speechServiceURL,deliveryURL:org.deliveryServiceURL,allowedEmailDomain:org.allowedEmailDomain,
+    localTranscribe:localWhisper?.transcribe,modeForOwner:ownerUserID=>store.getSettings(ownerUserID)?.localTranscription?'local':'cloud'}) : null;
   const meetingShare=auth && org ? createMeetingShare({auth,store,org,copy:value=>clipboard.writeText(value)}) : null;
   const recorder=createWindowsRecorder({BrowserWindow,desktopCapturer,ipcMain,store,origin,
     defaultRenderEndpoint: bridge?.defaultRenderEndpoint,

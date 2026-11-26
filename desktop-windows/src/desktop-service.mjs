@@ -2,7 +2,7 @@ import { routeGoogleMeetings } from './google-calendar.mjs';
 import { normalizeTrimRange } from './trim-range.mjs';
 
 const defaults = ownerUserID => ({ownerUserID, autoJoin:false, participantConsent:false,
-  systemAudioConsent:false, meetingReminders:false, selection:{useAll:true,ids:[]}});
+  systemAudioConsent:false, meetingReminders:false, localTranscription:false, selection:{useAll:true,ids:[]}});
 const messages = {
   idle:'Keep Reel open and this computer awake to check upcoming meetings.',
   scheduled:'Ready for upcoming meetings in your selected calendars.',
@@ -16,7 +16,7 @@ const messages = {
   save_failed:'The recording could not be completed. Open the recordings folder to recover available local files.',
   retry_wait:'Reel will retry the meeting connection shortly.', cancelled:'Meeting setup was cancelled.'
 };
-const keys = ['ownerUserID','expectedOwnerUserID','autoJoin','participantConsent','systemAudioConsent','meetingReminders','selection'];
+const keys = ['ownerUserID','expectedOwnerUserID','autoJoin','participantConsent','systemAudioConsent','meetingReminders','localTranscription','selection'];
 const selectionKey = value => JSON.stringify({useAll:value.useAll,ids:[...new Set(value.ids)].sort()});
 
 export function desktopLaunchAction(args = []) {
@@ -210,12 +210,12 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(payload.expectedOwnerUserID), version=generation;
         if (payload.expectedOwnerUserID!==id || (payload.ownerUserID!==undefined && payload.ownerUserID!==id))
           throw Error('The account changed. Refresh your settings.');
-        if (![payload.autoJoin,payload.participantConsent,payload.systemAudioConsent,payload.meetingReminders].every(flag=>typeof flag==='boolean')
+        if (![payload.autoJoin,payload.participantConsent,payload.systemAudioConsent,payload.meetingReminders,payload.localTranscription].every(flag=>typeof flag==='boolean')
           || typeof payload.selection?.useAll!=='boolean' || !Array.isArray(payload.selection.ids)
           || payload.selection.ids.length>250 || payload.selection.ids.some(value=>typeof value!=='string'||!value||value.length>1024))
           throw Error('Invalid recording settings.');
         const next={ownerUserID:id,autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
-          participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,meetingReminders:payload.meetingReminders,
+          participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,meetingReminders:payload.meetingReminders,localTranscription:payload.localTranscription,
           selection:{useAll:payload.selection.useAll,ids:[...new Set(payload.selection.ids)]}};
         if(next.autoJoin && !auth.getProfile().calendarConnected) throw Error('Connect Google Calendar first.');
         const revision=++settingsRevision, changed=JSON.stringify(settings())!==JSON.stringify(next);

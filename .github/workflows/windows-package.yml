@@ -17,7 +17,7 @@ jobs:
           - { runner: windows-2022, arch: x64 }
           - { runner: windows-11-arm, arch: arm64 }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,6 +29,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Install pinned local Whisper browser runtime
+        run: npm ci --ignore-scripts --prefix desktop-windows
       - run: npm --prefix desktop-windows test
       - name: Install pinned Electron and test driver
         run: |
@@ -44,6 +46,22 @@ jobs:
           $probe = Resolve-Path desktop-windows/probe/processing-runtime.mjs
           $process = Start-Process -FilePath $electron -ArgumentList ('"' + $probe + '"') -Wait -PassThru -NoNewWindow
           if ($process.ExitCode) { throw "Audio codec test exited with $($process.ExitCode)" }
+      - name: Verify real local Whisper inference and offline cache
+        shell: pwsh
+        run: |
+          $freeBytes = (Get-PSDrive -Name C).Free
+          if ($freeBytes -lt 4GB) { throw "Local Whisper smoke needs 4 GiB free for its pinned 1.1 GB model/cache; found $([math]::Round($freeBytes / 1GB, 2)) GiB." }
+          Add-Type -AssemblyName System.Speech
+          $audio = Join-Path $env:RUNNER_TEMP whisper-smoke.wav
+          $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(16000, [System.Speech.AudioFormat.EncodingFormat]::Pcm, 16, 1)
+          $synth.SetOutputToWaveFile($audio, $format)
+          $synth.Speak('This local meeting verifies privacy using on-device transcription.')
+          $synth.Dispose()
+          $electron = Resolve-Path desktop-windows/probe/node_modules/electron/dist/electron.exe
+          $smoke = Resolve-Path desktop-windows/local-ai/smoke.mjs
+          $process = Start-Process -FilePath $electron -ArgumentList ('"' + $smoke + '" "' + $audio + '"') -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode) { throw "Local Whisper inference/offline cache smoke exited with $($process.ExitCode)" }
       - name: Build package and run the local MP4 trim/export smoke on this architecture
         shell: pwsh
         env:

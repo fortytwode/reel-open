@@ -28,13 +28,18 @@ Reel Companion's startup task is off after installation. In Companion's Meeting 
 ## Portable test ZIP
 
 `build-portable.ps1` creates an **unsigned portable test ZIP**, using the existing
-production native build and no packaging dependencies. It does not sign,
+production native build and a pinned browser inference runtime. It does not sign,
 publish, create OAuth credentials or certify a release.
 
 Run on Windows with PowerShell 5.1 or later, the .NET Framework compiler/UI
 Automation assemblies used by `native/build.cmd`, and an extracted **official
 Electron 45.2.3 Windows distribution**. Use a clean, dedicated extraction from
 Electron's release archive; verify its published checksum before building.
+From the repository root, install the pinned local transcription runtime assets:
+`npm ci --ignore-scripts --prefix desktop-windows`. The builder embeds the
+Transformers.js and ONNX WebAssembly runtime but not the Whisper model. Users who
+opt in to local transcription download the pinned model on first use; it remains
+in the Companion's separate model-cache profile for offline retries.
 Also install the Windows 10 SDK (with `Windows.winmd`) and the .NET Framework
 4.5 targeting pack; the build compiles and tests the local trim helper against
 Windows' built-in Media Foundation editing APIs. No media executable is bundled.

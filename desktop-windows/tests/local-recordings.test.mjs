@@ -179,14 +179,16 @@ test('local playback resolves only an owned recording including older rows witho
 test('settings and durable completion deduplication remain bound to each owner', async t => {
   const { root, store } = await fixture(t);
   assert.deepEqual(store.getSettings('owner'), { ownerUserID: 'owner', autoJoin: false, participantConsent: false,
-    systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
+    systemAudioConsent: false, meetingReminders: false, localTranscription: false, selection: { useAll: true, ids: [] } });
   const settings = { expectedOwnerUserID: 'owner', ownerUserID: 'owner', autoJoin: true, participantConsent: true,
-    systemAudioConsent: true, meetingReminders: true, selection: { useAll: false, ids: ['calendar-b', 'calendar-a', 'calendar-a'] } };
+    systemAudioConsent: true, meetingReminders: true, localTranscription: true, selection: { useAll: false, ids: ['calendar-b', 'calendar-a', 'calendar-a'] } };
   await store.saveSettings(settings);
   await assert.rejects(store.saveSettings({ ...settings, expectedOwnerUserID: 'other' }));
   assert.deepEqual(store.getSettings('owner').selection.ids, ['calendar-b', 'calendar-a']);
   assert.equal(store.getSettings('owner').meetingReminders, true);
+  assert.equal(store.getSettings('owner').localTranscription,true);
   assert.equal(store.getSettings('other').participantConsent, false);
+  assert.equal(store.getSettings('other').localTranscription,false);
   const writer = await recorded(store);
   const recording = await writer.finish({ durationSeconds: 9 });
   const entry = { ownerUserID: 'owner', occurrenceKey: 'occurrence', recording };
@@ -210,6 +212,7 @@ test('meeting reminders default off when reading settings written by older deskt
       selection: { useAll: true, ids: [] } }, recordings: [], completed: {} }));
   const store = createLocalRecordingStore({ root });
   assert.equal(store.getSettings(ownerUserID).meetingReminders, false);
+  assert.equal(store.getSettings(ownerUserID).localTranscription, false);
 });
 
 test('new meeting audio and processing checkpoints survive restart with owner isolation', async t => {

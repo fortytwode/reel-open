@@ -31,6 +31,7 @@ function currentSettings() {
   const s = localSettings ?? snapshot?.settings ?? {};
   return { autoJoin: s.autoJoin === true, participantConsent: s.participantConsent === true,
     systemAudioConsent: s.systemAudioConsent === true, meetingReminders: s.meetingReminders === true,
+    localTranscription: s.localTranscription === true,
     selection: { useAll: s.selection?.useAll === true, ids: Array.isArray(s.selection?.ids) ? [...s.selection.ids] : [] } };
 }
 function onboarding() {
@@ -78,6 +79,10 @@ function consentControls(settings, dashboard) {
   const stext=node('span'); stext.append(node('strong','','Record meeting window video and all computer sound'));
   stext.append(node('small','','Reel captures the meeting window and all sound playing on this computer. The microphone is optional when you start a meeting yourself. The camera stays off. Recordings are saved locally and are not shared automatically.'));
   system.append(sbox,stext); wrap.append(system);
+  const local=node('label','setting');const localBox=node('input');localBox.type='checkbox';localBox.dataset.setting='localTranscription';localBox.checked=settings.localTranscription;
+  const localText=node('span');localText.append(node('strong','','Transcribe meetings locally with Whisper'));
+  localText.append(node('small','','Opt in to on-device transcription. First use downloads about 1.1 GB; then it works offline while the model remains cached. Reel does not send meeting audio or transcript to transcription or summary services. Local mode does not create AI summaries or deliver notes, and never falls back to cloud transcription.'));
+  local.append(localBox,localText);wrap.append(local);
   if (dashboard) {
     const divider=node('div','divider'); wrap.append(divider);
     const label=node('p','calendar-heading','Calendars'); wrap.append(label);
@@ -195,7 +200,7 @@ function renderRecordings() {
         const transcript=node('button','','Copy transcript');
         transcript.type='button'; transcript.dataset.action='copyTranscript'; transcript.dataset.recordingId=recording.id; left.append(transcript);
       }
-      const labels={pending:'Waiting to process',transcribing:'Transcribing',summarizing:'Creating notes',delivering:'Delivering notes',completed:'Notes delivered',failed:'Processing failed'};
+      const labels={pending:'Waiting to process',transcribing:recording.processing.transcriptionMode==='local'?'Transcribing locally':'Transcribing',summarizing:'Creating notes',delivering:'Delivering notes',completed:recording.processing.localOnly?'Transcript saved on this computer. No cloud summary or delivery.':'Notes delivered',failed:'Processing failed'};
       left.append(node('div','recording-meta', recording.processing.noSpeech ? 'No speech detected' : (labels[recording.processing.phase] ?? 'Processing')));
       if(recording.processing.error) left.append(node('div','recording-meta',recording.processing.error));
       if(recording.processing.phase==='failed') { const button=node('button','','Retry notes'); button.type='button'; button.addEventListener('click',()=>void perform('retryProcessing',{id:recording.id,expectedOwnerUserID:snapshot.profile.userID})); left.append(button); }

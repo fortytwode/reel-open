@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createMeetingProcessor, pcmChunks } from '../src/meeting-processing.mjs';
+import { createMeetingProcessor, pcmChunks, whisperSamples } from '../src/meeting-processing.mjs';
 
 const id = '0123456789abcdef0123456789abcdef';
 const ownerUserID = 'owner';
@@ -15,13 +15,13 @@ const receipt = () => ({ verified: true, page_id: 'page-1', url: 'https://www.no
 const response = (data, status = 200) => ({ ok: status < 300, status, json: async () => data });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
-async function fixture(t, { frames = 16000, fetcher } = {}) {
+async function fixture(t, { frames = 16000, fetcher, mode='cloud', localTranscribe } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'reel-processing-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const audioPath = path.join(root, 'audio.pcm'), samples = Buffer.alloc(frames * 2);
   for (let i = 0; i < frames; i++) samples.writeInt16LE((i % 1000) - 500, i * 2);
   await writeFile(audioPath, samples);
-  let processing = initial(), profile = { userID: ownerUserID, email: 'owner@northwind.example' }, tokenProvider = async () => 'firebase-token';
+  let processing = initial(), profile = { userID: ownerUserID, email: 'owner@northwind.example' }, tokenProvider = async () => 'firebase-token', tokenCalls=0;
   const listeners = new Set(), calls = [], writes = [], recordingTails = new Map();
   async function withRecordingLock({ownerUserID,id}, operation) {
     const key=JSON.stringify([ownerUserID,id]), previous=recordingTails.get(key)??Promise.resolve();
@@ -29,7 +29,7 @@ async function fixture(t, { frames = 16000, fetcher } = {}) {
     try { await previous.catch(()=>{}); return await operation(); }
     finally { release(); if(recordingTails.get(key)===tail) recordingTails.delete(key); }
   }
-  const auth = { getProfile: () => profile, getIdToken: () => tokenProvider(), onStateChange: listener => { listeners.add(listener); return () => listeners.delete(listener); } };
+  const auth = { getProfile: () => profile, getIdToken: () => {tokenCalls++;return tokenProvider();}, onStateChange: listener => { listeners.add(listener); return () => listeners.delete(listener); } };
   const store = {
     withRecordingLock,
     getProcessing: args => args.ownerUserID === ownerUserID && args.id === id ? structuredClone(processing) : null,
@@ -46,9 +46,11 @@ async function fixture(t, { frames = 16000, fetcher } = {}) {
     if (url.endsWith('/summary')) return response({ summary: 'Notes and explicit follow-ups.\n\nAction items\n- Owner: Send proposal', action_items: [{ task: 'Send proposal', owner: 'Owner', due: '' }], engine: 'OpenAI gpt-6.1-sol' });
     return response(receipt());
   };
-  const processor = createMeetingProcessor({ allowedEmailDomain: 'northwind.example', speechURL:'https://speech.northwind.example', deliveryURL:'https://delivery.northwind.example', auth, store, fetch: fetcher ? (url, options) => { calls.push({ url, options }); return fetcher(url, options); } : defaultFetch });
+  const processor = createMeetingProcessor({ allowedEmailDomain: 'northwind.example', speechURL:'https://speech.northwind.example', deliveryURL:'https://delivery.northwind.example', auth, store, fetch: fetcher ? (url, options) => { calls.push({ url, options }); return fetcher(url, options); } : defaultFetch,
+    modeForOwner:()=>mode, localTranscribe });
   t.after(() => processor.dispose());
   return { processor, auth, store, calls, writes, samples,
+    tokenCount:()=>tokenCalls,
     get: () => structuredClone(processing), set: value => { processing = structuredClone(value); },
     changeOwner: owner => { profile = owner ? { userID: owner } : null; for (const listener of listeners) listener(); },
     token: provider => { tokenProvider = provider; }, remove: () => { processor.cancel({ ownerUserID, id }); processing = null; },
@@ -86,6 +88,40 @@ test('persists transcript, summary, verified receipt and authoritative calendar 
   assert.equal(delivered.segments[0].text, 'Full transcript.');
   assert.ok(f.writes.findIndex(p => p.transcriptComplete) < f.writes.findIndex(p => p.summary));
   await f.processor.process({ ownerUserID, id }); assert.equal(f.calls.length, 3);
+});
+
+test('local mode transcribes locally, saves timestamps, and makes no service requests or cloud fallback', async t=>{
+  let observed;
+  const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud request is forbidden in local mode.');},
+    localTranscribe:async input=>{observed=input;return{text:'Local words here.',chunks:[{timestamp:[0,.5],text:'Local words.'},{timestamp:[.5,1],text:'Here.'}],language:'en',engine:'Whisper large-v3-turbo q8'};}});
+  const result=await f.processor.process({ownerUserID,id});
+  assert.equal(result.phase,'completed');assert.equal(result.localOnly,true);assert.equal(result.transcriptionMode,'local');
+  assert.equal(result.engine,'Whisper large-v3-turbo q8');assert.equal(result.timingGranularity,'segment');
+  assert.equal(result.summary,null);assert.equal(result.summaryEngine,null);assert.equal(result.receipt,undefined);
+  assert.equal(result.text,'Local words. Here.');assert.equal(result.segments[0].start,0);assert.equal(result.segments[1].start,.5);assert.equal(result.language,'en');
+  assert.equal(f.calls.length,0);assert.ok(observed.samples instanceof Float32Array);assert.equal(observed.samples.length,16000);
+  assert.equal(f.tokenCount(),0);
+  assert.equal(observed.ownerUserID,ownerUserID);assert.equal(observed.id,id);assert.equal(observed.language,'en');
+  let wavChunk;for await(const chunk of pcmChunks(f.info)){wavChunk=chunk;break;}
+  const decoded=await whisperSamples(wavChunk.audio);
+  assert.equal(decoded.length,16000);assert.ok(Math.abs(decoded[1]-f.samples.readInt16LE(2)/32768)<1e-7);
+});
+
+test('local model failure is recorded locally and never falls back to cloud',async t=>{
+  const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud must not be called.');},localTranscribe:async()=>{throw Error('Local model is unavailable offline.');}});
+  await assert.rejects(f.processor.process({ownerUserID,id}),/unavailable offline/);
+  assert.equal(f.get().phase,'failed');assert.equal(f.get().failedPhase,'transcribing');assert.equal(f.calls.length,0);
+});
+
+test('switching accounts during local inference cancels it before transcript persistence',async t=>{
+  let entered;const started=new Promise(resolve=>{entered=resolve;});
+  const f=await fixture(t,{mode:'local',localTranscribe:({signal})=>new Promise((resolve,reject)=>{
+    entered();signal.addEventListener('abort',()=>reject(Object.assign(Error('Local job cancelled.'),{name:'AbortError'})),{once:true});
+  })});
+  const operation=f.processor.process({ownerUserID,id});await started;
+  const writes=f.writes.length;f.changeOwner('other');
+  assert.equal(await operation,null);assert.equal(f.writes.length,writes);assert.equal(f.calls.length,0);
+  assert.equal(f.get().text,undefined);
 });
 
 test('record deletion waits for in-flight processing and cannot be resurrected by a later checkpoint', async t => {

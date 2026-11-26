@@ -22,11 +22,25 @@ test('serves only fixed app assets and rejects mutations, host spoofing and trav
     http.get(server.origin+'/',{headers:{Host:'attacker.example'}},response=>{response.resume();resolve(response.statusCode);}).on('error',reject);
   });
   assert.equal(status,403);
+  assert.notEqual(server.localAIOrigin,server.origin);
+  for(const asset of ['/','/renderer.mjs','/worker.mjs','/transformers.web.min.js','/ort-wasm-simd-threaded.mjs','/ort-wasm-simd-threaded.wasm','/whisper-languages.js','/transformers.LICENSE']) {
+    const result=await fetch(server.localAIOrigin+asset);
+    assert.equal(result.status,200,asset);
+    const policy=result.headers.get('content-security-policy');
+    assert.match(policy,/script-src 'self' 'wasm-unsafe-eval' blob:/);
+    const connect=policy.match(/connect-src ([^;]+)/)?.[1].split(' ').sort();
+    assert.deepEqual(connect,["'self'",'https://cas-bridge.xethub.hf.co','https://cdn-lfs.huggingface.co','https://huggingface.co'].sort());
+    assert.doesNotMatch(policy,/cdn\.jsdelivr\.net|https:\/\/\*/);
+  }
+  assert.equal((await fetch(server.localAIOrigin+'/../../src/auth.mjs')).status,404);
+  assert.equal((await fetch(server.origin+'/local-ai/worker.mjs')).status,404);
 });
 
 test('portable allowlist contains every static dependency of the Windows main process', async () => {
   const build = await readFile(new URL('../build-portable.ps1', import.meta.url), 'utf8');
   const packaging = await readFile(new URL('../PACKAGING.md', import.meta.url), 'utf8');
+  const localWorker=await readFile(new URL('../local-ai/worker.mjs',import.meta.url),'utf8');
+  const localUI=await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8');
   const allowlistBlock = build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/);
   assert.ok(allowlistBlock, 'portable product file allowlist exists');
   const productFiles = [...allowlistBlock[1].matchAll(/'([^']+)'/g)].map(match => match[1]);
@@ -53,5 +67,13 @@ test('portable allowlist contains every static dependency of the Windows main pr
   assert.match(packaging, /`core\.js`, `whisper-languages\.js`/);
   assert.match(build, /desktop-windows\/src\/trim-range\.mjs/);
   assert.match(build, /native\/ReelMediaTrim\.exe/);
+  assert.match(build,/node_modules\/@huggingface\/transformers\/dist\/transformers\.web\.min\.js/);
+  assert.match(build,/node_modules\/onnxruntime-web\/dist\/ort-wasm-simd-threaded\.wasm/);
+  assert.match(localWorker,/onnx-community\/whisper-large-v3-turbo/);
+  assert.match(localWorker,/360ebcde2559d60bb474678be3c1de9ef347d01a/);
+  assert.match(localWorker,/env\.useBrowserCache=true/);
+  assert.doesNotMatch(localWorker,/cdn\.jsdelivr\.net/);
+  assert.match(localUI,/First use downloads about 1\.1 GB/);
+  assert.match(localUI,/never falls back to cloud transcription/);
   assert.match(packaging, /Windows Media Foundation/);
 });

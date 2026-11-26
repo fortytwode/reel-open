@@ -5,7 +5,7 @@ import { createMeetingCoordinator } from '../src/meeting-coordinator.mjs';
 
 const org = {meetingServiceURL:'https://meetings.northwind.example', viewerBase:'https://library.northwind.example', viewerPath:'reel', notesBaseURL:'https://library.northwind.example/reel', webBase:'https://record.northwind.example'};
 const initial = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
-  systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
+  systemAudioConsent: false, meetingReminders: false, localTranscription: false, selection: { useAll: true, ids: [] } });
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
