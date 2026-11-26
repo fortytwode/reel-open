@@ -40,7 +40,7 @@ function fixture(options = {}) {
     origin: 'http://127.0.0.1:45123', defaultRenderEndpoint: options.defaultRenderEndpoint, onFailure: error => failures.push(error),
     onSourceEnded: () => { sourceEnds.push('ended'); return options.onSourceEnded?.(); } });
   const controller = new AbortController();
-  const start = recorder.start(args(controller.signal)); start.catch(() => {});
+  const start = recorder.start({ ...args(controller.signal), microphone: options.microphone === true }); start.catch(() => {});
   const invoke = async (channel, message, event) => {
     const window = windows[0];
     return handlers.get(channel)(event ?? { sender: window.webContents, senderFrame: window.webContents.mainFrame },
@@ -282,7 +282,7 @@ test('startup and stop are bounded even if the writer never resolves', async t =
 const rendererSource = readFileSync(new URL('../capture/renderer.mjs', import.meta.url), 'utf8')
   .replace("import { CaptureSession } from '/web/reel/capture.js';", 'const CaptureSession = globalThis.TestCaptureSession;');
 function rendererFixture(options = {}) {
-  const acquire = deferred(), calls = [], events = {}, tracks = [
+  const acquire = deferred(), micAcquire = deferred(), calls = [], events = {}, tracks = [
     { kind: 'video', stopped: 0 }, { kind: 'audio', stopped: 0 },
   ];
   for (const track of tracks) {
@@ -290,9 +290,11 @@ function rendererFixture(options = {}) {
     track.addEventListener = (name, callback) => { track[name] = callback; };
   }
   const stream = { getTracks: () => tracks, getVideoTracks: () => [tracks[0]], getAudioTracks: () => [tracks[1]] };
+  const micTrack = { stopped: 0, stop() { this.stopped++; }, addEventListener(name, callback) { this[name] = callback; } };
+  const micStream = { getTracks: () => [micTrack], getAudioTracks: () => [micTrack] };
   let command, instance;
   class CaptureSession {
-    constructor(settings) { instance = this; this.events = settings.events; }
+    constructor(settings) { instance = this; this.settings = settings; this.events = settings.events; }
     async prepare() { await options.prepareGate?.promise; return { video: 'avc1.640028', audio: 'mp4a.40.2' }; }
     begin() { calls.push(['begin']); }
     async stop() { calls.push(['stop']); await options.stopGate?.promise; this.events.onSegment(1, 4, new Uint8Array([2])); return { duration: 4, segments: 1 }; }
@@ -311,10 +313,55 @@ function rendererFixture(options = {}) {
   vm.runInNewContext(rendererSource, { TestCaptureSession: CaptureSession, Uint8Array,
     window: { reelCapture: api, addEventListener: (name, callback) => { events[name] = callback; } },
     document: { querySelector: () => ({ textContent: '' }) },
-    navigator: { mediaDevices: { getUserMedia: constraints => { calls.push(['acquire', constraints]); return acquire.promise; } } },
+    navigator: { mediaDevices: { getUserMedia: constraints => { calls.push(['acquire', constraints]); return constraints.video === false ? micAcquire.promise : acquire.promise; } } },
   });
-  return { acquire, stream, tracks, calls, send: value => command(value), hide: () => events.pagehide(), get instance() { return instance; } };
+  return { acquire, micAcquire, micStream, micTrack, stream, tracks, calls, send: value => command(value), hide: () => events.pagehide(), get instance() { return instance; } };
 }
+
+test('microphone permission is restricted to the owned capture window and explicit opt-in', async () => {
+  const f = fixture({ microphone: true }); await settle();
+  const window = f.windows[0], contents = window.webContents;
+  const origin = 'http://127.0.0.1:45123', url = origin + '/capture/';
+  const details = { requestingUrl: url, isMainFrame: true, securityOrigin: origin, mediaTypes: ['audio'] };
+  const request = (requester, value) => { let result; window.requestPermission(requester, 'media', answer => { result = answer; }, value); return result; };
+  assert.equal(window.command.microphone, true);
+  assert.equal(request(contents, details), true);
+  assert.equal(request(contents, { ...details, mediaTypes: ['audio', 'video'] }), false);
+  assert.equal(request(contents, { ...details, mediaTypes: ['video'] }), false);
+  assert.equal(request({}, details), false);
+  assert.equal(request(contents, { ...details, isMainFrame: false }), false);
+  assert.equal(window.checkPermission(contents, 'media', origin, { ...details, mediaType: 'audio' }), true);
+  assert.equal(window.checkPermission(contents, 'media', origin, { ...details, mediaType: 'video' }), false);
+  f.controller.abort(); await assert.rejects(f.start, { name: 'AbortError' });
+});
+
+test('optional microphone joins the audio mix and is released when capture stops', async () => {
+  const f = rendererFixture(); f.send({ type: 'start', sourceId: 'window:123:0', microphone: true });
+  f.acquire.resolve(f.stream); await settle();
+  f.micAcquire.resolve(f.micStream); await settle();
+  assert.equal(f.instance.settings.mic, f.micStream);
+  assert.equal(f.instance.settings.settings.audio, 'micAndSystem');
+  f.send({ type: 'stop' }); await settle();
+  assert.ok(f.micTrack.stopped > 0);
+  assert.ok(f.tracks.every(track => track.stopped > 0));
+});
+
+test('microphone denial stops capture and releases the selected window', async () => {
+  const f = rendererFixture(); f.send({ type: 'start', sourceId: 'window:123:0', microphone: true });
+  f.acquire.resolve(f.stream); await settle();
+  f.micAcquire.reject(new Error('Access denied')); await settle();
+  assert.ok(f.tracks.every(track => track.stopped > 0));
+  assert.ok(f.calls.some(call => call[0] === 'failed' && call[1] === 'microphone_unavailable'));
+  assert.equal(f.instance, undefined);
+});
+
+test('a microphone arriving after the capture window closes is immediately released', async () => {
+  const f = rendererFixture(); f.send({ type: 'start', sourceId: 'window:123:0', microphone: true });
+  f.acquire.resolve(f.stream); await settle();
+  f.hide(); f.micAcquire.resolve(f.micStream); await settle();
+  assert.ok(f.micTrack.stopped > 0);
+  assert.equal(f.instance, undefined);
+});
 
 test('renderer releases late acquisition and tracks immediately while prepare is still pending', async () => {
   const late = rendererFixture(); late.send({ type: 'start', sourceId: 'window:123:0' });
