@@ -471,11 +471,15 @@ try {
   const heldStartInOutput = pausedAt - (delayedAudio?.pauseAudioTime - delayedAudio?.audioTimeStart);
   const signalStart = pausedAt - (delayedAudio?.pauseAudioTime - delayedAudio?.signalTimestamp);
   const beforePauseMeanVolume = ffmpegMeanVolume(mp4, Math.max(0, signalStart), 0.05, "bandpass=f=997:w=80,volumedetect");
+  const toneFilter = "bandpass=f=997:w=80,volumedetect";
+  const priorToneVolume = ffmpegMeanVolume(mp4, Math.max(0, heldStartInOutput - 0.25), 0.05, toneFilter);
+  const resumedToneVolume = ffmpegMeanVolume(mp4, pausedAt + 0.25, 0.05, toneFilter);
+  const backgroundToneVolume = Math.min(priorToneVolume, resumedToneVolume);
   const audioClockElapsed = delayedAudio?.pauseAudioTime - delayedAudio?.beginAudioTime;
   check("delayed pre-pause audio signal survives in the recorded media",
     delayedAudio?.frames >= 18000 && delayedAudio.signalFrames > 0 && delayedAudio.audioTimeEnd <= delayedAudio.pauseAudioTime &&
-    Math.abs(audioClockElapsed - pausedAt) < 0.15 && beforePauseMeanVolume > -35,
-    JSON.stringify({ delayedAudio, heldStartInOutput, beforePauseMeanVolume, audioClockElapsed, pausedAt }));
+    Math.abs(audioClockElapsed - pausedAt) < 0.15 && Number.isFinite(backgroundToneVolume) && beforePauseMeanVolume >= backgroundToneVolume - 8,
+    JSON.stringify({ delayedAudio, heldStartInOutput, beforePauseMeanVolume, priorToneVolume, resumedToneVolume, audioClockElapsed, pausedAt }));
   check("audio duration stays synchronized with video across pause", a && Number.isFinite(Number(a.duration)) && Math.abs(Number(a.duration) - dur) < 0.6,
     `${a?.duration} s audio, ${dur} s video`);
   check("video.mp4 duration = meta, shorter than wall time by the pause", Math.abs(dur - m1.durationSeconds) < 0.5 && dur > 9 && dur < (stopAcceptedT - startT) / 1000 - 2,

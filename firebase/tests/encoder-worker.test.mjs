@@ -123,7 +123,7 @@ test("stopping a paused recording never draws new frames to fill a backlog", asy
 test("audio timestamp gaps are filled with silence while paused samples stay excluded", async () => {
   const originals = new Map();
   const replace = (name, value) => { originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, { configurable: true, writable: true, value }); };
-  let time = 0, encodedFrames = 0, encodedSignalFrames = 0;
+  let time = 0, encodedFrames = 0, encodedSignalFrames = 0, slowDrain = false;
   const messages = [];
   replace("self", { postMessage(message) { messages.push(message); } });
   replace("OffscreenCanvas", class { getContext() { return { fillRect() {}, drawImage() {} }; } async convertToBlob() {} });
@@ -150,6 +150,10 @@ test("audio timestamp gaps are filled with silence while paused samples stay exc
     encode(data) {
       encodedFrames += data.numberOfFrames;
       if (data.data) encodedSignalFrames += Array.from(data.data).filter(sample => sample !== 0).length / data.numberOfChannels;
+      if (slowDrain) {
+        this.encodeQueueSize++;
+        setTimeout(() => { this.encodeQueueSize = Math.max(0, this.encodeQueueSize - 1); }, 1);
+      }
     }
     async flush() {}
     close() {}
@@ -183,6 +187,17 @@ test("audio timestamp gaps are filled with silence while paused samples stay exc
     assert.equal(encodedSignalFrames, 14400,
       "all three 0.1s signal blocks, including the delayed pre-pause block, must survive; the gap is silence");
 
+    encodedFrames = 0; encodedSignalFrames = 0; time = 0; slowDrain = true;
+    await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000,
+      audio: true, audioSampleRate: 48000, audioChannels: 2, audioClockTime: 10 } });
+    await self.onmessage({ data: { type: "begin", audioTime: 10 } });
+    await sendAudio(10, 4800);
+    await sendAudio(12, 4800);
+    await self.onmessage({ data: { type: "stop", audioTime: 12.1 } });
+    slowDrain = false;
+    assert.equal(messages.at(-1).type, "done", `a 1.9s gap should wait for AAC batches to drain instead of overflowing the existing queue limit: ${JSON.stringify(messages.slice(-3))}`);
+    assert.equal(encodedFrames, 100800, "0.1s input + 1.9s silence + 0.1s input spans 2.1s");
+
     await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000,
       audio: true, audioSampleRate: 48000, audioChannels: 2, audioClockTime: 10 } });
     await self.onmessage({ data: { type: "begin", audioTime: 10 } });
@@ -203,6 +218,7 @@ test("audio timestamp gaps are filled with silence while paused samples stay exc
       "stop must flush 0.4s of active silence after the last 0.1s input block, despite the shifted timestamp origin");
     assert.equal(encodedSignalFrames, 4800, "the input signal remains present before the stop-tail silence");
   } finally {
+    slowDrain = false;
     if (self.onmessage) await self.onmessage({ data: { type: "cancel" } });
     mock.restoreAll();
     for (const [name, descriptor] of originals) {

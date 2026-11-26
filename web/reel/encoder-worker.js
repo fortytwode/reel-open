@@ -12,17 +12,25 @@ import { SegmentSplitter, parseInit, fragmentDuration } from "./fmp4.js";
 import { PauseClock, SEGMENT_INTERVAL, drawAnnotations, drawSharedFrame } from "./core.js?v=20261126-drawing";
 
 let S = null;
+let incoming = Promise.resolve();
 const MAX_AUDIO_GAP_SECONDS = 2;
 const AUDIO_INTERVAL_HISTORY_SECONDS = MAX_AUDIO_GAP_SECONDS + 2;
 const MAX_AUDIO_INTERVALS = 1024;
 const post = (m, transfer) => self.postMessage(m, transfer || []);
 const now = () => performance.now() / 1000;
 
-self.onmessage = async (e) => {
+self.onmessage = (e) => {
   const m = e.data;
+  incoming = incoming.then(() => handleMessage(m)).catch(err => {
+    post({ type: "error", message: String(err && err.message || err) });
+  });
+  return incoming;
+};
+
+async function handleMessage(m) {
   try {
     if (m.type === "start") await start(m);
-    else if (m.type === "audio") encodeAudio(m.data, m.audioTime);
+    else if (m.type === "audio") await encodeAudio(m.data, m.audioTime);
     else if (m.type === "begin") begin(m);
     else if (m.type === "pause") {
       closeAudioInterval(m.audioTime);
@@ -41,7 +49,7 @@ self.onmessage = async (e) => {
   } catch (err) {
     post({ type: "error", message: String(err && err.message || err) });
   }
-};
+}
 
 async function pickVideoConfig(width, height, fps, bitrate) {
   const level = width * height > 1920 * 1088 ? "33" : "28";
@@ -154,17 +162,17 @@ async function readAudio(stream) {
     let r;
     try { r = await reader.read(); } catch { break; }
     if (r.done) break;
-    try { encodeAudio(r.value); }
+    try { await encodeAudio(r.value); }
     catch (err) { fail(String(err && err.message || err)); break; }
     if (S.stopped) break;
   }
 }
 
-function encodeAudio(data, audioTime) {
+async function encodeAudio(data, audioTime) {
   const frames = data.numberOfFrames;
   try {
     if (S.timestampAudio && Number.isFinite(data.timestamp) && Number.isFinite(audioTime) && S.aenc && S.aenc.state === "configured") {
-      encodeTimestampedAudio(data);
+      await encodeTimestampedAudio(data);
     } else if (S.running && !S.clock.isPaused && !S.stopped && S.aenc && S.aenc.state === "configured") {
       S.audioBatch.add(data, encodeAudioBatch);
     }
@@ -178,27 +186,56 @@ function activeAudioIntervals() {
   return S.audioIntervalStart == null ? S.audioIntervals : [...S.audioIntervals, { start: S.audioIntervalStart, end: Infinity }];
 }
 
-function addSilenceForRange(start, end) {
+async function addSilenceForRange(start, end) {
   if (!(end > start) || !S.audioBatch) return;
   const ranges = activeAudioIntervals().map(interval => ({ start: Math.max(start, interval.start),
     end: Math.min(end, interval.end) })).filter(interval => interval.end > interval.start);
   const gapFrames = ranges.reduce((total, interval) => total + Math.round((interval.end - interval.start) * S.audioSampleRate), 0);
   if (gapFrames > S.audioSampleRate * MAX_AUDIO_GAP_SECONDS) throw new Error("Audio capture missed more than two seconds of samples.");
-  for (const interval of ranges) S.audioBatch.addSilence(Math.round((interval.end - interval.start) * S.audioSampleRate), encodeAudioBatch);
+  for (const interval of ranges) {
+    let frames = Math.round((interval.end - interval.start) * S.audioSampleRate);
+    while (frames > 0) {
+      const space = S.audioBatch.frames - S.audioBatch.buffered;
+      const count = Math.min(frames, space);
+      if (count === space) await waitForAudioEncoderRoom();
+      S.audioBatch.addSilence(count, encodeAudioBatch);
+      frames -= count;
+    }
+  }
+  await waitForAudioEncoderRoom();
 }
 
-function encodeTimestampedAudio(data) {
+async function addTimestampedAudio(data, frameOffset, frameCount) {
+  let offset = 0;
+  while (offset < frameCount) {
+    const space = S.audioBatch.frames - S.audioBatch.buffered;
+    const count = Math.min(frameCount - offset, space);
+    if (count === space) await waitForAudioEncoderRoom();
+    S.audioBatch.add(data, encodeAudioBatch, frameOffset + offset, count);
+    offset += count;
+  }
+}
+
+async function waitForAudioEncoderRoom() {
+  const deadline = Date.now() + 2000;
+  while (S.aenc.encodeQueueSize * 4096 > S.audioSampleRate * 2) {
+    if (Date.now() >= deadline) throw new Error("Audio encoding cannot keep up. Try a lower video quality.");
+    await new Promise(resolve => setTimeout(resolve, 4));
+  }
+}
+
+async function encodeTimestampedAudio(data) {
   const start = data.timestamp / 1e6, sampleRate = data.sampleRate || S.audioSampleRate;
   const end = start + data.numberOfFrames / sampleRate;
   const coverageStart = S.audioInputEnd ?? start;
-  if (start > coverageStart) addSilenceForRange(coverageStart, start);
+  if (start > coverageStart) await addSilenceForRange(coverageStart, start);
   for (const interval of activeAudioIntervals()) {
     const from = Math.max(start, interval.start, S.audioInputEnd ?? start);
     const to = Math.min(end, interval.end);
     if (to <= from) continue;
     const frameOffset = Math.max(0, Math.round((from - start) * sampleRate));
     const frameEnd = Math.min(data.numberOfFrames, Math.round((to - start) * sampleRate));
-    if (frameEnd > frameOffset) S.audioBatch.add(data, encodeAudioBatch, frameOffset, frameEnd - frameOffset);
+    if (frameEnd > frameOffset) await addTimestampedAudio(data, frameOffset, frameEnd - frameOffset);
   }
   S.audioInputEnd = Math.max(S.audioInputEnd ?? end, end);
   pruneAudioIntervals(S.audioInputEnd);
@@ -345,7 +382,7 @@ async function stop(m) {
   if (!S || S.stopped) return;
   closeAudioInterval(m.audioTime);
   if (S.timestampAudio && Number.isFinite(m.audioTime) && S.audioInputEnd != null && m.audioTime > S.audioInputEnd) {
-    addSilenceForRange(S.audioInputEnd, m.audioTime);
+    await addSilenceForRange(S.audioInputEnd, m.audioTime);
   }
   const wasPaused = S.clock.isPaused;
   S.clock.stop(now());
@@ -357,7 +394,11 @@ async function stop(m) {
   clearInterval(S.timer);
   if (!S.thumbDone) await makeThumb();
   await S.venc.flush();
-  if (S.aenc) { S.audioBatch.flush(encodeAudioBatch); await S.aenc.flush(); }
+  if (S.aenc) {
+    if (S.audioBatch.buffered) await waitForAudioEncoderRoom();
+    S.audioBatch.flush(encodeAudioBatch);
+    await S.aenc.flush();
+  }
   S.muxer.finalize();
   S.splitter.drain();
   for (const r of S.readers) r.cancel().catch(() => {});
