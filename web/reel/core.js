@@ -312,6 +312,12 @@ export function uploadStateLabel(u) {
 }
 export function mayHaveRemote(u) { return u === "uploaded" || u === "uploading" || (typeof u === "object" && u && u.failed != null); }
 
+export function canViewLocalRecording(recording, uid, restrictAccount) {
+  if (recording?.localImport) return Boolean(uid && recording.recordingOwnerUID === uid);
+  return !restrictAccount || Boolean(recording && [recording.recordingOwnerUID, recording.meeting?.ownerUID]
+    .every(owner => !owner || owner === uid));
+}
+
 /** Carry persisted publisher and private meeting ownership across a stale local update. */
 export function preserveRecordingBinding(recording, previous) {
   if (previous?.recordingNonce && previous.recordingOwnerUID) {
@@ -349,6 +355,7 @@ export function recordingToJSON(r) {
     json.recordingNonce = r.recordingNonce;
     if (r.recordingOwnerUID) json.recordingOwnerUID = r.recordingOwnerUID;
   }
+  if (r.localImport) json.localImport = true;
   if (isMeeting(r)) {
     json.meeting = decodeMeeting(r.meeting);
   }
@@ -362,6 +369,7 @@ export function recordingFromJSON(j) {
     r.recordingNonce = j.recordingNonce;
     if (j.recordingOwnerUID) r.recordingOwnerUID = j.recordingOwnerUID;
   }
+  if (j.localImport === true) r.localImport = true;
   if (Object.prototype.hasOwnProperty.call(j, "meeting")) r.meeting = decodeMeeting(j.meeting);
   r.folderName = j.folderName;
   r.durationSeconds = typeof j.durationSeconds === "number" ? j.durationSeconds : 0;
