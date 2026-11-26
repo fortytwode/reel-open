@@ -7,6 +7,7 @@
 // Swift → JS conventions: Date → Date; RemoteLocation → null (open) or the 32-hex key (keyed);
 // RemoteFile → its file name string; URLRequest → {method, url, headers, body} where body is a
 // string or Uint8Array.
+import { normalizeWhisperLanguage } from "./whisper-languages.js?v=20261126-language";
 
 /** Privacy helpers for calendar-started recordings. Attendee data stays local. */
 const EMAIL = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
@@ -777,7 +778,7 @@ export function cornerBubble(width, height, diameterFraction = 0.22, marginFract
 export const DEFAULT_SETTINGS = Object.freeze({
   mode: "screen", cameraEnabled: true, cameraID: null, microphoneID: null, audio: "micOnly", quality: "p1080", fps: 30,
   countdownSeconds: 3, bubbleSize: "medium", autoUpload: true, copyLinkOnStop: true, cameraBackground: "none",
-  liveUpload: true, uploadMP4: true, showCursor: true,
+  liveUpload: true, uploadMP4: true, showCursor: true, transcriptionLanguage: "en",
 });
 export const AUDIO_SOURCES = Object.freeze({ micOnly: "Microphone", systemOnly: "System audio only", micAndSystem: "Microphone + system audio", none: "No audio" });
 export const usesMic = (a) => a === "micOnly" || a === "micAndSystem";
@@ -800,6 +801,7 @@ export function decodeSettings(j) {
   pick("bubbleSize", (v) => v in BUBBLE_DIAMETER);
   for (const k of ["autoUpload", "copyLinkOnStop", "liveUpload", "uploadMP4", "showCursor"]) pick(k, (v) => typeof v === "boolean");
   pick("cameraBackground", (v) => ["none", "blur", "image"].includes(v));
+  d.transcriptionLanguage = normalizeWhisperLanguage(j.transcriptionLanguage);
   return d;
 }
 

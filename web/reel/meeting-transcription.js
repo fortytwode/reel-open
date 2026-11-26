@@ -1,3 +1,5 @@
+import { normalizeWhisperLanguage } from "./whisper-languages.js?v=20261126-language";
+
 /** Browser-local meeting transcription for finalized audio/video blobs.
  * Whisper runs in a module worker; media bytes never leave this page. The first run downloads
  * the pinned runtime and model into the browser's normal cache. */
@@ -5,10 +7,10 @@
 export const MEETING_TRANSCRIPTION_ENGINE = "Whisper large-v3-turbo q8 (onnx-community, Transformers.js 3.0.0, ONNX Runtime WASM/CPU)";
 export const MAX_MEETING_SECONDS = 3 * 60 * 60;
 const SAMPLE_RATE = 16_000;
-const WORKER_URL = new URL("./meeting-transcription-worker.js", import.meta.url);
+const WORKER_URL = new URL("./meeting-transcription-worker.js?v=20261126-language", import.meta.url);
 
 /** Decode audio, resample to Whisper's 16 kHz mono input, and transcribe locally. */
-export async function transcribeMeeting(blob, { onProgress = () => {}, signal } = {}) {
+export async function transcribeMeeting(blob, { onProgress = () => {}, signal, language = "en" } = {}) {
   if (!(blob instanceof Blob) || blob.size === 0) throw new Error("Choose a non-empty recording to transcribe.");
   if (signal?.aborted) throw abortError();
   onProgress({ phase: "decode", progress: 0, message: "Reading recording audio locally…" });
@@ -30,7 +32,7 @@ export async function transcribeMeeting(blob, { onProgress = () => {}, signal } 
     const mono = mixToMono(decoded);
     const pcm = resample(mono, decoded.sampleRate, SAMPLE_RATE);
     onProgress({ phase: "decode", progress: 1, message: "Audio ready for local transcription." });
-    return await transcribePCM(pcm, { onProgress, signal });
+    return await transcribePCM(pcm, { onProgress, signal, language });
   } finally {
     await context?.close().catch(() => {});
   }
@@ -75,7 +77,7 @@ export function buildMeetingSummary(segments, maxSentences = 3) {
   return `Extractive summary (not AI-generated): ${sentences.slice(0, maxSentences).join(" ")}`;
 }
 
-function transcribePCM(pcm, { onProgress, signal }) {
+export function transcribePCM(pcm, { onProgress = () => {}, signal, language = "en" }) {
   const duration = pcm.length / SAMPLE_RATE;
   return new Promise((resolve, reject) => {
     const worker = new Worker(WORKER_URL, { type: "module", name: "reel-meeting-transcription" });
@@ -94,13 +96,13 @@ function transcribePCM(pcm, { onProgress, signal }) {
       else if (data.type === "result") {
         const segments = normalizeSegments(data.chunks, data.text, duration);
         finish(resolve, {
-          text: data.text.trim(), segments, language: "en", engine: MEETING_TRANSCRIPTION_ENGINE,
+          text: data.text.trim(), segments, language: normalizeWhisperLanguage(data.language ?? language), engine: MEETING_TRANSCRIPTION_ENGINE,
           summary: buildMeetingSummary(segments),
         });
       } else if (data.type === "error") finish(reject, new Error(data.message));
     };
     worker.onerror = (event) => finish(reject, new Error(event.message || "Local transcription worker failed."));
-    worker.postMessage({ type: "transcribe", pcm, sampleRate: SAMPLE_RATE }, [pcm.buffer]);
+    worker.postMessage({ type: "transcribe", pcm, sampleRate: SAMPLE_RATE, language: normalizeWhisperLanguage(language) }, [pcm.buffer]);
   });
 }
 

@@ -6,9 +6,10 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-partial-recovery";
 import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
-import * as C from "./reel/core.js?v=20261126-drawing";
+import * as C from "./reel/core.js?v=20261126-language";
 import * as store from "./reel/store.js?v=20261126-hls-publication";
-import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
+import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261126-language";
+import { whisperLanguageOptions } from "./reel/whisper-languages.js?v=20261126-language";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
@@ -575,6 +576,10 @@ function bindSettings() {
   $("fps").addEventListener("change", () => { settings.fps = parseInt($("fps").value, 10); saveSettings(); });
   $("countdown").value = String([0, 1, 3, 5].includes(settings.countdownSeconds) ? settings.countdownSeconds : 3);
   $("countdown").addEventListener("change", () => { settings.countdownSeconds = parseInt($("countdown").value, 10); saveSettings(); });
+  const language = $("transcription-language");
+  language.replaceChildren(...whisperLanguageOptions().map(({ code, label }) => new Option(label, code)));
+  language.value = settings.transcriptionLanguage;
+  language.addEventListener("change", () => { settings.transcriptionLanguage = language.value; saveSettings(); });
   const checks = { "camera-on": "cameraEnabled", "auto-upload": "autoUpload", "copy-on-stop": "copyLinkOnStop", "upload-mp4": "uploadMP4", "show-cursor": "showCursor" };
   for (const [id, key] of Object.entries(checks)) {
     $(id).checked = settings[key];
@@ -847,7 +852,7 @@ function processRecording(recording, { resumeNotes = false } = {}) {
           if (notesRecordingID === id) $("meeting-notes-status").textContent = transcriptionProgress.get(id);
           renderList();
         } })
-        : await transcribeMeeting(blob, { onProgress: (p) => {
+        : await transcribeMeeting(blob, { language: settings.transcriptionLanguage, onProgress: (p) => {
         transcriptionProgress.set(id, p.message || "Transcribing locally…");
         if (notesRecordingID === id) $("meeting-notes-status").textContent = transcriptionProgress.get(id);
         renderList();
