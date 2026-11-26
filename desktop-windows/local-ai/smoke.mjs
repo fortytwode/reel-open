@@ -50,7 +50,9 @@ const phaseLimits={
   renderer_probe_timeout:5_000,renderer_task_received:10_000,task_sent:15_000,worker_message_sent:15_000,
   worker_started:30_000,model_loading:5*60_000,model_downloading:35*60_000,model_ready:2*60_000,
   inference:10*60_000,inference_complete:2*60_000,worker_dispatch_failed:5_000,worker_failed:5_000,
-  worker_error_before_task:5_000,worker_creation_failed:5_000,preload_error:5_000,renderer_console_error:5_000,
+  worker_error_before_task:5_000,worker_creation_failed:5_000,preload_error:5_000,preload_ready:5_000,
+  preload_bridge_present:5_000,preload_bridge_missing:5_000,preload_bridge_probe_failed:5_000,
+  renderer_console_error:5_000,renderer_closed_before_ready:5_000,
 };
 function reportProgress(event){
   const key=`${currentRun}:${event.phase}`;

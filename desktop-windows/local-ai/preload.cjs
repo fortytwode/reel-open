@@ -4,3 +4,4 @@ contextBridge.exposeInMainWorld('reelLocalAI',Object.freeze({
   progress(value){ipcRenderer.send('reel-local-ai:progress',value);},
   complete(value){ipcRenderer.send('reel-local-ai:complete',value);}
 }));
+ipcRenderer.send('reel-local-ai:preload-ready');

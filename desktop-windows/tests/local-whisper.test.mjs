@@ -116,6 +116,8 @@ test('renderer startup waits for worker module and task channel probe without st
   const operation=f.bridge.probeRenderer();
   await new Promise(resolve=>setImmediate(resolve));
   const view=FakeWindow.last,task=view.webContents.messages.at(-1).value;
+  f.ipcMain.emit('reel-local-ai:preload-ready',{sender:view.webContents,senderFrame:view.webContents.mainFrame});
+  f.ipcMain.emit('reel-local-ai:preload-ready',{sender:new FakeWebContents(),senderFrame:new FakeWebContents().mainFrame});
   assert.deepEqual(task,{type:'probe',requestID:task.requestID});
   f.ipcMain.emit('reel-local-ai:progress',{sender:view.webContents,senderFrame:view.webContents.mainFrame},
     {requestID:task.requestID,phase:'renderer_probe_received'});
@@ -123,6 +125,7 @@ test('renderer startup waits for worker module and task channel probe without st
   assert.ok(diagnostics.some(value=>value.phase==='renderer_script_ready'));
   assert.ok(diagnostics.some(value=>value.phase==='worker_script_ready'));
   assert.ok(diagnostics.some(value=>value.phase==='renderer_probe_received'));
+  assert.equal(diagnostics.filter(value=>value.phase==='preload_ready').length,1);
   f.bridge.dispose();
 });
 
