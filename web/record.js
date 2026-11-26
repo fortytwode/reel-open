@@ -6,7 +6,7 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
 import { organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
-import * as C from "./reel/core.js?v=20261126-local-import";
+import * as C from "./reel/core.js?v=20261126-meeting-transcript";
 import * as store from "./reel/store.js?v=20261126-local-import";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
