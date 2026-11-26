@@ -75,6 +75,19 @@ jobs:
           Copy-Item -LiteralPath 'desktop-windows/src/smoke-timeout.mjs' -Destination $helper
           node desktop-windows/tests/local-ai-smoke-package-preflight.mjs "$appRoot"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Generate and validate canonical synthetic Whisper speech
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Speech
+          $source = Join-Path $env:RUNNER_TEMP whisper-smoke-source.wav
+          $canonical = Join-Path $env:RUNNER_TEMP whisper-smoke-canonical.wav
+          $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
+          $synth.SetOutputToWaveFile($source, $format)
+          $synth.Speak('This local meeting verifies privacy using on-device transcription.')
+          $synth.Dispose()
+          node desktop-windows/tests/whisper-fixture.mjs $source $canonical
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify packaged smoke startup before model download
         shell: pwsh
         env:
@@ -127,14 +140,8 @@ jobs:
         run: |
           $freeBytes = (Get-PSDrive -Name C).Free
           if ($freeBytes -lt 4GB) { throw "Local Whisper smoke needs 4 GiB free for its pinned 1.1 GB model/cache; found $([math]::Round($freeBytes / 1GB, 2)) GiB." }
-          Add-Type -AssemblyName System.Speech
-          $audio = Join-Path $env:RUNNER_TEMP whisper-smoke.wav
+          $audio = Join-Path $env:RUNNER_TEMP whisper-smoke-canonical.wav
           $log = Join-Path $env:RUNNER_TEMP "whisper-smoke-$env:REEL_ARCH.log"
-          $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-          $format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
-          $synth.SetOutputToWaveFile($audio, $format)
-          $synth.Speak('This local meeting verifies privacy using on-device transcription.')
-          $synth.Dispose()
           $electron = Resolve-Path "$env:RUNNER_TEMP/demo-package/Reel.exe"
           $appRoot = Resolve-Path "$env:RUNNER_TEMP/demo-package/resources/app"
           $packagePath = Join-Path $appRoot 'package.json'
