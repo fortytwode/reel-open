@@ -8,7 +8,7 @@ const MAX_PENDING = 32 * 1024 * 1024;
 const text = (value, max = 4096) => typeof value === 'string' && value.length > 0 && value.length <= max;
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
-  systemAudioConsent: false, selection: { useAll: true, ids: [] } });
+  systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
 const metadata = recording => ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
   durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload), shareIncludesTranscript: recording.share.includeTranscript === true } : {}),
   ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()), error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
@@ -218,7 +218,7 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
       const saved = JSON.parse(readFileSync(path.join(dir, 'library.json'), 'utf8'));
       check(saved.version === 1 && saved.ownerUserID === ownerUserID && Array.isArray(saved.recordings)
         && saved.completed && typeof saved.completed === 'object' && !Array.isArray(saved.completed), 'Invalid local recording metadata');
-      state = saved;
+      state = { ...saved, settings: { ...defaults(ownerUserID), ...(saved.settings ?? {}) } };
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const value = { dir, state, tail: Promise.resolve() }; owners.set(ownerUserID, value); return value;
   }
@@ -390,13 +390,13 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     });
   }
   function getSettings(ownerUserID) { return structuredClone(owner(ownerUserID).state.settings); }
-  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, selection } = {}) {
+  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, selection } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The settings owner changed');
-    check([autoJoin, participantConsent, systemAudioConsent].every(flag => typeof flag === 'boolean')
+    check([autoJoin, participantConsent, systemAudioConsent, meetingReminders].every(flag => typeof flag === 'boolean')
       && typeof selection?.useAll === 'boolean' && Array.isArray(selection.ids) && selection.ids.length <= 250
       && selection.ids.every(id => text(id, 1024)), 'Invalid recording settings');
     check(!autoJoin || (participantConsent && systemAudioConsent), 'Automatic recording requires both permissions');
-    const settings = { ownerUserID, autoJoin, participantConsent, systemAudioConsent,
+    const settings = { ownerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders,
       selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)] } };
     const state = await mutate(owner(ownerUserID), state => { state.settings = settings; return state; });
     return structuredClone(state.settings);

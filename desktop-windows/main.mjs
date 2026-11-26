@@ -1,4 +1,4 @@
-import {app,BrowserWindow,clipboard,desktopCapturer,dialog,ipcMain,Menu,safeStorage,shell} from 'electron';
+import {app,BrowserWindow,clipboard,desktopCapturer,dialog,ipcMain,Menu,Notification,safeStorage,shell} from 'electron';
 import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {existsSync,mkdirSync,readFileSync} from 'node:fs';
@@ -15,6 +15,7 @@ import {createWindowsRecorder} from './src/recorder.mjs';
 import {createCompanionStartup,createDesktopService,desktopBrowserAppArguments,desktopLaunchAction,desktopProductURL} from './src/desktop-service.mjs';
 import {createMeetingProcessor} from './src/meeting-processing.mjs';
 import {createMeetingShare} from './src/meeting-share.mjs';
+import {createMeetingReminders,meetingReminderIDFromActivation} from './src/meeting-reminders.mjs';
 import {startAssetServer} from './src/asset-server.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,15 @@ try {
   org=organizationConfig(JSON.parse(readFileSync(path.join(root,'organization.json'),'utf8')));
 } catch { /* local setup remains available */ }
 
-let window,service,bridge,assets,poll,quitting=false,shutdown=null;
+let window,service,bridge,assets,poll,quitting=false,shutdown=null,queuedReminderMeetingID=null;
+function focusMeetingReminder(meetingID) {
+  if(typeof meetingID!=='string' || !meetingID || meetingID.length>4096) return;
+  if(!window || window.isDestroyed() || !assets || window.webContents.getURL()!==assets.origin+'/') {
+    queuedReminderMeetingID=meetingID;return;
+  }
+  queuedReminderMeetingID=null;window.show();window.focus();
+  window.webContents.send('reel-desktop:meeting-reminder',meetingID);
+}
 app.setName('Reel');
 // Chromium and Reel must share the deployment scope before the instance lock and app readiness.
 const organizationKey=org ? createHash('sha256').update(`${org.projectID}\n${org.allowedEmailDomain}`).digest('hex') : 'local';
@@ -131,6 +140,10 @@ async function run() {
   if(process.platform!=='win32') throw Error('This app requires Windows.');
   assets=await startAssetServer();
   const {origin}=assets;
+  if(typeof Notification.handleActivation==='function') Notification.handleActivation(details=>{
+    const meetingID=meetingReminderIDFromActivation(details);
+    if(meetingID) focusMeetingReminder(meetingID);
+  });
   const storageRoot=path.join(stateRoot,'recordings');
   const store=createLocalRecordingStore({root:storageRoot});
   let credentials = {};
@@ -163,7 +176,8 @@ async function run() {
     onCompleted:({ownerUserID,recording})=>{ if (!shutdown && auth?.getProfile()?.userID===ownerUserID && store.getProcessing({ownerUserID,id:recording.id})?.phase==='pending') void processor.process({ownerUserID,id:recording.id}).catch(()=>{}); },
     onFailure:()=>{void service?.action('stopRecording').catch(()=>{});},
     onSourceEnded:()=>service?.action('stopRecording')});
-  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,discover:discoverGoogleMeetings,
+  const reminders=createMeetingReminders({Notification,activate:focusMeetingReminder});
+  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,reminderScheduler:reminders,discover:discoverGoogleMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
     openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },
@@ -212,6 +226,7 @@ async function run() {
     {label:'Edit',submenu:[{role:'copy'},{role:'paste'},{role:'selectAll'}]}
   ]));
   await window.loadURL(origin+'/');window.show();
+  if(queuedReminderMeetingID) focusMeetingReminder(queuedReminderMeetingID);
   poll=setInterval(()=>void service.pulse().catch(()=>{}),20_000);
   void service.pulse().catch(()=>{});
   void processor?.resume().catch(()=>{});

@@ -5,7 +5,7 @@ import { createMeetingCoordinator } from '../src/meeting-coordinator.mjs';
 
 const org = {meetingServiceURL:'https://meetings.northwind.example', viewerBase:'https://library.northwind.example', viewerPath:'reel', notesBaseURL:'https://library.northwind.example/reel', webBase:'https://record.northwind.example'};
 const initial = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
-  systemAudioConsent: false, selection: { useAll: true, ids: [] } });
+  systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -63,7 +63,7 @@ test('MSIX product launch arguments select the configured Recorder and Notetaker
   assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
 });
 
-function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
+function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
   const settings = new Map(), recordings = [], calls = [], writes = [], snapshots = [], listeners = new Set();
@@ -76,6 +76,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
   store.rename=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');const item=recordings.find(recording=>recording.id===args.id);if(!item)throw Error('unavailable');item.title=args.title.trim();};
   store.deleteRecording=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');if(args.localOnlyConfirmed!==true)throw Error('confirm local only');const index=recordings.findIndex(recording=>recording.id===args.id);if(index<0)throw Error('unavailable');recordings.splice(index,1);};
   const service = createDesktopService({org, auth, store, fetch:async () => Response.json({events:[]}),
+    reminderScheduler,
     discover: discover ?? (async ({auth}) => ({ ownerUserID: auth.getProfile().userID, calendars: [{id:'cal',title:'Work'}], meetings: [
       { id:'one', title:'QA', start:'2026-11-06T15:00:00Z',end:'2026-11-06T16:00:00Z',platform:'google_meet',joinURL:'https://meet.google.com/aaa-bbbb-ccc',attendeeEmails:['private@example.com'] } ] })),
     createCoordinator(options) { coordinatorOptions = options; coordinator = realCoordinator ? createMeetingCoordinator({ ...options,
@@ -113,6 +114,23 @@ test('calendar remains visible with auto-join off; renderer snapshot omits priva
   assert.equal(JSON.stringify(state).includes('private@example.com'), false);
   f.status({ phase:'capturing', ownerUserID:'owner-a', sessionId:'secret', hwnd:'123', reason:null });
   assert.deepEqual(Object.keys(f.service.state().status).sort(), ['message','phase']);
+  await f.service.dispose();
+});
+test('the reminder preference is owner-bound and calendar refresh hands eligible events to the local scheduler', async () => {
+  const updates=[];
+  const f=fixture({reminderScheduler:{update:value=>updates.push(value),dispose(){}}});
+  await f.service.pulse();
+  assert.equal(f.service.state().settings.meetingReminders,false);
+  assert.equal(updates.at(-1).reminders,false);
+  const settings={...initial('owner-a'),meetingReminders:true,expectedOwnerUserID:'owner-a'};
+  await f.service.action('saveSettings',settings);
+  assert.equal(f.service.state().settings.meetingReminders,true);
+  assert.equal(updates.at(-1).owner,'owner-a');
+  assert.equal(updates.at(-1).reminders,true);
+  assert.equal(updates.at(-1).meetings[0].id,'one');
+  f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
+  assert.equal(f.service.state().settings.meetingReminders,false);
+  assert.equal(updates.at(-1).owner,null);
   await f.service.dispose();
 });
 test('rejects stale owner and unknown settings/action inputs', async () => {
