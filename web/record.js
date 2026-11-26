@@ -7,12 +7,12 @@
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
 import { organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
 import * as C from "./reel/core.js?v=20261126-meeting-transcript";
-import * as store from "./reel/store.js?v=20261126-local-import";
+import * as store from "./reel/store.js?v=20261126-hls-publication";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, CLOUD_CONFIG, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
-import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-transcript-meta";
+import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-hls-publication";
 import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-video-drain";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
