@@ -76,13 +76,19 @@ try {
     if ($server.HasExited) { throw 'The local App Installer feed server did not start.' }
     Write-Output 'Checking byte-range, MIME, Content-Length, and HEAD behavior before package install.'
     $head = Invoke-WebRequest -UseBasicParsing -Method Head "$baseUri/range-probe.msix"
-    if ($head.StatusCode -ne 200 -or $head.Headers['Content-Length'] -ne '8'
-        -or $head.Headers['Content-Type'] -ne 'application/msix' -or $head.Headers['Accept-Ranges'] -ne 'bytes') {
+    $headValid = ($head.StatusCode -eq 200) -and
+        ($head.Headers['Content-Length'] -eq '8') -and
+        ($head.Headers['Content-Type'] -eq 'application/msix') -and
+        ($head.Headers['Accept-Ranges'] -eq 'bytes')
+    if (-not $headValid) {
         throw 'The local MSIX server HEAD response is missing required metadata.'
     }
     $range = Invoke-WebRequest -UseBasicParsing -Headers @{ Range = 'bytes=0-0' } "$baseUri/range-probe.msix"
-    if ($range.StatusCode -ne 206 -or $range.Headers['Content-Length'] -ne '1'
-        -or $range.Headers['Content-Range'] -ne 'bytes 0-0/8' -or $range.Content.Length -ne 1) {
+    $rangeValid = ($range.StatusCode -eq 206) -and
+        ($range.Headers['Content-Length'] -eq '1') -and
+        ($range.Headers['Content-Range'] -eq 'bytes 0-0/8') -and
+        ($range.Content.Length -eq 1)
+    if (-not $rangeValid) {
         throw 'The local MSIX server does not correctly serve a byte-range GET.'
     }
     Remove-Item -LiteralPath $rangeProbe -Force
