@@ -1,5 +1,5 @@
 import {app,BrowserWindow,clipboard,desktopCapturer,dialog,ipcMain,Menu,Notification,safeStorage,shell} from 'electron';
-import {spawn} from 'node:child_process';
+import {execFile,spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {existsSync,mkdirSync,readFileSync} from 'node:fs';
 import {mkdir} from 'node:fs/promises';
@@ -136,6 +136,12 @@ function launchBrowserApp(executable,args) {
     child.once('spawn',()=>{child.unref();resolve();});
   });
 }
+function runMediaTrim(executable,args) {
+  return new Promise((resolve,reject)=>execFile(executable,args,{windowsHide:true,timeout:15*60*1000,maxBuffer:4096},(error,stdout,stderr)=>{
+    if(error) return reject(Error(String(stderr || error.message || 'Windows could not export this recording.').trim().slice(0,500)));
+    resolve(stdout.trim());
+  }));
+}
 async function run() {
   if(process.platform!=='win32') throw Error('This app requires Windows.');
   assets=await startAssetServer();
@@ -181,6 +187,18 @@ async function run() {
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
     openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },
+    exportTrimmedCopy:async({file,title,start,end})=>{
+      const safeTitle=String(title || 'Meeting').replace(/[<>:"/\\|?*\u0000-\u001f]/g,' ').replace(/[. ]+$/,'').slice(0,120) || 'Meeting';
+      const result=await dialog.showSaveDialog(window,{title:'Export trimmed meeting copy',buttonLabel:'Export copy',
+        defaultPath:path.join(path.dirname(file),`${safeTitle} (trimmed).mp4`),filters:[{name:'MP4 video',extensions:['mp4']}]});
+      if(result.canceled || !result.filePath) return {canceled:true};
+      const destination=path.resolve(result.filePath),source=path.resolve(file);
+      if(destination.toLowerCase()===source.toLowerCase()) throw Error('Choose a different file so the original recording stays unchanged.');
+      const executable=path.join(root,'native','ReelMediaTrim.exe');
+      await runMediaTrim(executable,[source,String(start),String(end),destination]);
+      shell.showItemInFolder(destination);
+      return {canceled:false};
+    },
     copyText:value=>clipboard.writeText(value),
     startup:createCompanionStartup({app,shell,windowsStore:process.windowsStore,executable:process.execPath,organizationKey}),
     openRecordings:async owner=>{

@@ -23,4 +23,6 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 FixturePolicyTests.exe
 if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build-media-trim.ps1" -Compiler "%CSC%"
+if errorlevel 1 exit /b 1
 exit /b 0

@@ -35,6 +35,9 @@ Run on Windows with PowerShell 5.1 or later, the .NET Framework compiler/UI
 Automation assemblies used by `native/build.cmd`, and an extracted **official
 Electron 45.2.3 Windows distribution**. Use a clean, dedicated extraction from
 Electron's release archive; verify its published checksum before building.
+Also install the Windows 10 SDK (with `Windows.winmd`) and the .NET Framework
+4.5 targeting pack; the build compiles and tests the local trim helper against
+Windows' built-in Media Foundation editing APIs. No media executable is bundled.
 The builder checks the executable's runtime version and PE architecture; those
 checks do not establish the supplied distribution's provenance. The machine
 must be able to execute that distribution's architecture. No npm install is
@@ -72,13 +75,13 @@ actual downloaded credentials out of source control and diagnostic output.
 Authentication/provider consent must still be verified with the packaged client
 before release.
 
-The builder deletes any existing production helper, recompiles it from the
+The builder deletes any existing production join helper, recompiles it from the
 current `Core.cs`, `WinJoin.cs` and `Program.cs`, and requires `native/build.cmd`
-to finish its policy tests. It leaves that build's local native executables in
-the source checkout. Only `ReelNativeJoin.exe` enters the package; fixture and
-policy test binaries do not. Compilation uses the existing compiler defaults;
-the manifest describes the helper as managed .NET Framework rather than
-claiming a particular native machine architecture.
+to finish its policy tests and a synthetic MP4 trim/export test. It leaves that
+build's local native executables in the source checkout. Only
+`ReelNativeJoin.exe` and `ReelMediaTrim.exe` enter the package; fixture and test
+binaries do not. The trim helper is AnyCPU managed .NET Framework code and uses
+Windows Media Foundation, so the same binary supports x64 and ARM64 Windows.
 
 The ZIP contains `Reel.exe` and the Electron runtime, preserving upstream
 `LICENSE` and `LICENSES.chromium.html`. `resources/app/package.json` points at

@@ -63,7 +63,7 @@ test('MSIX product launch arguments select the configured Recorder and Notetaker
   assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
 });
 
-function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler } = {}) {
+function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler, exportTrimmedCopy } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
   const settings = new Map(), recordings = [], calls = [], writes = [], snapshots = [], listeners = new Set();
@@ -87,7 +87,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting, reminderSche
       refresh: async () => { calls.push('refresh'); }, tick: async () => { calls.push('tick'); },
       cancel: async () => { calls.push('cancel'); }, dispose: async () => { calls.push('dispose'); } }; return coordinator; },
     openExternal: async url => calls.push(url), openProduct: async name => calls.push(name),
-    openRecordings: async owner => calls.push(owner), openRecording: async file => calls.push(['play', file]), copyText: text => calls.push(['copy', text]), shareMeeting,
+    openRecordings: async owner => calls.push(owner), openRecording: async file => calls.push(['play', file]), copyText: text => calls.push(['copy', text]), shareMeeting, exportTrimmedCopy,
     onState: value => snapshots.push(value) });
   return { service, auth, store, coordinator, settings, recordings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
     changeOwner(value) { profile = value; notify(); }, status(value) { status = value; statusNotify(value); } };
@@ -104,6 +104,20 @@ test('local playback and transcript copy are restricted to the active recording 
   f.changeOwner({ userID: 'owner-b', email: 'b@northwind.example', calendarConnected: true });
   await assert.rejects(f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' }));
   await assert.rejects(f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-b' }));
+});
+
+test('trim export resolves only owner-bound local files and validates a non-destructive range', async () => {
+  const exports=[];
+  const f=fixture({exportTrimmedCopy:async value=>exports.push(value)}), id='b'.repeat(32);
+  f.store.list=owner=>owner==='owner-a'?[{id,title:'Weekly meeting',durationSeconds:12}]:[];
+  f.store.getRecordingPath=request=>request.ownerUserID==='owner-a'&&request.id===id?'/private/meeting.mp4':null;
+  await f.service.action('exportTrimmedCopy',{id,expectedOwnerUserID:'owner-a',start:2.125,end:8.5});
+  assert.deepEqual(exports,[{ownerUserID:'owner-a',id,file:'/private/meeting.mp4',title:'Weekly meeting',start:2.125,end:8.5}]);
+  await assert.rejects(f.service.action('exportTrimmedCopy',{id,expectedOwnerUserID:'owner-b',start:2,end:8}),/account changed/i);
+  await assert.rejects(f.service.action('exportTrimmedCopy',{id,expectedOwnerUserID:'owner-a',start:0,end:12}),/valid trim range/i);
+  await assert.rejects(f.service.action('exportTrimmedCopy',{id,expectedOwnerUserID:'owner-a',start:11.8,end:12}),/valid trim range/i);
+  await assert.rejects(f.service.action('exportTrimmedCopy',{id:'c'.repeat(32),expectedOwnerUserID:'owner-a',start:2,end:8}),/valid trim range/i);
+  assert.equal(exports.length,1);
 });
 
 test('calendar remains visible with auto-join off; renderer snapshot omits private transport data', async () => {
