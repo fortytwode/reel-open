@@ -79,3 +79,6 @@ jobs:
             await app.close();
           }
           JS
+      - name: Verify packaged Recorder and Notetaker app entries
+        shell: pwsh
+        run: node desktop-windows/tests/product-entry-smoke.mjs "$env:RUNNER_TEMP/demo-package"
