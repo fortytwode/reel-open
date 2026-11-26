@@ -30,6 +30,7 @@ jobs:
           python-version: '3.11'
       - run: npm --prefix firebase/tests ci
       - run: npm --prefix firebase/tests run unit
+      - run: npm ci --ignore-scripts --prefix desktop-windows
       - run: npm --prefix desktop-windows test
       - run: npm exec --prefix firebase/tests -- playwright install --with-deps chromium
       - name: Verify browser organization isolation
