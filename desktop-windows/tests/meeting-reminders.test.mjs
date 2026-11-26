@@ -132,3 +132,48 @@ test('persistent schedule cancellation revokes stale tasks on opt-out and end ti
   assert.equal(scheduler.fire(expired,{owner:'owner-a',reminders:true,at:new Date(start+30*60_000)}),false,'A delayed task after meeting end is discarded.');
   assert.equal(f.shown.length,0);
 });
+
+test('a fractionally early Windows trigger is re-armed without losing the reminder', () => {
+  const f=fixture();let records=[],plan=[];
+  const fractionalStart=start+250;
+  const persistence={load:()=>records,save:value=>{records=structuredClone(value);},sync:value=>{plan=structuredClone(value);}};
+  const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+  const scheduler=createMeetingReminders({Notification,now:()=>new Date(fractionalStart-60_000),persistence});
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting('fractional',fractionalStart)]});
+  const token=records[0].token;
+  assert.equal(records[0].start,'2026-11-26T10:00:00.250Z');
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart-1)}),false);
+  assert.equal(records.length,1);
+  assert.deepEqual(plan,[{token,start:'2026-11-26T10:00:00.250Z'}], 'An early task recreates the same precise boundary.');
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart)}),true);
+  assert.equal(f.shown.length,1);
+});
+
+test('refreshing an unchanged event ID and start updates title and shortened end time', () => {
+  const f=fixture();let records=[],plan=[];
+  const persistence={load:()=>records,save:value=>{records=structuredClone(value);},sync:value=>{plan=structuredClone(value);}};
+  const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+  const scheduler=createMeetingReminders({Notification,now:()=>new Date(start-60_000),persistence});
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting('same-event')]});
+  const token=records[0].token;
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[{...meeting('same-event'),title:'Updated title',end:new Date(start+10*60_000).toISOString()}]});
+  assert.equal(records[0].title,'Updated title');
+  assert.equal(records[0].end,new Date(start+10*60_000).toISOString());
+  assert.deepEqual(plan,[{token,start:new Date(start).toISOString()}]);
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(start+11*60_000)}),false,
+    'A shortened event cannot notify after its refreshed end.');
+  assert.equal(records.length,0);
+  assert.equal(f.shown.length,0);
+});
+
+test('a refreshed meeting title is used when its persistent reminder fires', () => {
+  const f=fixture();let records=[];
+  const persistence={load:()=>records,save:value=>{records=structuredClone(value);},sync:()=>{}};
+  const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+  const scheduler=createMeetingReminders({Notification,now:()=>new Date(start-60_000),persistence});
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting('renamed-event')]});
+  const token=records[0].token;
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[{...meeting('renamed-event'),title:'New title'}]});
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(start)}),true);
+  assert.equal(f.shown[0].options.body,'New title');
+});

@@ -81,11 +81,16 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
     for (const item of valid) {
       let scheduledItem = scheduled.get(item.key);
       if (scheduledItem && scheduledItem.owner !== ownerUserID) { cancel(item.key); scheduledItem = null; }
-      if (scheduledItem) continue;
+      const title=String(item.meeting.title ?? '').slice(0, 500), endAt=new Date(item.end).toISOString();
+      if (scheduledItem) {
+        scheduledItem.title=title;
+        scheduledItem.end=endAt;
+        continue;
+      }
       scheduledItem = persistence ? { token: token(), key: item.key, owner: ownerUserID, meetingID: item.meeting.id,
-        title: String(item.meeting.title ?? '').slice(0, 500), start: new Date(item.start).toISOString(), end: new Date(item.end).toISOString(), timer: null }
-        : { key: item.key, owner: ownerUserID, meetingID: item.meeting.id, title: String(item.meeting.title ?? '').slice(0, 500),
-          start: new Date(item.start).toISOString(), end: new Date(item.end).toISOString(), timer: null };
+        title, start: new Date(item.start).toISOString(), end: endAt, timer: null }
+        : { key: item.key, owner: ownerUserID, meetingID: item.meeting.id, title,
+          start: new Date(item.start).toISOString(), end: endAt, timer: null };
       scheduled.set(item.key, scheduledItem);
       if (item.start <= time) { scheduledItem.fired=true;scheduled.set(item.key,scheduledItem);due.push(scheduledItem); }
       else if (!persistence) scheduledItem.timer = setTimer(() => {
@@ -106,6 +111,11 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
     if (!item) return false;
     if (item.fired) return false;
     const time = at instanceof Date ? at.getTime() : Date.parse(at);
+    if (owner === item.owner && reminders === true && Number.isFinite(time) && time < Date.parse(item.start)) {
+      // A task can be awakened slightly early by Windows; re-register its original boundary instead of losing it.
+      saveAndSync();
+      return false;
+    }
     const authorized = owner === item.owner && reminders === true && Number.isFinite(time)
       && time >= Date.parse(item.start) && time < Date.parse(item.end);
     if (authorized) {

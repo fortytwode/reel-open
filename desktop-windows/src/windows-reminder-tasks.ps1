@@ -68,7 +68,7 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         $task.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
         $task.Settings.ExecutionTimeLimit = 'PT2M'
         $trigger = $task.Triggers.Create(1) # TASK_TRIGGER_TIME
-        $trigger.StartBoundary = $start.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        $trigger.StartBoundary = $start.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
         $action = $task.Actions.Create(0) # TASK_ACTION_EXEC
         $action.Path = $powershell
         $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSCommandPath + '" -Token ' + $token + ' -Scope ' + $scopeValue

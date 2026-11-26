@@ -49,5 +49,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const allowlist=build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/)?.[1] ?? '';
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.ps1/);
+  assert.match(readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8'),/HH:mm:ss\.fff/,
+    'Task Scheduler must keep fractional-second meeting starts.');
 });
 
