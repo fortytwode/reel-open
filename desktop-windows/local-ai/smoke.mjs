@@ -18,23 +18,27 @@ const profileRoot=mkdtempSync(path.join(os.tmpdir(),'reel-whisper-cache-'));
 app.setPath('userData',profileRoot);app.setPath('sessionData',profileRoot);
 const windows=[];
 class SmokeWindow extends BrowserWindow{constructor(options){super(options);windows.push(this);}}
-let assets,local,exitCode=0;
+let assets,local,exitCode=0,modelNetworkBlocked=false,blockedRemoteRequests=0;
 try{
   await app.whenReady();
   assets=await startAssetServer({root:packagedRoot});
-  local=createLocalWhisper({BrowserWindow:SmokeWindow,ipcMain,origin:assets.localAIOrigin,ownerID:()=> 'smoke-owner'});
+  local=createLocalWhisper({BrowserWindow:SmokeWindow,ipcMain,origin:assets.localAIOrigin,ownerID:()=> 'smoke-owner',
+    allowRemoteModelRequest:()=>{if(modelNetworkBlocked){blockedRemoteRequests++;return false;}return true;}});
   const samples=await whisperSamples(new Blob([await readFile(audioPath)]));
   const first=await local.transcribe({ownerUserID:'smoke-owner',id:'a'.repeat(32),samples,language:'en'});
   assert.equal(first.engine,'Whisper large-v3-turbo q8');
   assert.ok(first.text.trim(),'Whisper must decode speech from the synthetic WAV.');
   assert.ok(/local|meeting|privacy|transcription|device/iu.test(first.text),`Unexpected Whisper output: ${first.text.slice(0,180)}`);
-  const session=windows.at(-1).webContents.session;
-  session.webRequest.onBeforeRequest({urls:['https://huggingface.co/*','https://us.aws.cdn.hf.co/*','https://us.gcp.cdn.hf.co/*']},(_details,callback)=>callback({cancel:true}));
+  modelNetworkBlocked=true;
   windows.at(-1).destroy();
   await new Promise(resolve=>setImmediate(resolve));
   const second=await local.transcribe({ownerUserID:'smoke-owner',id:'a'.repeat(32),samples,language:'en'});
   assert.equal(second.engine,'Whisper large-v3-turbo q8');
   assert.ok(/local|meeting|privacy|transcription|device/iu.test(second.text),`Offline cached inference failed: ${second.text.slice(0,180)}`);
+  const remoteRequestBlocked=await windows.at(-1).webContents.executeJavaScript(
+    `fetch('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json',{cache:'no-store'}).then(()=>false,()=>true)`);
+  assert.equal(remoteRequestBlocked,true,'The recreated inference window must block model network requests.');
+  assert.equal(blockedRemoteRequests,1,'The production network policy must deny the probe request after window recreation.');
   process.stdout.write('Local Whisper inference and offline cached second run passed.\n');
 }catch(error){
   exitCode=1;process.stderr.write(`${error?.stack??error}\n`);

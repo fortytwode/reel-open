@@ -18,7 +18,7 @@ class FakeWindow extends EventEmitter {
   hide(){}
   destroy(){this.destroyed=true;this.emit('closed');}
 }
-function setup(){const ipcMain=new EventEmitter();let owner='owner-a';const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin:'http://127.0.0.1:4321',ownerID:()=>owner});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
+function setup({allowRemoteModelRequest}={}){const ipcMain=new EventEmitter();let owner='owner-a';const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin:'http://127.0.0.1:4321',ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
 const samples=new Float32Array([0,.1,-.1]);
 
 test('local inference network access is restricted to the pinned model and GET requests',()=>{
@@ -68,6 +68,30 @@ test('CDN access requires the exact signed URL received from an allowed Hub redi
   assert.deepEqual(requestResult,{cancel:true});
   f.bridge.dispose();
   await assert.rejects(operation,{name:'AbortError'});
+});
+
+test('offline model denial is reinstalled after the isolated window is recreated',async()=>{
+  let offline=false,denied=0;
+  const f=setup({allowRemoteModelRequest:()=>{if(offline){denied++;return false;}return true;}});
+  const first=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  const firstWindow=FakeWindow.last;
+  f.complete({requestID:firstWindow.webContents.messages[0].value.requestID,ok:true,result:{text:'first',chunks:[]}});
+  await first;
+  firstWindow.destroy();
+  offline=true;
+  const second=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  let result;
+  FakeWindow.last.webContents.session.webRequest.before({
+    url:'https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json',method:'GET',
+  },value=>{result=value;});
+  assert.deepEqual(result,{cancel:true});
+  assert.equal(denied,1);
+  const secondWindow=FakeWindow.last;
+  f.complete({requestID:secondWindow.webContents.messages[0].value.requestID,ok:true,result:{text:'cached',chunks:[]}});
+  await second;
+  f.bridge.dispose();
 });
 
 test('accepts results only from the isolated window and matches the current request',async()=>{

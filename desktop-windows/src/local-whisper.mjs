@@ -60,8 +60,9 @@ export function localAIRequestAllowed(requestURL,method,localOrigin,allowedHubRe
 }
 
 /** Isolated renderer for local inference. It has no auth preload or access to meeting services. */
-export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID}={}){
-  check(typeof BrowserWindow==='function'&&ipcMain&&typeof origin==='string'&&typeof ownerID==='function','Invalid local Whisper dependencies.');
+export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRemoteModelRequest=()=>true}={}){
+  check(typeof BrowserWindow==='function'&&ipcMain&&typeof origin==='string'&&typeof ownerID==='function'
+    &&typeof allowRemoteModelRequest==='function','Invalid local Whisper dependencies.');
   const parsedOrigin=new URL(origin);
   check(parsedOrigin.protocol==='http:'&&parsedOrigin.hostname==='127.0.0.1'&&parsedOrigin.pathname==='/'&&!parsedOrigin.username&&!parsedOrigin.password,
     'Local transcription must use its private loopback origin.');
@@ -109,8 +110,14 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID}={}){
       }
       callback({cancel:false});
     });
-    session.webRequest.onBeforeRequest({urls:['<all_urls>']},(details,callback)=>
-      callback({cancel:!localAIRequestAllowed(details.url,details.method,origin,allowedHubRedirects)}));
+    session.webRequest.onBeforeRequest({urls:['<all_urls>']},(details,callback)=>{
+      let allowed=false;
+      try{
+        allowed=localAIRequestAllowed(details.url,details.method,origin,allowedHubRedirects);
+        if(allowed&&new URL(details.url).origin!==parsedOrigin.origin)allowed=allowRemoteModelRequest()===true;
+      }catch{}
+      callback({cancel:!allowed});
+    });
     contents.setWindowOpenHandler(()=>({action:'deny'}));
     contents.on('will-navigate',event=>{if(contents.getURL()!==pageURL)event.preventDefault();});
     contents.on('will-redirect',event=>event.preventDefault());
