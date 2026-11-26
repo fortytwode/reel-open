@@ -290,11 +290,13 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if (!recording || !file || !range) throw Error('Choose a valid trim range within this saved recording.');
         const key=`${ownerUserID}:${recording.id}`;
         if(activeExports.has(key)) throw Error('This recording is already being exported.');
-        activeExports.add(key);
-        try {
+        const exporting=(async()=>{
           await exportTrimmedCopy({ownerUserID,id:recording.id,file,title:recording.title,...range});
           requireOwner(ownerUserID);
-        } finally { activeExports.delete(key); }
+        })();
+        activeExports.set(key,exporting);
+        try { await exporting; }
+        finally { if(activeExports.get(key)===exporting) activeExports.delete(key); }
       } else if(name==='shareRecording') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (typeof payload?.id !== 'string' || !shareMeeting) throw Error('Meeting sharing is unavailable.');
@@ -333,6 +335,9 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     disposePromise=(async()=>{
       // Consent mutations are durable before the process may exit.
       const cancellation=coordinator?.cancel();
+      // Keep the app process alive until native exporters release their input
+      // and temporary output files; Electron's before-quit handler awaits us.
+      await Promise.allSettled([...activeExports.values()]);
       try { await settingsTail; }
       catch {
         await cancellation;

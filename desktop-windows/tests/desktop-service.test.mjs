@@ -120,6 +120,20 @@ test('trim export resolves only owner-bound local files and validates a non-dest
   assert.equal(exports.length,1);
 });
 
+test('shutdown waits for in-flight local trim export to finish before process teardown', async () => {
+  const exportGate=deferred(); let exportStarted=false,disposed=false;
+  const f=fixture({exportTrimmedCopy:async()=>{exportStarted=true;await exportGate.promise;}}), id='d'.repeat(32);
+  f.store.list=owner=>owner==='owner-a'?[{id,title:'Weekly meeting',durationSeconds:12}]:[];
+  f.store.getRecordingPath=request=>request.ownerUserID==='owner-a'&&request.id===id?'/private/meeting.mp4':null;
+  const exporting=f.service.action('exportTrimmedCopy',{id,expectedOwnerUserID:'owner-a',start:2,end:8});
+  await settle(); assert.equal(exportStarted,true);
+  const closing=f.service.dispose().then(()=>{disposed=true;});
+  await settle(); assert.equal(disposed,false);
+  await assert.rejects(f.service.action('refresh'),/shutting down/);
+  exportGate.resolve(); await Promise.all([exporting,closing]);
+  assert.equal(disposed,true);
+});
+
 test('calendar remains visible with auto-join off; renderer snapshot omits private transport data', async () => {
   const f = fixture(); await f.service.pulse();
   const state = f.service.state();

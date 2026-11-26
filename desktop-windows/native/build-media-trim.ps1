@@ -11,14 +11,23 @@ $runtimeCandidates = @(
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\System.Runtime.WindowsRuntime.dll')
 )
 $runtimeRef = $runtimeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+$systemRuntimeCandidates = @(
+    (Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETCore\v4.5\System.Runtime.dll'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETCore\v4.5.2\System.Runtime.dll'),
+    (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll'),
+    (Join-Path $env:WINDIR 'Microsoft.NET\FrameworkArm64\v4.0.30319\System.Runtime.dll'),
+    (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\System.Runtime.dll')
+)
+$systemRuntimeRef = $systemRuntimeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 if (-not (Test-Path -LiteralPath $Compiler -PathType Leaf)) { throw 'The .NET Framework C# compiler is unavailable.' }
 if (-not $runtimeRef) { throw 'The Windows SDK or .NET Framework installation lacks System.Runtime.WindowsRuntime.dll.' }
+if (-not $systemRuntimeRef) { throw 'The Windows SDK or .NET Framework installation lacks System.Runtime.dll.' }
 $sdk = Get-ChildItem -LiteralPath $kits -Directory -ErrorAction Stop |
     Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'Windows.winmd') -PathType Leaf) } |
     Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
 if (-not $sdk) { throw 'Install a Windows 10 SDK with Windows.winmd to build the Windows media helper.' }
 $winmd = Join-Path $sdk.FullName 'Windows.winmd'
-$common = @('/nologo', '/platform:anycpu', "/r:$winmd", "/r:$runtimeRef")
+$common = @('/nologo', '/platform:anycpu', "/r:$winmd", "/r:$runtimeRef", "/r:$systemRuntimeRef")
 Push-Location $native
 try {
     & $Compiler @common '/target:exe' '/out:ReelMediaTrim.exe' 'MediaTrim.cs' 'MediaTrimProgram.cs'
