@@ -18,17 +18,22 @@ namespace ReelNative
             Directory.CreateDirectory(directory);
             string source = Path.Combine(directory, "source.mp4"), wave = Path.Combine(directory, "tone.wav");
             string output = Path.Combine(directory, "trimmed.mp4"), roundTrip = Path.Combine(directory, "round-trip.mp4");
+            string stage = "write audio fixture";
             try
             {
                 Assert(WriteTone(wave, 4) > 4000, "The synthetic audio fixture is silent.");
+                stage = "create synthetic video";
                 var composition = new MediaComposition();
                 composition.Clips.Add(MediaClip.CreateFromColor(Color.FromArgb(255, 30, 120, 220), TimeSpan.FromSeconds(4)));
+                stage = "create synthetic audio track";
                 var waveFile = StorageFile.GetFileFromPathAsync(wave).AsTask().GetAwaiter().GetResult();
                 composition.BackgroundAudioTracks.Add(BackgroundAudioTrack.CreateFromFileAsync(waveFile).AsTask().GetAwaiter().GetResult());
+                stage = "render synthetic source";
                 Render(composition, source);
 
                 byte[] before;
                 using (var sha = SHA256.Create()) before = sha.ComputeHash(File.ReadAllBytes(source));
+                stage = "trim synthetic source";
                 double exportedDuration = MediaTrim.Export(source, 1.0, 3.0, output);
                 byte[] after;
                 using (var sha = SHA256.Create()) after = sha.ComputeHash(File.ReadAllBytes(source));
@@ -40,6 +45,7 @@ namespace ReelNative
 
                 // Re-import and transcode the export end to end. This exercises the
                 // platform decoder on every exported video and audio sample.
+                stage = "decode and re-encode trimmed export";
                 var exportedFile = StorageFile.GetFileFromPathAsync(output).AsTask().GetAwaiter().GetResult();
                 var exportedClip = MediaClip.CreateFromFileAsync(exportedFile).AsTask().GetAwaiter().GetResult();
                 var roundTripComposition = new MediaComposition();
@@ -64,7 +70,7 @@ namespace ReelNative
             }
             catch (Exception error)
             {
-                Console.Error.WriteLine(error.Message);
+                Console.Error.WriteLine("Windows media trim smoke failed while attempting to " + stage + ":\n" + error);
                 return 1;
             }
             finally
