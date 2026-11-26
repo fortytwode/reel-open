@@ -1,4 +1,29 @@
-# Windows portable test package
+# Windows packaging
+
+## Windows installer and updates
+
+`build-msix.ps1` packages Reel Recorder, Reel Notetaker and Reel Companion as separate Start entries in one per-user MSIX. It uses the same organization configuration, Electron distribution and Desktop OAuth inputs as the portable build below. Install the Windows SDK on the build machine for MakeAppx and SignTool.
+
+Run the following on Windows for each target architecture. Set `$releasePublisher` to your code-signing certificate’s exact subject and `$downloadBase` to your HTTPS download directory without a trailing slash. Supply the matching architecture’s Electron distribution.
+
+```powershell
+$arch = 'arm64' # or 'x64'
+$version = '0.1.3'
+$package = "Reel-$version-win32-$arch.msix"
+$feed = "latest-$arch.appinstaller"
+./desktop-windows/build-msix.ps1 `
+  -ElectronDist "C:\Electron\45.2.3-win32-$arch" `
+  -GoogleDesktopClientId $clientId -GoogleDesktopCredentialsFile $installedCredentialsPath `
+  -Architecture $arch -Publisher $releasePublisher -Version "$version.0" `
+  -PackageUri "$downloadBase/$package" -AppInstallerUri "$downloadBase/$feed" `
+  -OutputMsix "C:\ReelBuilds\$package" -OutputAppInstaller "C:\ReelBuilds\$feed"
+```
+
+Sign and timestamp the generated MSIX with your release signing service. Verify the signed file with `signtool verify /pa /v` and compute its SHA-256 after signing. Publish the signed, versioned MSIX first and its architecture’s stable `.appinstaller` file last. The host must serve the feed as `application/appinstaller` and the package as `application/msix`, support HEAD with the full content length, and honor byte-range requests for the package.
+
+Install through the architecture’s `.appinstaller` file to register the update feed. Subsequent releases keep its URL, package name and publisher and increase the three-part version. The default on-launch update check interval is 12 hours. The `Windows MSIX install and update` CI workflow exercises successive test versions using a temporary certificate confined to its disposable Windows runner.
+
+## Portable test ZIP
 
 `build-portable.ps1` creates an **unsigned portable test ZIP**, using the existing
 production native build and no packaging dependencies. It does not sign,
