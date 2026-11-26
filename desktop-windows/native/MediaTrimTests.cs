@@ -17,10 +17,10 @@ namespace ReelNative
             string directory = Path.Combine(Path.GetTempPath(), "reel-media-trim-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(directory);
             string source = Path.Combine(directory, "source.mp4"), wave = Path.Combine(directory, "tone.wav");
-            string output = Path.Combine(directory, "trimmed.mp4");
+            string output = Path.Combine(directory, "trimmed.mp4"), roundTrip = Path.Combine(directory, "round-trip.mp4");
             try
             {
-                WriteTone(wave, 4);
+                Assert(WriteTone(wave, 4) > 4000, "The synthetic audio fixture is silent.");
                 var composition = new MediaComposition();
                 composition.Clips.Add(MediaClip.CreateFromColor(Color.FromArgb(255, 30, 120, 220), TimeSpan.FromSeconds(4)));
                 var waveFile = StorageFile.GetFileFromPathAsync(wave).AsTask().GetAwaiter().GetResult();
@@ -37,6 +37,16 @@ namespace ReelNative
                 Assert(File.Exists(output) && new FileInfo(output).Length > 0, "The export is empty.");
                 Assert(Math.Abs(exportedDuration - 2.0) <= 0.25, "The export duration is wrong.");
                 Assert(AudioTrackCount(output) > 0, "The export lost its audio track.");
+
+                // Re-import and transcode the export end to end. This exercises the
+                // platform decoder on every exported video and audio sample.
+                var exportedFile = StorageFile.GetFileFromPathAsync(output).AsTask().GetAwaiter().GetResult();
+                var exportedClip = MediaClip.CreateFromFileAsync(exportedFile).AsTask().GetAwaiter().GetResult();
+                var roundTripComposition = new MediaComposition();
+                roundTripComposition.Clips.Add(exportedClip);
+                Render(roundTripComposition, roundTrip);
+                Assert(AudioTrackCount(roundTrip) > 0, "The trimmed MP4 audio could not be decoded and re-encoded.");
+                Assert(Math.Abs(Duration(roundTrip) - 2.0) <= 0.25, "The decoded export duration changed.");
 
                 string samePath = Path.Combine(directory, "source-copy.mp4");
                 File.Copy(source, samePath);
@@ -78,7 +88,7 @@ namespace ReelNative
             return MediaClip.CreateFromFileAsync(file).AsTask().GetAwaiter().GetResult().EmbeddedAudioTracks.Count;
         }
 
-        private static void WriteTone(string path, int seconds)
+        private static double WriteTone(string path, int seconds)
         {
             const int sampleRate = 48000, channels = 1, bits = 16;
             int samples = sampleRate * seconds, dataBytes = samples * channels * bits / 8;
@@ -90,8 +100,21 @@ namespace ReelNative
                 writer.Write(16); writer.Write((short)1); writer.Write((short)channels); writer.Write(sampleRate);
                 writer.Write(sampleRate * channels * bits / 8); writer.Write((short)(channels * bits / 8)); writer.Write((short)bits);
                 writer.Write(new[] { (byte)'d', (byte)'a', (byte)'t', (byte)'a' }); writer.Write(dataBytes);
-                for (int i = 0; i < samples; i++) writer.Write((short)(Math.Sin(2 * Math.PI * 440 * i / sampleRate) * 6000));
+                double energy = 0;
+                for (int i = 0; i < samples; i++)
+                {
+                    short sample = (short)(Math.Sin(2 * Math.PI * 440 * i / sampleRate) * 6000);
+                    writer.Write(sample);
+                    energy += sample * (double)sample;
+                }
+                return Math.Sqrt(energy / samples);
             }
+        }
+
+        private static double Duration(string path)
+        {
+            var file = StorageFile.GetFileFromPathAsync(path).AsTask().GetAwaiter().GetResult();
+            return MediaClip.CreateFromFileAsync(file).AsTask().GetAwaiter().GetResult().OriginalDuration.TotalSeconds;
         }
 
         private static bool Equal(byte[] left, byte[] right)
