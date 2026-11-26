@@ -165,8 +165,8 @@ test('sharing is an explicit owner-bound action and never accepts a renderer URL
   await assert.rejects(f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-b'}),/account changed/i);
   await assert.rejects(f.service.action('shareRecording',{id:'recording'}),/account changed/i);
   assert.deepEqual(shared,[]);
-  await f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-a'});
-  assert.deepEqual(shared,[{ownerUserID:'owner-a',id:'recording'}]);
+  await f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-a',password:'birdhouse',expiry:'week'});
+  assert.deepEqual(shared,[{ownerUserID:'owner-a',id:'recording',password:'birdhouse',expiry:'week'}]);
   f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
   await assert.rejects(f.service.action('shareRecording',{id:'recording',expectedOwnerUserID:'owner-a'}),/account changed/i);
   assert.equal(shared.length,1);

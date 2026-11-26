@@ -227,18 +227,27 @@ test('saved meeting sharing is persisted under its original local owner only', a
   for (let i=0;i<encoded.segments.length;i++) await writer.appendFragment({index:i+1,duration:4,bytes:encoded.segments[i]});
   const saved=await writer.finish({durationSeconds:8});
   const nonce='ab'.repeat(16), shareID=await C.ownerShareID('owner',nonce);
+  const passwordSalt='34'.repeat(16), accessKey=await C.deriveKey('birdhouse',passwordSalt);
+  const access={key:accessKey,passwordSalt,expiresAt:'2026-11-13T12:00:00Z'};
   assert.equal(await store.getShareRecord({ownerUserID:'other',id:saved.id}),null);
-  const bound=await store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,recordingNonce:nonce,shareID});
+  const bound=await store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,recordingNonce:nonce,shareID,access});
   assert.equal(bound.shareID,shareID); assert.equal(bound.upload,'pending');
+  assert.deepEqual(bound.access,access);
+  await assert.rejects(store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,
+    recordingNonce:nonce,shareID,access:{...access,passwordSalt:null}}),/Invalid meeting share access settings/);
   await assert.rejects(store.bindShare({ownerUserID:'other',expectedOwnerUserID:'other',id:saved.id,recordingNonce:nonce,shareID}),/unavailable/);
   await assert.rejects(store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'other',id:saved.id,recordingNonce:nonce,shareID}),/owner changed/);
   await store.saveShareState({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,shareID,upload:'uploaded'});
   assert.equal(store.list('owner')[0].shareStatus,'uploaded');
   assert.equal(store.list('other').length,0);
   const libraryPath=path.join(root,createHash('sha256').update('owner').digest('hex'),'library.json');
+  const persisted=await readFile(libraryPath,'utf8');
+  assert.ok(!persisted.includes('birdhouse'),'The local recording store must not persist the plaintext password.');
+  assert.ok(persisted.includes(accessKey));
   const legacy=JSON.parse(await readFile(libraryPath,'utf8')); delete legacy.recordings[0].width; delete legacy.recordings[0].height;
   await writeFile(libraryPath,JSON.stringify(legacy));
   const restored=await createLocalRecordingStore({root}).getShareRecord({ownerUserID:'owner',id:saved.id});
   assert.equal(restored.share.recordingNonce,nonce); assert.deepEqual([restored.width,restored.height],[640,360]);
+  assert.deepEqual(restored.share.access,access);
   await assert.rejects(store.saveShareState({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,shareID:'r2'+'0'.repeat(38),upload:'uploaded'}),/no longer bound/);
 });

@@ -54,26 +54,44 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
   const copied=[];
   const share=createMeetingShare({auth:{getProfile:()=>({userID:ownerID,email:ownerApp.user.email,displayName:'Synthetic meeting owner'}),getIdToken:()=>ownerApp.user.getIdToken()},
     store,org,cfg,copy:url=>copied.push(url)});
-  const result=await share.share({ownerUserID:ownerID,id,includeTranscript:true});
+  const result=await share.share({ownerUserID:ownerID,id,includeTranscript:true,password:'birdhouse',expiry:'week'});
   assert.equal(result.uploaded,true); assert.equal(copied[0],result.url);
   const local=await store.getShareRecord({ownerUserID:ownerID,id});
   const shareID=local.share.shareID;
+  const key=local.share.access.key, salt=local.share.access.passwordSalt;
+  assert.equal(await C.deriveKey('birdhouse',salt),key);
+  assert.ok(!JSON.stringify(local.share).includes('birdhouse'),'The local share binding must contain only the derived access proof.');
+  assert.ok(!(await readFile(path.join(recordingPath,'library.json'),'utf8')).includes('birdhouse'),
+    'The local recording store must never persist the plaintext password.');
   assert.equal(shareID,await C.ownerShareID(ownerID,local.share.recordingNonce));
-  const transcriptResponse = await fetch(C.downloadURL(shareID, C.File.transcriptJSON, null, cfg));
+  const publicMetaResponse=await fetch(C.downloadURL(shareID,C.File.meta,null,cfg));
+  assert.equal(publicMetaResponse.ok,true);
+  const publicStub=await publicMetaResponse.json();
+  assert.equal(publicStub.locked,true); assert.equal(publicStub.kdf.salt,salt);
+  assert.equal(Object.hasOwn(publicStub,'title'),false); assert.equal(Object.hasOwn(publicStub,'playback'),false);
+  assert.ok(publicStub.expiresAt);
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,null,cfg))).ok,false,'The public video location must reject a protected share.');
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.meta,null,cfg))).ok,true);
+  const privateMetaResponse=await fetch(C.downloadURL(shareID,C.File.meta,key,cfg));
+  assert.equal(privateMetaResponse.ok,true);
+  const privateMeta=await privateMetaResponse.json(); assert.equal(privateMeta.title,'Synthetic local meeting');
+  assert.equal(privateMeta.locked,true);
+  const transcriptResponse = await fetch(C.downloadURL(shareID, C.File.transcriptJSON, key, cfg));
   assert.equal(transcriptResponse.ok,true);
   const transcript = await transcriptResponse.json();
   assert.equal(transcript.id,shareID);
   assert.equal(transcript.text,'Synthetic caption');
   assert.ok(!JSON.stringify(transcript).includes('private-attendee'));
   const ownerCloud=new FirestoreClient(ownerApp.session,cfg), otherCloud=new FirestoreClient(otherApp.session,cfg);
-  assert.equal(await ownerCloud.ownsRoom(shareID),true);
-  assert.equal(await otherCloud.ownsRoom(shareID),false);
+  const roomID=C.room(shareID,key);
+  assert.equal(await ownerCloud.ownsRoom(roomID),true);
+  assert.equal(await otherCloud.ownsRoom(roomID),false);
   const libraryURL=`http://127.0.0.1:8080/v1/projects/demo-reel/databases/reel/documents/users/${encodeURIComponent(ownerID)}/recordings/${shareID}`;
   const ownerDoc=await fetch(libraryURL,{headers:{Authorization:`Bearer ${await ownerApp.user.getIdToken()}`}});
   assert.equal(ownerDoc.ok,true);
   const otherDoc=await fetch(libraryURL,{headers:{Authorization:`Bearer ${await otherApp.user.getIdToken()}`}});
   assert.equal(otherDoc.status,403,'The private library entry must reject other owners.');
-  const mediaURL=C.downloadURL(shareID,C.File.video,null,cfg);
+  const mediaURL=C.downloadURL(shareID,C.File.video,key,cfg);
   const downloaded=await fetch(mediaURL); assert.equal(downloaded.ok,true);
   const downloadedPath=path.join(temp,'shared.mp4'); await writeFile(downloadedPath,Buffer.from(await downloaded.arrayBuffer()));
   const probe=JSON.parse(execFileSync('ffprobe',['-v','error','-show_entries','stream=codec_name,codec_type,width,height','-of','json',downloadedPath],{encoding:'utf8'}));
@@ -103,6 +121,11 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
     return route.abort();
   });
   const page=await context.newPage(); await page.goto(pageURL);
+  await page.locator('#gate').waitFor({state:'visible',timeout:10000});
+  await page.locator('#gate-password').fill('wrong-password'); await page.locator('#gate-submit').click();
+  await page.locator('#gate-error').getByText('Wrong password').waitFor();
+  assert.equal(await page.locator('#player').isVisible(),false,'A wrong password must not reveal playback.');
+  await page.locator('#gate-password').fill('birdhouse'); await page.locator('#gate-submit').click();
   const played=await page.waitForFunction(async()=>{
     const video=document.querySelector('#player');
     if(!video||video.hidden) return false;
@@ -110,10 +133,11 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
     return video.readyState>=2&&video.currentTime>0.5;
   }, undefined, {timeout:25000});
   assert.ok(played,'The generated Windows meeting share should play in the existing viewer.');
-  assert.ok(await page.locator('#download').isVisible());
+  await page.locator('#download').waitFor({state:'visible',timeout:5000});
   await page.locator('#tab-transcript').click();
   await page.locator('#segments').getByText('Synthetic caption').first().waitFor();
   console.log(JSON.stringify({result:'PASS',ownerBoundRoom:true,otherOwnerDenied:true,privateLibraryDenied:true,
+    passwordDeniedThenAccepted:true,publicMetadataStubOnly:true,publicMediaDenied:true,expiryPublished:true,
     videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
   await context.close();
 } finally {

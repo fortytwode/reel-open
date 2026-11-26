@@ -156,12 +156,16 @@ test('a saved meeting is shared only when its explicit button is selected', asyn
   const transcriptButton=getElement('recordingsList').children[0].children[0].children.find(child=>child.dataset.includeTranscript==='true');
   assert.equal(transcriptButton.textContent,'Share video and transcript');
   assert.ok(button); assert.equal(button.textContent,'Share recording');
+  const password = button.sharePasswordInput, expiry = button.shareExpiryInput;
+  assert.equal(password.type,'password'); assert.equal(expiry.tagName,'select');
+  password.value='birdhouse'; expiry.value='week';
   onClick({target:{closest:selector=>selector==='[data-action]'?button:null}});
   await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a'}]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',password:'birdhouse',expiry:'week'}]]);
+  assert.equal(password.value,'','The password field should be cleared after the action.');
   onClick({target:{closest:selector=>selector==='[data-action]'?transcriptButton:null}});
   await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))),['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',includeTranscript:true}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))),['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',includeTranscript:true,expiry:'week'}]);
 });
 
 test('a persisted uploading share is retryable after app restart', async () => {

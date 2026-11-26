@@ -377,10 +377,19 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     return { id, title: item.title, createdAt: item.createdAt, durationSeconds: item.durationSeconds,
       ...dimensions, path: file, meeting: true, share: item.share ? structuredClone(item.share) : null };
   }
-  async function bindShare({ ownerUserID, expectedOwnerUserID, id, recordingNonce, shareID, includeTranscript = false } = {}) {
+  async function bindShare({ ownerUserID, expectedOwnerUserID, id, recordingNonce, shareID, includeTranscript = false,
+    access = null } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The meeting owner changed.');
     check(/^[0-9a-f]{32}$/.test(id ?? '') && /^[0-9a-f]{32}$/.test(recordingNonce ?? '')
       && /^r2[0-9a-f]{38}$/.test(shareID ?? ''), 'Invalid meeting share binding.');
+    check(access === null || (access && typeof access === 'object' && !Array.isArray(access)
+      && (access.key === null || /^[0-9a-f]{32}$/.test(access.key ?? ''))
+      && (access.passwordSalt === null || /^[0-9a-f]{32}$/.test(access.passwordSalt ?? ''))
+      && ((access.key === null && access.passwordSalt === null) || (access.key !== null && access.passwordSalt !== null))
+      && (access.expiresAt === null || (typeof access.expiresAt === 'string'
+        && Number.isFinite(Date.parse(access.expiresAt))
+        && new Date(access.expiresAt).toISOString().replace('.000Z', 'Z') === access.expiresAt))),
+    'Invalid meeting share access settings.');
     const value = owner(ownerUserID), file = path.join(value.dir, `${id}.mp4`);
     const state = await mutate(value, state => {
       const item = state.recordings.find(recording => recording.id === id);
@@ -391,7 +400,8 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
       } else {
         if (includeTranscript) check(item.processing.transcriptComplete === true && item.processing.text?.trim()
           && item.processing.segments?.length, 'This recording has no finished transcript to share.');
-        item.share = { ownerUserID, recordingNonce, shareID, includeTranscript: includeTranscript === true, upload: 'pending' };
+        item.share = { ownerUserID, recordingNonce, shareID, includeTranscript: includeTranscript === true,
+          ...(access ? { access: structuredClone(access) } : {}), upload: 'pending' };
       }
       return state;
     });

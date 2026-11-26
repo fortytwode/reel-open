@@ -175,6 +175,22 @@ function renderRecordings() {
       const sharing=recording.shareStatus;
       const shareButton=node('button','',recording.sharing?'Sharing…':sharing==='uploaded'?'Copy share link':sharing?.failed||sharing==='uploading'?(recording.shareIncludesTranscript?'Retry sharing video and transcript':'Retry sharing'):'Share recording');
       shareButton.type='button'; shareButton.disabled=recording.sharing===true; shareButton.dataset.action='shareRecording'; shareButton.dataset.recordingId=recording.id;
+      const initialShare = !sharing;
+      let sharePassword = null, shareExpiry = null;
+      if (initialShare) {
+        const passwordLabel = node('label', 'recording-share-setting', 'Password (optional)');
+        sharePassword = node('input'); sharePassword.type = 'password'; sharePassword.autocomplete = 'off';
+        sharePassword.maxLength = 1024; sharePassword.dataset.sharePassword = recording.id;
+        passwordLabel.append(sharePassword);
+        const expiryLabel = node('label', 'recording-share-setting', 'Link expires');
+        shareExpiry = node('select'); shareExpiry.dataset.shareExpiry = recording.id;
+        for (const [value, label] of [['never', 'Never'], ['hour', 'In 1 hour'], ['day', 'In 1 day'], ['week', 'In 1 week'], ['month', 'In 30 days']]) {
+          const option = node('option', '', label); option.value = value; shareExpiry.append(option);
+        }
+        expiryLabel.append(shareExpiry);
+        left.append(passwordLabel, expiryLabel);
+      }
+      shareButton.sharePasswordInput = sharePassword; shareButton.shareExpiryInput = shareExpiry;
       left.append(shareButton);
       if (recording.processing.transcriptReady && !sharing) {
         const withTranscript = node('button', '', 'Share video and transcript');
@@ -183,6 +199,7 @@ function renderRecordings() {
         withTranscript.dataset.action = 'shareRecording';
         withTranscript.dataset.recordingId = recording.id;
         withTranscript.dataset.includeTranscript = 'true';
+        withTranscript.sharePasswordInput = sharePassword; withTranscript.shareExpiryInput = shareExpiry;
         left.append(withTranscript);
       }
       if(sharing?.failed) left.append(node('div','recording-meta','Sharing failed. Select Retry sharing to try again.'));
@@ -312,7 +329,14 @@ document.addEventListener('click', event=>{
     void perform(action, {expectedOwnerUserID:snapshot?.profile?.userID});
     return;
   }
-  if(action==='shareRecording') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID,...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{})}); return; }
+  if(action==='shareRecording') {
+    const password = target.sharePasswordInput?.value ?? '';
+    const expiry = target.shareExpiryInput?.value ?? 'never';
+    const payload = { id:target.dataset.recordingId, expectedOwnerUserID:snapshot?.profile?.userID,
+      ...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{}), ...(password?{password}:{}), ...(expiry!=='never'?{expiry}:{}) };
+    void perform(action,payload).finally(()=>{ if(target.sharePasswordInput) target.sharePasswordInput.value=''; });
+    return;
+  }
   perform(action);
 });
 function clearMeetingLink() {
