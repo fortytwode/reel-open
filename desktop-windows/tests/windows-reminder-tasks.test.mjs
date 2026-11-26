@@ -52,6 +52,10 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.ps1/);
   assert.match(readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8'),/HH:mm:ss\.fff/,
     'Task Scheduler must keep fractional-second meeting starts.');
+  const taskHelper=readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8');
+  assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
+  assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
+    'Tasks must use the current interactive token at the least-privileged run level.');
   assert.match(msix,/<desktop:ToastNotificationActivation ToastActivatorCLSID="\$toastActivatorClsid" \/>/);
   assert.match(msix,/<com:Class Id="\$toastActivatorClsid" \/>/,
     'The MSIX manifest uses schema-valid unbraced GUID values for Electron toast activation.');

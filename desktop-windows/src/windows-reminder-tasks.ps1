@@ -75,6 +75,7 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         $task.RegistrationInfo.Description = 'Local opt-in Reel meeting reminder.'
         $task.Principal.UserId = $currentSid
         $task.Principal.LogonType = 3 # TASK_LOGON_INTERACTIVE_TOKEN: no stored password.
+        $task.Principal.RunLevel = 0 # TASK_RUNLEVEL_LUA: never request elevation.
         $task.Settings.Enabled = $true
         $task.Settings.StartWhenAvailable = $true
         $task.Settings.DisallowStartIfOnBatteries = $false
