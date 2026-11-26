@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as C from "../../web/reel/core.js";
-import * as store from "../../web/reel/store.js?v=20261119-owner2";
+import * as store from "../../web/reel/store.js?v=20261126-local-import";
 import { Library, Publisher } from "../../web/reel/publisher.js";
 
 const now = new Date("2026-10-29T10:00:00Z");
@@ -109,22 +110,29 @@ function publicationStore() {
   const rows = new Map();
   const files = new Map();
   const db = { transaction(storeName) {
-    const values = storeName === "files" ? files : rows;
-    const tx = { objectStore: () => ({
-      get(id) {
-        const request = {};
-        setImmediate(() => {
-          request.result = structuredClone(values.get(id));
-          request.onsuccess();
+    const tx = { objectStore: (name) => {
+      const values = name === "files" ? files : rows;
+      return {
+        get(id) {
+          const request = {};
+          setImmediate(() => {
+            request.result = structuredClone(values.get(id));
+            request.onsuccess();
+            setImmediate(() => tx.oncomplete?.());
+          });
+          return request;
+        },
+        put(value, id = value.id) {
+          values.set(id, structuredClone(value));
+          if (storeName === "files") setImmediate(() => tx.oncomplete?.());
+        },
+        add(value) {
+          assert.ok(!values.has(value.id));
+          values.set(value.id, structuredClone(value));
           setImmediate(() => tx.oncomplete?.());
-        });
-        return request;
-      },
-      put(value, id = value.id) {
-        values.set(id, structuredClone(value));
-        if (storeName === "files") setImmediate(() => tx.oncomplete?.());
-      },
-    }) };
+        },
+      };
+    } };
     return tx;
   } };
   return { open() {
@@ -138,23 +146,17 @@ const originalIndexedDB = globalThis.indexedDB;
 test.before(() => { globalThis.indexedDB = publicationStore(); });
 test.after(() => { globalThis.indexedDB = originalIndexedDB; });
 
-test("ordinary publication attributes a new copy and leaves the legacy local recording intact", async (t) => {
+test("an explicitly imported clip can be published separately without changing the legacy original", async (t) => {
   const uid = "synthetic-owner";
-  const nonce = "53".repeat(16);
-  const ownerShare = "r2fbd5074190d44167d5d02e71662a28cbd16b3e";
   const legacy = C.newRecording({ id: "legacy-local", shareID: "legacyfixture00000001", title: "Synthetic clip",
     createdAt: now, upload: "uploaded" });
+  legacy.captureState = "complete";
+  legacy.playback.mp4 = true;
   const bytes = new Uint8Array([10, 20, 30]);
   const library = new Library();
   await library.update(legacy);
   await store.putFile(legacy.id, C.File.video, bytes);
   const original = await store.getRow(legacy.id);
-
-  // A new local copy is supplied explicitly. Publishing the copy never claims the legacy share.
-  const copy = C.newRecording({ id: "copy-local", shareID: "copyplaceholder00001", title: legacy.title, createdAt: now });
-  copy.recordingNonce = nonce;
-  await library.update(copy);
-  await store.putFile(copy.id, C.File.video, await store.getFile(legacy.id, C.File.video));
 
   const cfg = { ...C.CLOUD, storageOrigin: "https://storage.invalid", firestoreOrigin: "https://firestore.invalid",
     bucket: "fixture-bucket", projectID: "fixture", firestoreDatabase: "(default)" };
@@ -169,9 +171,32 @@ test("ordinary publication attributes a new copy and leaves the legacy local rec
     }
     return new Response("{}");
   };
-  const publisher = new Publisher({ library, cfg, auth: { session: async () => ({
-    uid, displayName: "Synthetic publisher", getIdToken: async () => "synthetic-token",
-  }) }, settings: () => ({}), ui: { toast() {} } });
+  const session = { uid, displayName: "Synthetic publisher", isCurrent: () => true, getIdToken: async () => "synthetic-token" };
+  const publisher = new Publisher({ library, cfg, auth: { session: async () => session },
+    settings: () => ({ autoUpload: true }), ui: { toast() {} } });
+  const chosenFile = new File([bytes], "Owner-selected clip.mp4", { type: "video/mp4" });
+  const copy = await library.importLocalVideo(chosenFile, { durationSeconds: 4, width: 320, height: 240 }, session);
+  const nonce = copy.recordingNonce;
+  assert.match(nonce, /^[0-9a-f]{32}$/);
+  const ownerShare = "r2" + createHash("sha256").update(`reel-owner-v2:${uid}:${nonce}`).digest("hex").slice(0, 38);
+  assert.notEqual(copy.id, legacy.id);
+  assert.notEqual(copy.shareID, legacy.shareID);
+  assert.equal(copy.shareID, ownerShare);
+  assert.equal(copy.upload, "localOnly");
+  assert.deepEqual(copy.playback, { hls: false, mp4: false });
+  assert.equal(copy.title, "Owner-selected clip");
+  const persistedCopy = C.recordingFromJSON((await store.getRow(copy.id)).json);
+  assert.equal(persistedCopy.recordingOwnerUID, uid);
+  assert.equal(persistedCopy.localImport, true);
+  for (const restrictAccount of [true, false]) {
+    assert.equal(C.canViewLocalRecording(persistedCopy, uid, restrictAccount), true);
+    assert.equal(C.canViewLocalRecording(persistedCopy, "other-account", restrictAccount), false);
+    assert.equal(C.canViewLocalRecording(persistedCopy, null, restrictAccount), false);
+  }
+  assert.deepEqual(copy.access, { key: null, passwordSalt: null, expiresAt: null });
+  assert.equal(copy.durationSeconds, 4);
+  assert.deepEqual(new Uint8Array(await (await store.getFile(copy.id, C.File.video)).arrayBuffer()), bytes);
+  assert.deepEqual(requests, []);
   await publisher.publish(copy);
 
   const published = C.recordingFromJSON((await store.getRow(copy.id)).json);
@@ -192,10 +217,11 @@ test("ordinary publication attributes a new copy and leaves the legacy local rec
     return JSON.parse(manifest.split("\r\n\r\n")[1]);
   });
   assert.deepEqual(manifests.map(({ id, status, title }) => [id, status, title]),
-    [[ownerShare, "processing", legacy.title], [ownerShare, "ready", legacy.title]]);
+    [[ownerShare, "processing", copy.title], [ownerShare, "ready", copy.title]]);
   for (const manifest of manifests) {
     assert.ok(!JSON.stringify(manifest).includes(uid));
     assert.ok(!JSON.stringify(manifest).includes(nonce));
+    assert.equal(Object.hasOwn(manifest, "localImport"), false);
   }
   assert.deepEqual(manifests[1].playback, { hls: false, mp4: true });
 

@@ -6,13 +6,13 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
 import { organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
-import * as C from "./reel/core.js?v=20261119-choice1";
-import * as store from "./reel/store.js?v=20261121-public-signup";
+import * as C from "./reel/core.js?v=20261126-local-import";
+import * as store from "./reel/store.js?v=20261126-local-import";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, CLOUD_CONFIG, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
-import { Library, Publisher, APP } from "./reel/publisher.js?v=20261121-public-signup";
+import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-local-import";
 import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261119-tab1";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
@@ -63,8 +63,7 @@ $("last-copy").addEventListener("click", () => copyText($("last-link").href));
 let auth = null, am = null, user = null;
 let authGeneration = 0;
 function visibleToCurrentAccount(recording) {
-  return !publicSignup || (recording && [recording.recordingOwnerUID, recording.meeting?.ownerUID]
-    .every(owner => !owner || owner === user?.uid));
+  return C.canViewLocalRecording(recording, user?.uid, publicSignup);
 }
 function clearPublicAccountDetails() {
   $("list").replaceChildren();
@@ -103,7 +102,7 @@ async function initAuth() {
     } else if (u) $("auth-msg").hidden = true;
     if (user?.uid !== u?.uid) {
       authGeneration++;
-      if (publicSignup) clearPublicAccountDetails();
+      if (publicSignup || library.list().some(r => r.localImport)) clearPublicAccountDetails();
     }
     user = u;
     const generation = authGeneration;
@@ -549,7 +548,7 @@ function renderList() {
     $("empty").hidden = items.length > 0;
     const frag = document.createDocumentFragment();
     for (const r of items) frag.appendChild(await renderItem(r));
-    if (publicSignup && generation !== authGeneration) return;
+    if (generation !== authGeneration) return;
     list.textContent = "";
     list.appendChild(frag);
   });
@@ -588,7 +587,7 @@ async function renderItem(r) {
     meta.textContent = bits.join(" · ");
     btn("Meeting notes", () => openMeetingNotes(r));
   }
-  if (!busy && !C.isMeeting(r)) {
+  if (!busy && !C.isMeeting(r) && !r.localImport) {
     bits.push(transcriptionProgress.get(r.id) || "Transcript: " + r.transcriptStatus);
     meta.textContent = bits.join(" · ");
     if (r.transcriptStatus === "ready") btn("Transcript", () => downloadTranscript(r.id));
@@ -607,7 +606,7 @@ async function renderItem(r) {
     });
   }
   if (!busy && r.upload === "uploaded") btn("Sharing…", () => openShare(r));
-  if (!busy) btn("Trim…", () => openTrim(r));
+  if (!busy && !r.localImport) btn("Trim…", () => openTrim(r));
   if (!transcriptionJobs.has(r.id) && !publisher.uploads.has(r.id) && !notionJobs.has(r.id) && !(R.recording && R.recording.id === r.id && R.phase !== "idle")) btn("Delete", async () => {
     if (!window.confirm(`Delete “${r.title}”?${C.isMeeting(r) ? " Local video and its portal entry will be removed; Notion notes remain." : ""}${remote ? " The link will stop working." : ""}`)) return;
     if (await publisher.delete(r)) {
@@ -630,6 +629,47 @@ async function download(r) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 }
+
+let importAccount = null;
+const importButton = $("import-video"), localVideoFile = $("local-video-file");
+importButton.addEventListener("click", () => {
+  if (!user) { toast("Sign in to import an MP4.", true); return; }
+  importAccount = { uid: user.uid, generation: authGeneration };
+  localVideoFile.click();
+});
+localVideoFile.addEventListener("change", async () => {
+  const file = localVideoFile.files[0], account = importAccount;
+  localVideoFile.value = "";
+  importAccount = null;
+  if (!file) return;
+  importButton.disabled = true;
+  const video = document.createElement("video");
+  let url;
+  try {
+    const current = await session.session();
+    if (!current || current.uid !== account?.uid || authGeneration !== account.generation) {
+      throw new Error("Your account changed. Choose the file again.");
+    }
+    if (!file.size || !/\.mp4$/i.test(file.name)) throw new Error("Choose a playable MP4 video.");
+    url = URL.createObjectURL(file);
+    video.preload = "metadata";
+    await new Promise((resolve, reject) => {
+      video.onloadedmetadata = resolve;
+      video.onerror = () => reject(new Error("This browser couldn't read that MP4."));
+      video.src = url;
+    });
+    await library.importLocalVideo(file, { durationSeconds: video.duration, width: video.videoWidth, height: video.videoHeight }, current);
+    if (current.isCurrent()) toast("Saved in this browser. Use Upload to create a new share.");
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    video.onloadedmetadata = video.onerror = null;
+    video.removeAttribute("src");
+    video.load();
+    if (url) URL.revokeObjectURL(url);
+    importButton.disabled = false;
+  }
+});
 
 // ---------------------------------------------------------------- local transcription + authenticated meeting Notion delivery
 const transcriptionJobs = new Map();
@@ -676,6 +716,7 @@ async function removeMeetingMetadata(r) {
   if (!response.ok) throw new Error("Portal sync failed");
 }
 function processRecording(recording, { resumeNotes = false } = {}) {
+  if (recording?.localImport) return Promise.resolve();
   if (!recording || !["complete", "recovered"].includes(recording.captureState)) return Promise.resolve();
   if (publicSignup && (C.isMeeting(recording) || !visibleToCurrentAccount(recording))) return Promise.resolve();
   if (transcriptionJobs.has(recording.id)) return transcriptionJobs.get(recording.id);
@@ -1039,11 +1080,11 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) previ
 async function resumeRecordings(ownerUid = null, generation = authGeneration) {
   const autoPublish = !publicSignup || !!ownerUid;
   const isCurrent = () => !publicSignup || !ownerUid || generation === authGeneration;
-  const include = r => !publicSignup || (
+  const include = r => !r.localImport && (!publicSignup || (
     (r.id !== R.recording?.id || R.phase === "idle") &&
     (r.recordingOwnerUID || r.meeting?.ownerUID || null) === ownerUid &&
     visibleToCurrentAccount(r)
-  );
+  ));
   await publisher.recover({ include, isCurrent, autoPublish, expectedOwnerUID: ownerUid });
   if (!isCurrent()) return;
   const rows = library.list().filter(include);
