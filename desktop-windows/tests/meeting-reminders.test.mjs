@@ -144,8 +144,9 @@ test('a fractionally early Windows trigger is re-armed without losing the remind
   assert.equal(records[0].start,'2026-11-26T10:00:00.250Z');
   assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart-1)}),false);
   assert.equal(records.length,1);
-  assert.deepEqual(plan,[{token,start:new Date(fractionalStart+4_999).toISOString()}],
-    'An early task is replaced by a retry five seconds after its early activation, even though its original trigger is consumed.');
+  assert.deepEqual(plan,[{token,start:new Date(fractionalStart+4_999).toISOString(),retry:true,
+    end:new Date(fractionalStart+30*60_000).toISOString()}],
+    'An early task is replaced by an explicit retry bounded by its meeting end.');
   assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart)}),true);
   assert.equal(f.shown.length,1);
 });

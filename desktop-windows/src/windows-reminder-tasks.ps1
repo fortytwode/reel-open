@@ -42,6 +42,15 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         if ($item.token -notmatch '^[a-f0-9]{32}$') { throw 'Invalid reminder task entry.' }
         try { $wanted[$item.token] = [DateTimeOffset]::Parse([string]$item.start).ToUniversalTime() }
         catch { throw 'Invalid reminder task entry.' }
+        $isRetry = $item.PSObject.Properties.Name -contains 'retry' -and $item.retry -eq $true
+        if ($isRetry) {
+            try { $end = [DateTimeOffset]::Parse([string]$item.end).ToUniversalTime() }
+            catch { throw 'Invalid reminder retry entry.' }
+            if ($end -le $wanted[$item.token]) { $null = $wanted.Remove($item.token); continue }
+            $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$end; retry=$true }
+        } else {
+            $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$null; retry=$false }
+        }
     }
     $service = New-TaskService
     $folder = $service.GetFolder('\')
@@ -55,7 +64,12 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     $currentName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     foreach ($token in $wanted.Keys) {
-        $start = $wanted[$token]
+        $entry = $wanted[$token]
+        $start = $entry.start
+        if ($entry.retry -and $start -le [DateTimeOffset]::UtcNow) {
+            $start = [DateTimeOffset]::UtcNow.AddSeconds(15)
+            if ($start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); continue }
+        }
         if ($start -le [DateTimeOffset]::UtcNow) { continue }
         $task = $service.NewTask(0)
         $task.RegistrationInfo.Description = 'Local opt-in Reel meeting reminder.'

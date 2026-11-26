@@ -35,9 +35,12 @@ export function createWindowsReminderTaskManager({ stateRoot, scope, windowsStor
 
   function sync(records) {
     if (!Array.isArray(records) || records.length > 32 || records.some(record => !TOKEN.test(record?.token)
-      || !Number.isFinite(Date.parse(record.start)))) throw TypeError('Invalid Windows reminder task plan');
+      || !Number.isFinite(Date.parse(record.start)) || (record.retry !== undefined && typeof record.retry !== 'boolean')
+      || (record.retry === true && (!Number.isFinite(Date.parse(record.end)) || Date.parse(record.end) <= Date.parse(record.start)))))
+      throw TypeError('Invalid Windows reminder task plan');
     const planPath = path.join(stateRoot, `reminder-task-plan-${randomUUID()}.json`);
-    atomicWrite(planPath, Buffer.from(JSON.stringify(records.map(({ token, start }) => ({ token, start })))));
+    atomicWrite(planPath, Buffer.from(JSON.stringify(records.map(({ token, start, retry, end }) => retry === true
+      ? { token, start, retry: true, end } : { token, start }))));
     try {
       exec('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
         '-Sync', '-PlanPath', planPath, '-Scope', scope], { windowsHide: true, timeout: 30_000, stdio: 'pipe' });

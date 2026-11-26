@@ -29,12 +29,14 @@ try {
   assert.match(info.args, new RegExp(token));
   assert.equal(Date.parse(info.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
   assert.ok(!info.args.includes('private calendar title') && !info.args.includes('private-event-id'));
-  const retryStart=new Date(Date.now()+5_000).toISOString();
-  manager.sync([{token,start:retryStart}]);
+  const retryEnd=new Date(Date.now()+60_000).toISOString();
+  const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
+  manager.sync([{token,start:alreadyDueRetry,retry:true,end:retryEnd}]);
   const retriedJson=command(`$t=Get-ScheduledTask | Where-Object { $_.TaskName -eq '${info.name}' } | Select-Object -First 1; if (-not $t) { exit 2 }; [pscustomobject]@{ name=$t.TaskName; start=$t.Triggers[0].StartBoundary } | ConvertTo-Json -Compress`);
   info=JSON.parse(retriedJson);
   assert.equal(info.name,JSON.parse(taskJson).name,'Rearming replaces the existing one-shot task instead of leaving a consumed task.');
-  assert.equal(Date.parse(info.start),Date.parse(retryStart));
+  assert.ok(Date.parse(info.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
+  assert.ok(Date.parse(info.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
   command(`Start-ScheduledTask -TaskName '${info.name}'`);
   const deadline = Date.now()+15_000;
   while (Date.now()<deadline) {
@@ -46,6 +48,9 @@ try {
     await new Promise(resolve=>setTimeout(resolve,100));
   }
   assert.equal(completed,true,'The registered task runs its trigger action.');
+  manager.sync([{token,start:new Date(Date.now()-10_000).toISOString(),retry:true,end:new Date(Date.now()+2_000).toISOString()}]);
+  const expiredCount=command(`@(Get-ScheduledTask | Where-Object { $_.TaskName -like 'ReelReminder_${scope}_*' }).Count`);
+  assert.equal(Number(expiredCount),0,'No retry task remains when its safe delay would reach the meeting end.');
   if (mode==='msix') {
     assert.match(readFileSync(manager.launchPath,'utf8'),/"mode":"msix"/);
     assert.ok(command("Get-AppxPackage -Name 'RocketShipHQ.Reel' | Select-Object -First 1 -ExpandProperty PackageFamilyName"),

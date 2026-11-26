@@ -50,9 +50,9 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
     const records = [...scheduled.values()].map(({ timer, ...record }) => record);
     try {
       persistence.save(records);
-      persistence.sync(records.filter(record => !record.fired).map(({ token, start }) => ({
-        token, start: token === rearmToken && typeof rearmStart === 'string' ? rearmStart : start
-      })));
+      persistence.sync(records.filter(record => !record.fired).map(({ token, start, end }) => token === rearmToken && typeof rearmStart === 'string'
+        ? { token, start: rearmStart, retry: true, end }
+        : { token, start }));
       lastError = null;
       needsSync = false;
       return true;
