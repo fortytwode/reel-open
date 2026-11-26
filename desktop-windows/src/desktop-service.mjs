@@ -207,10 +207,10 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       } else if(name==='playRecording') {
         const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof openRecording !== 'function') throw Error('Recording is unavailable.');
-        const recording=await store.getShareRecord({ownerUserID,id:payload.id});
+        const file=store.getRecordingPath({ownerUserID,id:payload.id});
         requireOwner(ownerUserID);
-        if (!recording?.path) throw Error('Recording is unavailable.');
-        await openRecording(recording.path);
+        if (!file) throw Error('Recording is unavailable.');
+        await openRecording(file);
       } else if(name==='copyTranscript') {
         const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof copyText !== 'function') throw Error('Transcript is unavailable.');

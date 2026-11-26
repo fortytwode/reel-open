@@ -51,7 +51,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
 }
 test('local playback and transcript copy are restricted to the active recording owner', async () => {
   const f = fixture(), id = 'a'.repeat(32);
-  f.store.getShareRecord = async request => request.ownerUserID === 'owner-a' && request.id === id ? { path: '/private/meeting.mp4' } : null;
+  f.store.getRecordingPath = request => request.ownerUserID === 'owner-a' && request.id === id ? '/private/meeting.mp4' : null;
   f.store.getProcessing = request => request.ownerUserID === 'owner-a' && request.id === id ? { transcriptComplete: true, text: 'Meeting transcript' } : null;
   await f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' });
   await f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-a' });

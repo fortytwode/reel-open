@@ -166,6 +166,15 @@ test('handles partial writes and never completes after a failed sync', async t =
   assert.deepEqual(bad.store.list('owner'), []);
 });
 
+test('local playback resolves only an owned recording including older rows without meeting metadata', async t => {
+  const { store } = await fixture(t);
+  const writer = await recorded(store, 'owner');
+  const recording = await writer.finish({ durationSeconds: 9 });
+  assert.equal(store.getRecordingPath({ ownerUserID: 'owner', id: recording.id }), recording.path);
+  assert.equal(store.getRecordingPath({ ownerUserID: 'other', id: recording.id }), null);
+  assert.throws(() => store.getRecordingPath({ ownerUserID: 'owner', id: '../escape' }));
+});
+
 test('settings and durable completion deduplication remain bound to each owner', async t => {
   const { root, store } = await fixture(t);
   assert.deepEqual(store.getSettings('owner'), { ownerUserID: 'owner', autoJoin: false, participantConsent: false,

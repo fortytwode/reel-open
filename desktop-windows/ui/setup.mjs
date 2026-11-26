@@ -121,9 +121,9 @@ function renderRecordings() {
   for (const recording of recordings) { const row=node('div','recording-row'); const left=node('div'); left.append(node('div','recording-name',recording.title || 'Recording'));
     const duration=Number.isFinite(recording.durationSeconds)?`${Math.floor(recording.durationSeconds/60)} min`:'';
     left.append(node('div','recording-meta',[formatDate(recording.createdAt),duration].filter(Boolean).join(' · ')));
+    const play=node('button','','Play recording');
+    play.type='button'; play.dataset.action='playRecording'; play.dataset.recordingId=recording.id; left.append(play);
     if(recording.processing) {
-      const play=node('button','','Play recording');
-      play.type='button'; play.dataset.action='playRecording'; play.dataset.recordingId=recording.id; left.append(play);
       if(recording.processing.transcriptReady) {
         const transcript=node('button','','Copy transcript');
         transcript.type='button'; transcript.dataset.action='copyTranscript'; transcript.dataset.recordingId=recording.id; left.append(transcript);
