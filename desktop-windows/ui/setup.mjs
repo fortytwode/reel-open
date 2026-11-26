@@ -220,6 +220,7 @@ function renderRecordings() {
       } else if (sharing === 'uploaded' || recording.shareAccess?.updatePending) {
         const access=recording.shareAccess ?? {};
         left.append(node('div','recording-meta',`${access.passwordProtected?'Password protected':'No password'} · ${access.expiresAt?`expires ${new Date(access.expiresAt).toLocaleString()}`:'never expires'}`));
+        if(access.updatePending) left.append(node('div','recording-meta','The previous link may remain accessible until this update succeeds. Retry to finish applying the new settings.'));
         const passwordLabel=node('label','recording-share-setting','New password (leave blank to keep current; at least 12 characters)');
         sharePassword=node('input');sharePassword.type='password';sharePassword.autocomplete='new-password';sharePassword.maxLength=1024;
         sharePassword.minLength=12;sharePassword.dataset.sharePassword=recording.id;passwordLabel.append(sharePassword);

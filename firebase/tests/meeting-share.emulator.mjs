@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth, connectAuthEmulator, GoogleAuthProvider, signInWithCredential } from 'firebase/auth';
+import { getFirestore, connectFirestoreEmulator, collection, addDoc, serverTimestamp, getDocs } from 'firebase/firestore';
 import * as C from '../../web/reel/core.js';
 import { FirestoreClient, StorageClient } from '../../web/reel/cloud.js';
 import { createLocalRecordingStore } from '../../desktop-windows/src/local-recordings.mjs';
@@ -149,16 +150,38 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   // Change access on the already-published URL. The former key is expired before
   // a replacement is written; an interrupted migration remains safely retryable.
   const replacementPassword='meeting-access-456';
-  const changed=await share.updateAccess({ownerUserID:ownerID,id,password:replacementPassword});
+  let failOnOldRevocation=1,oldRevocationCalls=0;
+  const failingOldShare=createMeetingShare({auth:shareAuth,store,org,cfg,
+    storageFactory:(session,cloudCfg,nonce)=>{
+      const client=new StorageClient(session,cloudCfg,nonce);
+      return new Proxy(client,{get(target,keyName){
+        if(keyName==='setExpiry') return async(...args)=>{oldRevocationCalls++;if(oldRevocationCalls===failOnOldRevocation)throw Error('injected old-key expiry failure');return target.setExpiry(...args);};
+        const value=target[keyName];return typeof value==='function'?value.bind(target):value;
+      }});
+    },firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
+  await assert.rejects(failingOldShare.updateAccess({ownerUserID:ownerID,id,password:replacementPassword}),/injected old-key expiry failure/);
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,key,cfg))).ok,true,
+    'If the first old-key revocation fails, the previous keyed video remains readable.');
+  const interimOldStub=await (await fetch(C.downloadURL(shareID,C.File.meta,null,cfg))).json();
+  assert.equal(interimOldStub.locked,true);assert.equal(Object.hasOwn(interimOldStub,'title'),false);
+  failOnOldRevocation=2;oldRevocationCalls=0;
+  await assert.rejects(failingOldShare.updateAccess({ownerUserID:ownerID,id}),/injected old-key expiry failure/);
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,key,cfg))).ok,false,
+    'A mid-revocation failure leaves the already-expired old video denied.');
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.transcriptJSON,key,cfg))).ok,true,
+    'A mid-revocation failure can leave a later old-key transcript readable.');
+  failOnOldRevocation=0;oldRevocationCalls=0;
+  const changed=await failingOldShare.updateAccess({ownerUserID:ownerID,id});
   assert.equal(changed.url,result.url,'Access updates preserve the published viewer URL.');
   let afterChange=await store.getShareRecord({ownerUserID:ownerID,id});
-  const replacementKey=afterChange.share.access.key, replacementSalt=afterChange.share.access.passwordSalt;
+  let replacementKey=afterChange.share.access.key;const replacementSalt=afterChange.share.access.passwordSalt;
   assert.equal(await C.deriveKey(replacementPassword,replacementSalt),replacementKey);
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,key,cfg))).ok,false,'The prior password location must be revoked.');
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,replacementKey,cfg))).ok,true,'The replacement password location must play.');
   assert.equal(await ownerCloud.ownsRoom(C.room(shareID,key)),false,'The prior comments room must be retired.');
   assert.equal(await ownerCloud.ownsRoom(C.room(shareID,replacementKey)),true);
 
+  const ownerDB=getFirestore(ownerApp.app,'reel');connectFirestoreEmulator(ownerDB,'127.0.0.1',firestorePort);
   // Persist a pending derived key, fail before uploading new media, and retry from a
   // freshly opened local store to exercise restart recovery without plaintext passwords.
   let injectFailure=true;
@@ -189,6 +212,40 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,pendingKey,cfg))).ok,true);
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,replacementKey,cfg))).ok,false);
 
+  const comments=collection(ownerDB,'videos',C.room(shareID,pendingKey),'comments');
+  const reactions=collection(ownerDB,'videos',C.room(shareID,pendingKey),'reactions');
+  await addDoc(comments,{text:'First migration comment',t:1,uid:ownerID,name:'Synthetic owner',photoURL:null,createdAt:serverTimestamp()});
+  await addDoc(comments,{text:'Second migration comment',t:2,uid:ownerID,name:'Synthetic owner',photoURL:null,createdAt:serverTimestamp()});
+  await addDoc(reactions,{emoji:'👍',t:1,createdAt:serverTimestamp()});
+  // Simulate a transport error after Firestore accepted the first copied item.
+  // A retry must keep that stable document ID and continue without duplicates.
+  const nativeFetch=globalThis.fetch;let threwAfterCopy=false;
+  globalThis.fetch=async(input,init)=>{
+    const response=await nativeFetch(input,init),url=String(input?.url??input);
+    if(!threwAfterCopy&&init?.method==='PATCH'&&/\/videos\/[^/]+\/(comments|reactions)\/[^/]+$/.test(url)&&response.ok) {
+      threwAfterCopy=true;throw Error('injected error after partial Firestore copy');
+    }
+    return response;
+  };
+  try {
+    await assert.rejects(restartedShare.updateAccess({ownerUserID:ownerID,id,password:'meeting-access-999'}),/injected error after partial Firestore copy/);
+  } finally { globalThis.fetch=nativeFetch; }
+  assert.ok(threwAfterCopy,'The failure must happen after a destination document was created.');
+  let partialMigration=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  assert.ok(partialMigration.share.accessUpdate);
+  const partialRoom=C.room(shareID,partialMigration.share.accessUpdate.to.key);
+  assert.equal((await getDocs(collection(ownerDB,'videos',partialRoom,'reactions'))).size,1,
+    'The injected failure leaves one copied reaction in the destination.');
+  assert.equal(await ownerCloud.ownsRoom(C.room(shareID,pendingKey)),true,'The source room remains for retry.');
+  await restartedShare.updateAccess({ownerUserID:ownerID,id});
+  partialMigration=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  const migratedRoom=C.room(shareID,partialMigration.share.access.key);
+  assert.equal((await getDocs(collection(ownerDB,'videos',migratedRoom,'reactions'))).size,1,
+    'Retry reuses the copied reaction document rather than duplicating it.');
+  assert.equal((await getDocs(collection(ownerDB,'videos',migratedRoom,'comments'))).size,2,
+    'Retry copies the remaining comments exactly once.');
+  assert.equal(await ownerCloud.ownsRoom(C.room(shareID,pendingKey)),false);
+
   const expiryUpdate=await restartedShare.updateAccess({ownerUserID:ownerID,id,expiry:'hour'});
   assert.equal(expiryUpdate.url,result.url);
   afterChange=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
@@ -215,31 +272,42 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   await writeFile(path.join(openOwnerPath,'library.json'),JSON.stringify({version:1,ownerUserID:ownerID,
     settings:{ownerUserID:ownerID,autoJoin:false,participantConsent:false,systemAudioConsent:false,meetingReminders:false,selection:{useAll:true,ids:[]}},
     completed:{},recordings:[{id:openID,title:'Synthetic open meeting',createdAt:'2026-11-26T10:00:00.000Z',durationSeconds:3,width:640,height:360,
-      processing:{phase:'completed',meeting:{},transcriptComplete:false}}]}));
+      processing:{phase:'completed',meeting:{},transcriptComplete:true,text:'Open transcript test',language:'en',engine:'test',timingGranularity:'chunk',
+        segments:[{start:0,end:2,text:'Open transcript test'}]}}]}));
   const openStore=createLocalRecordingStore({root:openStoreRoot});
   const openMeetingShare=createMeetingShare({auth:shareAuth,store:openStore,org,cfg,
     storageFactory:(session,cloudCfg,nonce)=>new StorageClient(session,cloudCfg,nonce),
     firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
-  const publicResult=await openMeetingShare.share({ownerUserID:ownerID,id:openID,expiry:'week'});
+  const publicResult=await openMeetingShare.share({ownerUserID:ownerID,id:openID,includeTranscript:true,expiry:'week'});
   const publicBound=await openStore.getShareRecord({ownerUserID:ownerID,id:openID});
   const publicShareID=publicBound.share.shareID;
   assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,true,'The source meeting starts publicly readable.');
-  let failOpenUpdate=true;
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.transcriptText,null,cfg))).ok,true,'The public source transcript starts readable.');
+  let failOnRevocation=1,revocationCalls=0;
   const failingOpenShare=createMeetingShare({auth:shareAuth,store:openStore,org,cfg,
     storageFactory:(session,cloudCfg,nonce)=>{
       const client=new StorageClient(session,cloudCfg,nonce);
       return new Proxy(client,{get(target,keyName){
-        if(keyName==='uploadLarge') return async(...args)=>{if(failOpenUpdate){failOpenUpdate=false;throw Error('injected public-to-protected failure');}return target.uploadLarge(...args);};
+        if(keyName==='setExpiry') return async(...args)=>{revocationCalls++;if(revocationCalls===failOnRevocation)throw Error('injected public-to-protected expiry failure');return target.setExpiry(...args);};
         const value=target[keyName];return typeof value==='function'?value.bind(target):value;
       }});
     },firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
-  await assert.rejects(failingOpenShare.updateAccess({ownerUserID:ownerID,id:openID,password:'protect-this-meeting-123'}),/injected public-to-protected failure/);
+  await assert.rejects(failingOpenShare.updateAccess({ownerUserID:ownerID,id:openID,password:'protect-this-meeting-123'}),/injected public-to-protected expiry failure/);
   const publicPending=await openStore.getShareRecord({ownerUserID:ownerID,id:openID});
   assert.ok(publicPending.share.accessUpdate);
-  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,false,
-    'Previously public video is expired before replacement publication begins.');
   const interimStub=await (await fetch(C.downloadURL(publicShareID,C.File.meta,null,cfg))).json();
   assert.equal(interimStub.locked,true);assert.equal(Object.hasOwn(interimStub,'title'),false);
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,true,
+    'If the first object revocation fails, the old public video remains directly readable.');
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.transcriptText,null,cfg))).ok,true,
+    'The old public transcript remains directly readable after first-object failure.');
+  failOnRevocation=2;revocationCalls=0;
+  await assert.rejects(failingOpenShare.updateAccess({ownerUserID:ownerID,id:openID}),/injected public-to-protected expiry failure/);
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,false,
+    'A mid-revocation failure leaves the already-expired video denied.');
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.transcriptText,null,cfg))).ok,true,
+    'A mid-revocation failure can leave a later public transcript object readable.');
+  failOnRevocation=0;revocationCalls=0;
   const openRetryStore=createLocalRecordingStore({root:openStoreRoot});
   const openRetry=createMeetingShare({auth:shareAuth,store:openRetryStore,org,cfg,
     storageFactory:(session,cloudCfg,nonce)=>new StorageClient(session,cloudCfg,nonce),
@@ -252,8 +320,9 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,protectedPublicKey,cfg))).ok,true);
   console.log(JSON.stringify({result:'PASS',ownerBoundRoom:true,otherOwnerDenied:true,privateLibraryDenied:true,
     passwordDeniedThenAccepted:true,publicMetadataStubOnly:true,publicMediaDenied:true,expiryPublished:true,
-    accessPasswordChanged:true,oldAccessRevoked:true,expiryUpdated:true,passwordRemoved:true,failureRetrySurvivesRestart:true,
-    publicToProtected:true,publicPathRevokedBeforeFailureRetry:true,videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
+    accessPasswordChanged:true,oldAccessRevoked:true,oldKeyAccessCanPersistDuringFailedRevocation:true,expiryUpdated:true,passwordRemoved:true,failureRetrySurvivesRestart:true,
+    partialFirestoreMigrationRetryIsIdempotent:true,
+    publicToProtected:true,publicAccessRemainsPossibleDuringFailedRevocation:true,videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
   await context.close();
 } finally {
   await browser?.close().catch(()=>{});

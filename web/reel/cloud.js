@@ -8,6 +8,9 @@ export class CloudError extends Error {
   constructor(message, permanent = false) { super(message); this.permanent = permanent; }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const stableJSON = value => Array.isArray(value) ? `[${value.map(stableJSON).join(',')}]`
+  : value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJSON(value[key])}`).join(',')}}`
+    : JSON.stringify(value);
 
 /** session: {getIdToken(): Promise<string>, uid, email, displayName} */
 export async function send(req, { timeout = 60000 } = {}) {
@@ -166,6 +169,20 @@ export class FirestoreClient {
     } while (token);
     return out;
   }
+  async migrateDocument(rq, roomID, collection, document, fields) {
+    const id = typeof document?.name === "string" ? document.name.slice(document.name.lastIndexOf("/") + 1) : "";
+    if (!/^[A-Za-z0-9_-]{1,150}$/.test(id)) throw new CloudError(`Couldn't migrate ${collection}: invalid document ID`);
+    const url = `${rq.documentsBase}/videos/${encodeURIComponent(roomID)}/${collection}/${encodeURIComponent(id)}`;
+    const existing = await this.call(rq.request(url, "GET"));
+    if (existing.res.ok) {
+      if (stableJSON(existing.json?.fields ?? {}) !== stableJSON(fields))
+        throw new CloudError(`Couldn't migrate ${collection}: destination document ID is already in use`);
+      return; // Stable source ID makes a partially completed retry idempotent.
+    }
+    if (existing.res.status !== 404) throw new CloudError(`Couldn't check migrated ${collection} (HTTP ${existing.res.status})`);
+    const { res } = await this.call(rq.request(url, "PATCH", C.FirestoreRequests.body(fields)));
+    if (!res.ok) throw new CloudError(`Couldn't migrate ${collection} (HTTP ${res.status})`);
+  }
   /** Views, reactions and comments move to the new room (password changed); the old one is deleted. */
   async migrate(oldRoom, newRoom, createdAt, expiresAt, recordingNonce = null) {
     const source = await this.call((await this.requests()).getRoom(oldRoom)).catch(() => null);
@@ -179,8 +196,8 @@ export class FirestoreClient {
       const { res: updated } = await this.call(rq.setRoomTitle(newRoom, title));
       if (!updated.ok) throw new CloudError(`Couldn't preserve the shared title (HTTP ${updated.status})`);
     }
-    for (const d of await this.list(oldRoom, "reactions")) await send(rq.create(newRoom, "reactions", d.fields));
-    for (const d of await this.list(oldRoom, "comments")) await send(rq.create(newRoom, "comments", { ...d.fields, migrated: C.FV.bool(true) }));
+    for (const d of await this.list(oldRoom, "reactions")) await this.migrateDocument(rq, newRoom, "reactions", d, d.fields);
+    for (const d of await this.list(oldRoom, "comments")) await this.migrateDocument(rq, newRoom, "comments", d, { ...d.fields, migrated: C.FV.bool(true) });
     await this.deleteRoom(oldRoom);
   }
   async deleteRoom(roomID) {

@@ -305,6 +305,8 @@ test('a failed access migration offers its safe retry and disables the old share
   const retry=controls.find(child=>child.dataset.action==='updateMeetingShareAccess');
   assert.equal(oldShare.textContent,'Link update pending');assert.equal(oldShare.disabled,true);
   assert.equal(retry.textContent,'Retry link settings update');
+  assert.ok(controls.some(child=>/previous link may remain accessible until this update succeeds/i.test(child.textContent)),
+    'The failure state must warn that earlier access can persist until the retry completes.');
   onClick({target:{closest:selector=>selector==='[data-action]'?oldShare:null}});
   assert.equal(calls.length,0,'A pending update cannot fall back to publishing with old access.');
 });

@@ -247,8 +247,11 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
         await storage.upload(bound.shareID,C.File.meta,C.encodeJSON(to.key?C.lockedStub(bound.shareID,to.passwordSalt,expiresAt,'ready'):C.remoteMeta(remote,'ready',profile.displayName||profile.email,'Reel Windows meeting')),
           {key:null,options:targetOptions});current(ownerUserID);
       } else if(to.key) {
-        // Revoke direct reads from the old public or keyed location before copying. A failed
-        // migration is unavailable until retried, but never leaves an unprotected copy readable.
+        // Publish the locked stub before revoking old objects so the ordinary viewer
+        // immediately requires the new password. Storage authorizes each object separately,
+        // so direct old-object reads may remain until every expiry update succeeds.
+        await storage.upload(bound.shareID,C.File.meta,C.encodeJSON(C.lockedStub(bound.shareID,to.passwordSalt,expiresAt,'processing')),
+          {key:null,options:targetOptions});current(ownerUserID);
         await setLocationExpiry(from.key,priorExpiry,oldFiles);current(ownerUserID);
         await firestore.setExpiry(oldRoom,priorExpiry);current(ownerUserID);
         await writeProtected();
