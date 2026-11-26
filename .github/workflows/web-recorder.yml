@@ -51,6 +51,11 @@ jobs:
       - name: Unit tests (core port vs Mac fixtures, fMP4)
         working-directory: firebase/tests
         run: npm run unit
+      - name: Verify separate Recorder and Notetaker apps
+        working-directory: firebase/tests
+        env:
+          REEL_BROWSER: ${{ matrix.browser }}
+        run: npm run notetaker-browser
       - name: Browser versions
         shell: pwsh
         run: |
