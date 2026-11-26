@@ -196,7 +196,19 @@ function fragmentTracks(bytes, index, tracks) {
  */
 export function createLocalRecordingStore({ root, io: overrides } = {}) {
   check(text(root), 'A local recordings root is required');
-  const directory = path.resolve(root), io = { ...fileIO, ...overrides }, owners = new Map();
+  const directory = path.resolve(root), io = { ...fileIO, ...overrides }, owners = new Map(), recordingLocks = new Map();
+  function withRecordingLock({ ownerUserID, id } = {}, operation) {
+    check(text(ownerUserID, 1024) && /^[0-9a-f]{32}$/.test(id ?? '') && typeof operation === 'function', 'Invalid local recording operation.');
+    const key = JSON.stringify([ownerUserID, id]), previous = recordingLocks.get(key) ?? Promise.resolve();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => gate);
+    recordingLocks.set(key, tail);
+    return previous.catch(() => {}).then(operation).finally(() => {
+      release();
+      if (recordingLocks.get(key) === tail) recordingLocks.delete(key);
+    });
+  }
   function owner(ownerUserID) {
     check(text(ownerUserID, 1024), 'Invalid recording owner');
     if (owners.has(ownerUserID)) return owners.get(ownerUserID);
@@ -329,6 +341,54 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     return { id, appendInit, appendFragment, appendAudio, failAudio, finish, abort };
   }
   function list(ownerUserID) { return owner(ownerUserID).state.recordings.slice().reverse().map(metadata); }
+  async function rename({ ownerUserID, expectedOwnerUserID, id, title, isCurrent = () => true } = {}) {
+    check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The recording owner changed.');
+    check(/^[0-9a-f]{32}$/.test(id ?? '') && typeof title === 'string' && title.trim().length > 0 && title.trim().length <= 200,
+      'Enter a recording title of 1 to 200 characters.');
+    return withRecordingLock({ ownerUserID, id }, async () => {
+      const state = await mutate(owner(ownerUserID), state => {
+        check(isCurrent(), 'The account changed. Refresh your recordings.');
+        const item = state.recordings.find(recording => recording.id === id);
+        check(item, 'This saved recording is unavailable.');
+        item.title = title.trim();
+        if (item.processing) item.processing.title = item.title;
+        return state;
+      });
+      return metadata(state.recordings.find(recording => recording.id === id));
+    });
+  }
+  async function deleteRecording({ ownerUserID, expectedOwnerUserID, id, isCurrent = () => true, localOnlyConfirmed = false } = {}) {
+    check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The recording owner changed.');
+    check(localOnlyConfirmed === true, 'Confirm that this action deletes only the local copy.');
+    check(/^[0-9a-f]{32}$/.test(id ?? ''), 'Invalid local recording.');
+    return withRecordingLock({ ownerUserID, id }, async () => {
+      check(isCurrent(), 'The account changed. Refresh your recordings.');
+      const value = owner(ownerUserID), paths = [path.join(value.dir, `${id}.mp4`), path.join(value.dir, `${id}.pcm`)];
+      const staged = [];
+      // Move media aside first. If the atomic library update fails, restore the files.
+      try {
+        for (const file of paths) {
+          const temporary = `${file}.${randomBytes(12).toString('hex')}.deleting`;
+          try { await io.rename(file, temporary); staged.push([file, temporary]); }
+          catch (error) { if (error.code !== 'ENOENT') throw error; }
+        }
+        await mutate(value, state => {
+          check(isCurrent(), 'The account changed. Refresh your recordings.');
+          const index = state.recordings.findIndex(recording => recording.id === id);
+          check(index >= 0, 'This saved recording is unavailable.');
+          state.recordings.splice(index, 1);
+          return state;
+        });
+      } catch (error) {
+        for (const [file, temporary] of staged.reverse()) await io.rename(temporary, file).catch(() => {});
+        throw error;
+      }
+      // A leftover private tombstone is never listed or processed. Surface cleanup
+      // failures while keeping the deleted metadata from being resurrected.
+      await Promise.all(staged.map(([, temporary]) => io.unlink(temporary)));
+      return { deleted: true, localOnly: true };
+    });
+  }
   function getSettings(ownerUserID) { return structuredClone(owner(ownerUserID).state.settings); }
   async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, selection } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The settings owner changed');
@@ -377,10 +437,19 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     return { id, title: item.title, createdAt: item.createdAt, durationSeconds: item.durationSeconds,
       ...dimensions, path: file, meeting: true, share: item.share ? structuredClone(item.share) : null };
   }
-  async function bindShare({ ownerUserID, expectedOwnerUserID, id, recordingNonce, shareID, includeTranscript = false } = {}) {
+  async function bindShare({ ownerUserID, expectedOwnerUserID, id, recordingNonce, shareID, includeTranscript = false,
+    access = null } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The meeting owner changed.');
     check(/^[0-9a-f]{32}$/.test(id ?? '') && /^[0-9a-f]{32}$/.test(recordingNonce ?? '')
       && /^r2[0-9a-f]{38}$/.test(shareID ?? ''), 'Invalid meeting share binding.');
+    check(access === null || (access && typeof access === 'object' && !Array.isArray(access)
+      && (access.key === null || /^[0-9a-f]{32}$/.test(access.key ?? ''))
+      && (access.passwordSalt === null || /^[0-9a-f]{32}$/.test(access.passwordSalt ?? ''))
+      && ((access.key === null && access.passwordSalt === null) || (access.key !== null && access.passwordSalt !== null))
+      && (access.expiresAt === null || (typeof access.expiresAt === 'string'
+        && Number.isFinite(Date.parse(access.expiresAt))
+        && new Date(access.expiresAt).toISOString().replace('.000Z', 'Z') === access.expiresAt))),
+    'Invalid meeting share access settings.');
     const value = owner(ownerUserID), file = path.join(value.dir, `${id}.mp4`);
     const state = await mutate(value, state => {
       const item = state.recordings.find(recording => recording.id === id);
@@ -391,7 +460,8 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
       } else {
         if (includeTranscript) check(item.processing.transcriptComplete === true && item.processing.text?.trim()
           && item.processing.segments?.length, 'This recording has no finished transcript to share.');
-        item.share = { ownerUserID, recordingNonce, shareID, includeTranscript: includeTranscript === true, upload: 'pending' };
+        item.share = { ownerUserID, recordingNonce, shareID, includeTranscript: includeTranscript === true,
+          ...(access ? { access: structuredClone(access) } : {}), upload: 'pending' };
       }
       return state;
     });
@@ -419,5 +489,5 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     check(item?.processing?.audioFrames > 0, 'Meeting audio is unavailable');
     return { path: path.join(value.dir, `${id}.pcm`), sampleRate: 16000, channels: 1, frameCount: item.processing.audioFrames };
   }
-  return { begin, list, getRecordingPath, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, getShareRecord, bindShare, saveShareState, listProcessing, saveProcessing, getAudioInfo };
+  return { begin, list, rename, deleteRecording, withRecordingLock, getRecordingPath, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, getShareRecord, bindShare, saveShareState, listProcessing, saveProcessing, getAudioInfo };
 }

@@ -3,9 +3,10 @@ import * as C from '../../web/reel/core.js';
 import { StorageClient, FirestoreClient } from '../../web/reel/cloud.js';
 
 const check = (value, message) => { if (!value) throw Error(message); };
+const MIN_PASSWORD_LENGTH = 12;
 
 /** Explicit, main-process-only sharing for completed local meeting recordings. */
-export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {}, copy = () => {},
+export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {}, copy = () => {}, now = () => new Date(),
   storageFactory = (session, cfg, nonce) => new StorageClient(session, cfg, nonce),
   firestoreFactory = (session, cfg) => new FirestoreClient(session, cfg) } = {}) {
   check(typeof auth?.getProfile === 'function' && typeof auth?.getIdToken === 'function'
@@ -20,7 +21,7 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
       'Sign in as the meeting owner to share this recording.');
   }
   const active = new Map();
-  async function runShare({ ownerUserID, id, includeTranscript = false }) {
+  async function runShare({ ownerUserID, id, includeTranscript = false, password = '', expiry = 'never' }) {
     current(ownerUserID);
     const record = await store.getShareRecord({ ownerUserID, id });
     check(record?.meeting === true, 'This saved meeting recording is unavailable.');
@@ -28,11 +29,35 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
     let published=false;
     try {
       if (!bound) {
+        check(typeof password === 'string' && password.length <= 1024, 'Invalid recording password.');
+        let key = null, passwordSalt = null;
+        if (password) {
+          check(password.length >= MIN_PASSWORD_LENGTH,
+            `Use at least ${MIN_PASSWORD_LENGTH} characters for the recording password.`);
+          passwordSalt = C.newSalt();
+          key = await C.deriveKey(password, passwordSalt);
+          check(C.isValidKey(key), "Couldn't derive a key from that password.");
+        }
+        check(typeof expiry === 'string' && Object.hasOwn(C.EXPIRY_OPTIONS, expiry), 'Choose a valid link expiry.');
+        const expiresAt = C.expiryDate(expiry, now());
         const recordingNonce = C.newRecordingNonce();
         const shareID = await C.ownerShareID(ownerUserID, recordingNonce);
         current(ownerUserID);
-        bound = await store.bindShare({ ownerUserID, expectedOwnerUserID: ownerUserID, id, recordingNonce, shareID, includeTranscript: includeTranscript === true });
+        bound = await store.bindShare({ ownerUserID, expectedOwnerUserID: ownerUserID, id, recordingNonce, shareID,
+          includeTranscript: includeTranscript === true,
+          access: { key, passwordSalt, expiresAt: expiresAt ? C.iso8601(expiresAt) : null } });
       }
+      const access = bound.access && typeof bound.access === 'object' ? bound.access : { key: null, passwordSalt: null, expiresAt: null };
+      check((access.key === null || C.isValidKey(access.key))
+        && (access.passwordSalt === null || /^[0-9a-f]{32}$/.test(access.passwordSalt))
+        && ((access.key === null && access.passwordSalt === null) || (access.key !== null && access.passwordSalt !== null))
+        && (access.expiresAt == null || (typeof access.expiresAt === 'string'
+          && Number.isFinite(Date.parse(access.expiresAt))
+          && new Date(access.expiresAt).toISOString().replace('.000Z', 'Z') === access.expiresAt)),
+      'This recording has invalid saved sharing settings.');
+      const expiresAt = access.expiresAt == null ? null : new Date(access.expiresAt);
+      check(!expiresAt || (Number.isFinite(expiresAt.getTime()) && expiresAt.getTime() > now().getTime()),
+        'This share has expired and cannot be resumed.');
       current(ownerUserID);
       if (bound.upload === 'uploaded') {
         published=true;
@@ -47,7 +72,8 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
       const title=String(record.title??'').trim().slice(0,500)||'Meeting';
       const remote = C.newRecording({ id, shareID: bound.shareID, title, createdAt: date, mode: 'window', upload: 'uploaded' });
       Object.assign(remote, { durationSeconds: record.durationSeconds, width: record.width, height: record.height,
-        captureState: 'complete', transcriptStatus: 'none', playback: { hls: false, mp4: true }, meeting: {} });
+        captureState: 'complete', transcriptStatus: 'none', playback: { hls: false, mp4: true }, meeting: {},
+        access: { key: access.key, passwordSalt: access.passwordSalt, expiresAt } });
       let transcript;
       if (bound.includeTranscript === true) {
         const processing = store.getProcessing({ ownerUserID, id });
@@ -69,24 +95,38 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
         getIdToken: async () => { current(ownerUserID); const token = await auth.getIdToken(); current(ownerUserID); return token; } };
       const storage = storageFactory(session, cfg, bound.recordingNonce);
       const firestore = firestoreFactory(session, cfg);
-      await firestore.ensureRoom(C.recordingRoom(remote), date, null, 0, bound.recordingNonce);
+      await firestore.ensureRoom(C.recordingRoom(remote), date, expiresAt, 0, bound.recordingNonce);
       current(ownerUserID);
+      const uploadOptions = { key: access.key, options: { expiresAt } };
+      if (access.key) {
+        await storage.upload(bound.shareID, C.File.meta,
+          C.encodeJSON(C.lockedStub(bound.shareID, access.passwordSalt, expiresAt, 'processing')),
+          { key: null, options: { expiresAt } });
+        current(ownerUserID);
+      }
       const video = await openAsBlob(record.path, { type: 'video/mp4' });
       check(video.size>0,'The saved meeting video is empty.');
       current(ownerUserID);
       await storage.uploadLarge(bound.shareID, C.File.video, video, {
-        options: { contentDisposition: C.attachmentDisposition(title) },
+        ...uploadOptions, options: { ...uploadOptions.options, contentDisposition: C.attachmentDisposition(title) },
       });
       current(ownerUserID);
       if (transcript) {
-        await storage.upload(bound.shareID, C.File.transcriptJSON, C.encodeJSON(transcript));
+        await storage.upload(bound.shareID, C.File.transcriptJSON, C.encodeJSON(transcript), uploadOptions);
         current(ownerUserID);
-        await storage.upload(bound.shareID, C.File.transcriptText, C.transcriptText(transcript));
+        await storage.upload(bound.shareID, C.File.transcriptText, C.transcriptText(transcript), uploadOptions);
         current(ownerUserID);
       }
       await storage.upload(bound.shareID, C.File.meta,
-        C.encodeJSON(C.remoteMeta(remote, 'ready', profile.displayName || profile.email, 'Reel Windows meeting')));
+        C.encodeJSON(C.remoteMeta(remote, 'ready', profile.displayName || profile.email, 'Reel Windows meeting')),
+        uploadOptions);
       current(ownerUserID);
+      if (access.key) {
+        await storage.upload(bound.shareID, C.File.meta,
+          C.encodeJSON(C.lockedStub(bound.shareID, access.passwordSalt, expiresAt, 'ready')),
+          { key: null, options: { expiresAt } });
+        current(ownerUserID);
+      }
       await firestore.upsertLibraryEntry(remote);
       current(ownerUserID);
       await store.saveShareState({ ownerUserID, expectedOwnerUserID: ownerUserID, id, shareID: bound.shareID, upload: 'uploaded' });
@@ -101,7 +141,9 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
   function share(args) {
     const key = `${args?.ownerUserID}:${args?.id}`;
     if (active.has(key)) return active.get(key);
-    const task = runShare(args).finally(() => active.delete(key));
+    const task = (store.withRecordingLock
+      ? store.withRecordingLock({ ownerUserID: args?.ownerUserID, id: args?.id }, () => runShare(args))
+      : runShare(args)).finally(() => active.delete(key));
     active.set(key, task); return task;
   }
   return { share };

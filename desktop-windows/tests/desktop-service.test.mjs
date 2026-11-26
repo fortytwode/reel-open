@@ -66,13 +66,15 @@ test('MSIX product launch arguments select the configured Recorder and Notetaker
 function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
-  const settings = new Map(), calls = [], writes = [], snapshots = [], listeners = new Set();
+  const settings = new Map(), recordings = [], calls = [], writes = [], snapshots = [], listeners = new Set();
   const notify = () => { for (const listener of listeners) listener(); };
   const auth = { getIdToken: async () => "fixture", getProfile: () => profile, onStateChange: fn => { listeners.add(fn); return () => listeners.delete(fn); },
     signOut() { profile = null; notify(); }, disconnectCalendar() { profile = { ...profile, calendarConnected: false }; notify(); },
     signIn: async () => {}, cancelSignIn() {} };
-  const store = { getSettings: id => settings.get(id) ?? initial(id), list: () => [], hasCompleted: () => false,
+  const store = { getSettings: id => settings.get(id) ?? initial(id), list: id => id===profile?.userID ? recordings : [], hasCompleted: () => false,
     markCompleted: async () => {}, saveSettings: async value => { writes.push(value); settings.set(value.ownerUserID, value); return value; } };
+  store.rename=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');const item=recordings.find(recording=>recording.id===args.id);if(!item)throw Error('unavailable');item.title=args.title.trim();};
+  store.deleteRecording=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');if(args.localOnlyConfirmed!==true)throw Error('confirm local only');const index=recordings.findIndex(recording=>recording.id===args.id);if(index<0)throw Error('unavailable');recordings.splice(index,1);};
   const service = createDesktopService({org, auth, store, fetch:async () => Response.json({events:[]}),
     discover: discover ?? (async ({auth}) => ({ ownerUserID: auth.getProfile().userID, calendars: [{id:'cal',title:'Work'}], meetings: [
       { id:'one', title:'QA', start:'2026-11-06T15:00:00Z',end:'2026-11-06T16:00:00Z',platform:'google_meet',joinURL:'https://meet.google.com/aaa-bbbb-ccc',attendeeEmails:['private@example.com'] } ] })),
@@ -86,7 +88,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
     openExternal: async url => calls.push(url), openProduct: async name => calls.push(name),
     openRecordings: async owner => calls.push(owner), openRecording: async file => calls.push(['play', file]), copyText: text => calls.push(['copy', text]), shareMeeting,
     onState: value => snapshots.push(value) });
-  return { service, auth, store, coordinator, settings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
+  return { service, auth, store, coordinator, settings, recordings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
     changeOwner(value) { profile = value; notify(); }, status(value) { status = value; statusNotify(value); } };
 }
 test('local playback and transcript copy are restricted to the active recording owner', async () => {
@@ -165,11 +167,24 @@ test('sharing is an explicit owner-bound action and never accepts a renderer URL
   await assert.rejects(f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-b'}),/account changed/i);
   await assert.rejects(f.service.action('shareRecording',{id:'recording'}),/account changed/i);
   assert.deepEqual(shared,[]);
-  await f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-a'});
-  assert.deepEqual(shared,[{ownerUserID:'owner-a',id:'recording'}]);
+  await f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-a',password:'birdhouse',expiry:'week'});
+  assert.deepEqual(shared,[{ownerUserID:'owner-a',id:'recording',password:'birdhouse',expiry:'week'}]);
   f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
   await assert.rejects(f.service.action('shareRecording',{id:'recording',expectedOwnerUserID:'owner-a'}),/account changed/i);
   assert.equal(shared.length,1);
+  await f.service.dispose();
+});
+
+test('rename and delete are owner-bound, reject renderer paths, and confirm local-only removal', async () => {
+  const f=fixture(); f.recordings.push({id:'a'.repeat(32),title:'Legacy meeting'});
+  const expectedOwnerUserID='owner-a', id='a'.repeat(32);
+  await assert.rejects(f.service.action('renameRecording',{id,title:'Changed',expectedOwnerUserID:'owner-b'}),/account changed/i);
+  await assert.rejects(f.service.action('renameRecording',{id,title:'Changed',path:'C:\\private.mp4',expectedOwnerUserID}),/invalid recording title/i);
+  await assert.rejects(f.service.action('deleteRecording',{id,expectedOwnerUserID}),/local copy/i);
+  await f.service.action('renameRecording',{id,title:'  New title  ',expectedOwnerUserID});
+  assert.equal(f.service.state().recordings[0].title,'New title');
+  await f.service.action('deleteRecording',{id,localOnlyConfirmed:true,expectedOwnerUserID});
+  assert.deepEqual(f.service.state().recordings,[]);
   await f.service.dispose();
 });
 

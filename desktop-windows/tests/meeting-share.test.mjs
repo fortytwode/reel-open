@@ -16,14 +16,22 @@ async function fixture(t, { ensureRoom = async () => {}, uploadLarge = async () 
   let profile = { userID:'owner-a', email:'owner@example.com', displayName:'Meeting Owner' };
   const statuses = [], copies = [], calls = [];
   let share = null;
+  const tails = new Map();
+  async function withRecordingLock({ownerUserID,id}, operation) {
+    const key=JSON.stringify([ownerUserID,id]), previous=tails.get(key)??Promise.resolve();
+    let release; const gate=new Promise(resolve=>{release=resolve;}); const tail=previous.catch(()=>{}).then(()=>gate); tails.set(key,tail);
+    try { await previous.catch(()=>{}); return await operation(); }
+    finally { release(); if(tails.get(key)===tail) tails.delete(key); }
+  }
   const store = {
+    withRecordingLock,
     getShareRecord: ({ownerUserID,id}) => ownerUserID === 'owner-a' && id === 'a'.repeat(32)
       ? { id, title:'Weekly meeting', createdAt:'2026-11-06T12:00:00.000Z', durationSeconds:9, width:640, height:360, path:file, meeting:true, share:share && structuredClone(share) } : null,
     getProcessing: () => ({ transcriptComplete:true, language:'en', engine:'test', text:'Ready to share',
       segments:[{start:0,end:3,text:'Ready to share',privateField:'private'}], attendees:['private@example.com'] }),
     async bindShare(value) {
       calls.push(['bind', value]);
-      if (!share) share = { ownerUserID:value.ownerUserID, recordingNonce:value.recordingNonce, shareID:value.shareID, includeTranscript:value.includeTranscript, upload:'pending' };
+      if (!share) share = { ownerUserID:value.ownerUserID, recordingNonce:value.recordingNonce, shareID:value.shareID, includeTranscript:value.includeTranscript, access:value.access, upload:'pending' };
       return structuredClone(share);
     },
     async saveShareState(value) { statuses.push(value.upload); share.upload = structuredClone(value.upload); },
@@ -31,8 +39,8 @@ async function fixture(t, { ensureRoom = async () => {}, uploadLarge = async () 
   const auth = { getProfile:() => profile, getIdToken:async()=>{ if (!profile) throw Error('signed out'); return 'synthetic-token'; } };
   const shareAPI = createMeetingShare({ auth, store, org, copy:value=>copies.push(value),
     storageFactory:(session,cfg,nonce) => ({
-      async uploadLarge(id,file,blob,options) { calls.push(['video',id,file,blob.size,options,nonce]); await uploadLarge({session,blob}); },
-      async upload(id,file,data) { calls.push(['meta',id,file,data,nonce]); await upload({session,data}); },
+      async uploadLarge(id,file,blob,options) { calls.push(['video',id,file,blob.size,options,nonce]); await uploadLarge({session,blob,options}); },
+      async upload(id,file,data,options) { calls.push(['meta',id,file,data,nonce,options]); await upload({session,data,options}); },
     }),
     firestoreFactory:session => ({
       async ensureRoom(...args) { calls.push(['room',...args]); await ensureRoom({session}); },
@@ -98,6 +106,16 @@ test('same recording requests share one in-flight publication', async t => {
   assert.strictEqual(await a,await b); assert.equal(f.calls.filter(call=>call[0]==='video').length,1);
 });
 
+test('local deletion waits for in-flight share publication and cannot interrupt its local source', async t => {
+  const entered=deferred(), release=deferred(), f=await fixture(t,{uploadLarge:async()=>{entered.resolve();await release.promise;}});
+  const args={ownerUserID:'owner-a',id:'a'.repeat(32)};
+  const sharing=f.shareAPI.share(args); await entered.promise;
+  let deleted=false;
+  const deletion=f.store.withRecordingLock(args,async()=>{deleted=true;});
+  await new Promise(resolve=>setImmediate(resolve)); assert.equal(deleted,false);
+  release.resolve(); await sharing; await deletion; assert.equal(deleted,true);
+});
+
 test('transcript choice persists across retry and publishes only viewer fields', async t => {
   let first = true;
   const f = await fixture(t,{uploadLarge:async()=>{ if (first) { first=false; throw Error('interrupted'); } }});
@@ -112,4 +130,67 @@ test('transcript choice persists across retry and publishes only viewer fields',
   assert.ok(!Object.hasOwn(transcript,'attendees'));
   assert.match(uploads[1][3],/\[0:00\] Ready to share/);
   assert.equal(JSON.parse(uploads[2][3]).transcriptStatus,'ready');
+});
+
+test('password and expiry protect the final media location and keep public metadata to the viewer stub', async t => {
+  const now = new Date('2026-11-26T12:00:00.000Z');
+  const f = await fixture(t);
+  const protectedShare = createMeetingShare({ auth:f.auth, store:f.store, org, now:()=>new Date(now),
+    copy:value=>f.copies.push(value),
+    storageFactory:(session,cfg,nonce) => ({
+      async uploadLarge(id,file,blob,options) { f.calls.push(['video',id,file,blob.size,options,nonce]); },
+      async upload(id,file,data,options) { f.calls.push(['meta',id,file,data,nonce,options]); },
+    }),
+    firestoreFactory:()=>({
+      async ensureRoom(...args) { f.calls.push(['room',...args]); }, async upsertLibraryEntry(record) { f.calls.push(['library',record]); },
+    }) });
+  await protectedShare.share({ownerUserID:'owner-a',id:'a'.repeat(32),password:'birdhouse123',expiry:'day'});
+  const binding = f.calls.find(call=>call[0]==='bind')[1];
+  assert.equal(binding.access.key.length,32); assert.equal(binding.access.passwordSalt.length,32);
+  assert.ok(!JSON.stringify(binding).includes('birdhouse123'));
+  const saved = await f.store.getShareRecord({ownerUserID:'owner-a',id:'a'.repeat(32)});
+  const key = saved.share.access.key, salt = saved.share.access.passwordSalt;
+  assert.equal(await C.deriveKey('birdhouse123',salt),key);
+  const expiresAt = new Date(now.getTime()+86400_000);
+  const room = f.calls.find(call=>call[0]==='room'); assert.equal(room[3].toISOString(),expiresAt.toISOString());
+  const video = f.calls.find(call=>call[0]==='video');
+  assert.equal(video[4].key,key); assert.equal(video[4].options.expiresAt.toISOString(),expiresAt.toISOString());
+  const metadata = f.calls.filter(call=>call[0]==='meta');
+  assert.deepEqual(metadata.map(call=>call[2]),['meta.json','meta.json','meta.json']);
+  const stub = JSON.parse(metadata[0][3]);
+  assert.equal(stub.locked,true); assert.equal(stub.kdf.salt,salt);
+  assert.equal(stub.expiresAt,expiresAt.toISOString().replace('.000Z','Z'));
+  assert.equal(Object.hasOwn(stub,'title'),false); assert.equal(Object.hasOwn(stub,'playback'),false);
+  assert.equal(metadata[0][5].key,null);
+  const remote = JSON.parse(metadata[1][3]);
+  assert.equal(remote.title,'Weekly meeting'); assert.equal(remote.locked,true); assert.equal(metadata[1][5].key,key);
+  const readyStub = JSON.parse(metadata[2][3]); assert.equal(readyStub.status,'ready');
+  assert.equal(Object.hasOwn(readyStub,'title'),false); assert.equal(metadata[2][5].key,null);
+  assert.ok(!f.calls.some(call=>call[0]==='video' && call[4].key===null));
+});
+
+test('Windows protected shares reject passwords shorter than 12 characters before binding', async t => {
+  const f = await fixture(t);
+  const protectedShare = createMeetingShare({ auth:f.auth, store:f.store, org,
+    storageFactory:()=>({uploadLarge:async()=>{},upload:async()=>{}}),
+    firestoreFactory:()=>({ensureRoom:async()=>{},upsertLibraryEntry:async()=>{}}) });
+  await assert.rejects(protectedShare.share({ownerUserID:'owner-a',id:'a'.repeat(32),password:'elevenchars',expiry:'day'}),
+    /at least 12 characters/i);
+  assert.equal(f.calls.some(call=>call[0]==='bind'),false);
+  assert.equal(f.calls.some(call=>call[0]==='video'||call[0]==='meta'||call[0]==='room'),false);
+});
+
+test('expired bound shares cannot resume uploads or copy their link', async t => {
+  let clock = new Date('2026-11-26T12:00:00.000Z');
+  let failures = 0;
+  const f = await fixture(t);
+  const shareAPI = createMeetingShare({auth:f.auth,store:f.store,org,now:()=>new Date(clock),copy:value=>f.copies.push(value),
+    storageFactory:()=>({uploadLarge:async()=>{if(!failures++) throw Error('interrupted');f.calls.push(['retry-video']);},upload:async()=>{}}),
+    firestoreFactory:()=>({ensureRoom:async(...args)=>{f.calls.push(['room',...args]);},upsertLibraryEntry:async()=>{}})});
+  await assert.rejects(shareAPI.share({ownerUserID:'owner-a',id:'a'.repeat(32),password:'birdhouse123',expiry:'hour'}),/interrupted/);
+  const before = f.calls.length;
+  clock = new Date('2026-11-26T13:00:01.000Z');
+  await assert.rejects(shareAPI.share({ownerUserID:'owner-a',id:'a'.repeat(32)}),/expired/i);
+  assert.equal(f.calls.slice(before).some(call=>call[0]==='retry-video'),false);
+  assert.deepEqual(f.copies,[]);
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, open, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, open, writeFile, rename as fsRename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Muxer, StreamTarget } from '../../web/vendor/mp4-muxer.mjs';
@@ -227,18 +227,96 @@ test('saved meeting sharing is persisted under its original local owner only', a
   for (let i=0;i<encoded.segments.length;i++) await writer.appendFragment({index:i+1,duration:4,bytes:encoded.segments[i]});
   const saved=await writer.finish({durationSeconds:8});
   const nonce='ab'.repeat(16), shareID=await C.ownerShareID('owner',nonce);
+  const passwordSalt='34'.repeat(16), accessKey=await C.deriveKey('birdhouse',passwordSalt);
+  const access={key:accessKey,passwordSalt,expiresAt:'2026-11-13T12:00:00Z'};
   assert.equal(await store.getShareRecord({ownerUserID:'other',id:saved.id}),null);
-  const bound=await store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,recordingNonce:nonce,shareID});
+  const bound=await store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,recordingNonce:nonce,shareID,access});
   assert.equal(bound.shareID,shareID); assert.equal(bound.upload,'pending');
+  assert.deepEqual(bound.access,access);
+  await assert.rejects(store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,
+    recordingNonce:nonce,shareID,access:{...access,passwordSalt:null}}),/Invalid meeting share access settings/);
   await assert.rejects(store.bindShare({ownerUserID:'other',expectedOwnerUserID:'other',id:saved.id,recordingNonce:nonce,shareID}),/unavailable/);
   await assert.rejects(store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'other',id:saved.id,recordingNonce:nonce,shareID}),/owner changed/);
   await store.saveShareState({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,shareID,upload:'uploaded'});
   assert.equal(store.list('owner')[0].shareStatus,'uploaded');
   assert.equal(store.list('other').length,0);
   const libraryPath=path.join(root,createHash('sha256').update('owner').digest('hex'),'library.json');
+  const persisted=await readFile(libraryPath,'utf8');
+  assert.ok(!persisted.includes('birdhouse'),'The local recording store must not persist the plaintext password.');
+  assert.ok(persisted.includes(accessKey));
   const legacy=JSON.parse(await readFile(libraryPath,'utf8')); delete legacy.recordings[0].width; delete legacy.recordings[0].height;
   await writeFile(libraryPath,JSON.stringify(legacy));
   const restored=await createLocalRecordingStore({root}).getShareRecord({ownerUserID:'owner',id:saved.id});
   assert.equal(restored.share.recordingNonce,nonce); assert.deepEqual([restored.width,restored.height],[640,360]);
+  assert.deepEqual(restored.share.access,access);
   await assert.rejects(store.saveShareState({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,shareID:'r2'+'0'.repeat(38),upload:'uploaded'}),/no longer bound/);
+});
+
+test('renames and deletes legacy local rows under owner scope without touching cloud data', async t => {
+  const { root, store } = await fixture(t);
+  const writer = await recorded(store, 'owner');
+  const saved = await writer.finish({ durationSeconds: 9 });
+  const libraryPath = path.join(root, createHash('sha256').update('owner').digest('hex'), 'library.json');
+  const legacy = JSON.parse(await readFile(libraryPath, 'utf8'));
+  delete legacy.recordings[0].width; delete legacy.recordings[0].height; delete legacy.recordings[0].processing;
+  await writeFile(libraryPath, JSON.stringify(legacy));
+  const restored = createLocalRecordingStore({ root });
+  await assert.rejects(restored.rename({ ownerUserID:'other', expectedOwnerUserID:'owner', id:saved.id, title:'Renamed' }), /owner changed/);
+  await assert.rejects(restored.rename({ ownerUserID:'owner', expectedOwnerUserID:'owner', id:'../library', title:'Renamed' }), /title|Invalid/i);
+  const renamed = await restored.rename({ ownerUserID:'owner', expectedOwnerUserID:'owner', id:saved.id, title:'  Renamed title  ' });
+  assert.equal(renamed.title, 'Renamed title');
+  assert.equal(restored.list('owner')[0].title, 'Renamed title');
+  await assert.rejects(restored.deleteRecording({ ownerUserID:'owner', expectedOwnerUserID:'owner', id:saved.id }), /confirm/i);
+  await assert.rejects(restored.deleteRecording({ ownerUserID:'other', expectedOwnerUserID:'other', id:saved.id, localOnlyConfirmed:true }), /unavailable/);
+  await restored.deleteRecording({ ownerUserID:'owner', expectedOwnerUserID:'owner', id:saved.id, localOnlyConfirmed:true });
+  assert.deepEqual(restored.list('owner'), []);
+  await assert.rejects(readFile(saved.path), { code:'ENOENT' });
+  assert.equal(createLocalRecordingStore({ root }).list('owner').length, 0);
+});
+
+test('local deletion waits for an in-flight same-recording operation', async t => {
+  const { store } = await fixture(t);
+  const writer = await recorded(store, 'owner');
+  const saved = await writer.finish({ durationSeconds: 9 });
+  let enter, release;
+  const started = new Promise(resolve => { enter = resolve; });
+  const blocked = new Promise(resolve => { release = resolve; });
+  const processing = store.withRecordingLock({ ownerUserID:'owner', id:saved.id }, async () => { enter(); await blocked; });
+  await started;
+  let deleted = false;
+  const removal = store.deleteRecording({ ownerUserID:'owner', expectedOwnerUserID:'owner', id:saved.id, localOnlyConfirmed:true })
+    .then(value => { deleted=true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(deleted, false);
+  assert.equal(store.list('owner').length, 1);
+  release(); await processing; await removal;
+  assert.equal(store.list('owner').length, 0);
+  await assert.rejects(store.saveProcessing({ ownerUserID:'owner', id:saved.id, processing:{ phase:'completed' } }), /no longer exists/);
+});
+
+test('an account switch while deletion waits leaves the original owner data intact', async t => {
+  const { store } = await fixture(t);
+  const writer=await recorded(store,'owner'); const saved=await writer.finish({durationSeconds:9});
+  let enter, release, current=true;
+  const started=new Promise(resolve=>{enter=resolve;}), blocked=new Promise(resolve=>{release=resolve;});
+  const inFlight=store.withRecordingLock({ownerUserID:'owner',id:saved.id},async()=>{enter();await blocked;}); await started;
+  const removal=store.deleteRecording({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,localOnlyConfirmed:true,isCurrent:()=>current});
+  current=false; release(); await inFlight;
+  await assert.rejects(removal,/account changed/i);
+  assert.equal(store.list('owner').length,1); assert.ok((await readFile(saved.path)).length>0);
+});
+
+test('failed metadata commit restores staged media and keeps the recording available', async t => {
+  let failCommit = false;
+  const io = { rename: async (from, to) => {
+    if (failCommit && to.endsWith('library.json')) { failCommit=false; throw Error('disk failure'); }
+    return fsRename(from, to);
+  } };
+  const { store } = await fixture(t, io);
+  const writer = await recorded(store, 'owner');
+  const saved = await writer.finish({ durationSeconds: 9 });
+  failCommit = true;
+  await assert.rejects(store.deleteRecording({ ownerUserID:'owner', expectedOwnerUserID:'owner', id:saved.id, localOnlyConfirmed:true }), /disk failure/);
+  assert.equal(store.list('owner').length, 1);
+  assert.ok((await readFile(saved.path)).length > 0);
 });

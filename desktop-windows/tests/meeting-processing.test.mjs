@@ -22,9 +22,16 @@ async function fixture(t, { frames = 16000, fetcher } = {}) {
   for (let i = 0; i < frames; i++) samples.writeInt16LE((i % 1000) - 500, i * 2);
   await writeFile(audioPath, samples);
   let processing = initial(), profile = { userID: ownerUserID, email: 'owner@northwind.example' }, tokenProvider = async () => 'firebase-token';
-  const listeners = new Set(), calls = [], writes = [];
+  const listeners = new Set(), calls = [], writes = [], recordingTails = new Map();
+  async function withRecordingLock({ownerUserID,id}, operation) {
+    const key=JSON.stringify([ownerUserID,id]), previous=recordingTails.get(key)??Promise.resolve();
+    let release; const gate=new Promise(resolve=>{release=resolve;}); const tail=previous.catch(()=>{}).then(()=>gate); recordingTails.set(key,tail);
+    try { await previous.catch(()=>{}); return await operation(); }
+    finally { release(); if(recordingTails.get(key)===tail) recordingTails.delete(key); }
+  }
   const auth = { getProfile: () => profile, getIdToken: () => tokenProvider(), onStateChange: listener => { listeners.add(listener); return () => listeners.delete(listener); } };
   const store = {
+    withRecordingLock,
     getProcessing: args => args.ownerUserID === ownerUserID && args.id === id ? structuredClone(processing) : null,
     listProcessing: owner => owner === ownerUserID && processing ? [{ id, processing: structuredClone(processing) }] : [],
     saveProcessing: async args => { assert.equal(args.ownerUserID, ownerUserID); assert.equal(args.id, id); if (!processing) throw Error('Recording deleted');
@@ -79,6 +86,25 @@ test('persists transcript, summary, verified receipt and authoritative calendar 
   assert.equal(delivered.segments[0].text, 'Full transcript.');
   assert.ok(f.writes.findIndex(p => p.transcriptComplete) < f.writes.findIndex(p => p.summary));
   await f.processor.process({ ownerUserID, id }); assert.equal(f.calls.length, 3);
+});
+
+test('record deletion waits for in-flight processing and cannot be resurrected by a later checkpoint', async t => {
+  let enter, release;
+  const started=new Promise(resolve=>{enter=resolve;}), blocked=new Promise(resolve=>{release=resolve;});
+  let first=true;
+  const f=await fixture(t,{fetcher:async(url,options)=>{
+    if(url.endsWith('/transcription')&&first){first=false;enter();await blocked;return response({text:'Transcript.',languages:[{code:'en'}],engine:'OpenAI gpt-transcribe'});}
+    if(url.endsWith('/summary')) return response({summary:'Summary',engine:'OpenAI gpt-6.1-sol'});
+    return response(receipt());
+  }});
+  const processing=f.processor.process({ownerUserID,id}); await started;
+  let deleted=false;
+  const removal=f.store.withRecordingLock({ownerUserID,id},async()=>{f.set(null);deleted=true;});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(deleted,false); assert.ok(f.get());
+  release(); await processing; await removal;
+  assert.equal(deleted,true); assert.equal(f.get(),null);
+  assert.equal(f.writes.at(-1).phase,'completed');
 });
 
 test('summary failure preserves completed transcript and retry sends no audio again', async t => {
