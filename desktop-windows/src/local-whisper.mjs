@@ -73,7 +73,7 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     'Local transcription must use its private loopback origin.');
   let window=null,loading=null,active=null,disposed=false,rendererStartup=null;
   const pendingProbes=new Map();
-  const pageURL=origin+'/local-ai/';
+  const pageURL=origin+'/';
   const diagnostic=(phase,progress)=>{
     try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{})});}catch{}
   };

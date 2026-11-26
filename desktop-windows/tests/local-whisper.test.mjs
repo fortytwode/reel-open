@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
+import {fileURLToPath} from 'node:url';
+import {startAssetServer} from '../src/asset-server.mjs';
 import {createLocalWhisper,localAIRequestAllowed} from '../src/local-whisper.mjs';
 
 class FakeWebContents extends EventEmitter {
@@ -18,12 +20,12 @@ class FakeWindow extends EventEmitter {
   hide(){}
   destroy(){this.destroyed=true;this.emit('closed');}
 }
-function setup({allowRemoteModelRequest,onDiagnostic}={}){const ipcMain=new EventEmitter();let owner='owner-a';FakeWindow.onLoad=contents=>{const event={sender:contents,senderFrame:contents.mainFrame};ipcMain.emit('reel-local-ai:progress',event,{phase:'renderer_script_ready'});ipcMain.emit('reel-local-ai:progress',event,{phase:'worker_script_ready'});};const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin:'http://127.0.0.1:4321',ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{}),...(onDiagnostic?{onDiagnostic}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
+function setup({allowRemoteModelRequest,onDiagnostic,origin='http://127.0.0.1:4321'}={}){const ipcMain=new EventEmitter();let owner='owner-a';FakeWindow.onLoad=contents=>{const event={sender:contents,senderFrame:contents.mainFrame};ipcMain.emit('reel-local-ai:progress',event,{phase:'renderer_script_ready'});ipcMain.emit('reel-local-ai:progress',event,{phase:'worker_script_ready'});};const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin,ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{}),...(onDiagnostic?{onDiagnostic}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
 const samples=new Float32Array([0,.1,-.1]);
 
 test('local inference network access is restricted to the pinned model and GET requests',()=>{
   const origin='http://127.0.0.1:4321';
-  assert.equal(localAIRequestAllowed(`${origin}/local-ai/worker.mjs`,'GET',origin),true);
+  assert.equal(localAIRequestAllowed(`${origin}/worker.mjs`,'GET',origin),true);
   assert.equal(localAIRequestAllowed('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json','GET',origin),true);
   const cacheURL='https://huggingface.co/api/resolve-cache/models/onnx-community/whisper-large-v3-turbo/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json?%2Fonnx-community%2Fwhisper-large-v3-turbo%2Fresolve%2F360ebcde2559d60bb474678be3c1de9ef347d01a%2Fconfig.json&etag=%22abcdef0123456789abcdef0123456789abcdef01%22';
   assert.equal(localAIRequestAllowed(cacheURL,'GET',origin),false);
@@ -127,6 +129,31 @@ test('renderer startup waits for worker module and task channel probe without st
   assert.ok(diagnostics.some(value=>value.phase==='renderer_probe_received'));
   assert.equal(diagnostics.filter(value=>value.phase==='preload_ready').length,1);
   f.bridge.dispose();
+});
+
+test('isolated renderer page URL serves the real entry HTML and renderer from its dedicated origin',async()=>{
+  const assets=await startAssetServer({root:fileURLToPath(new URL('../../',import.meta.url))});
+  const f=setup({origin:assets.localAIOrigin});
+  try{
+    const operation=f.bridge.probeRenderer();
+    await new Promise(resolve=>setImmediate(resolve));
+    const pageURL=assets.localAIOrigin+'/';
+    assert.equal(FakeWindow.last.webContents.url,pageURL);
+    const response=await fetch(pageURL);
+    assert.equal(response.status,200);
+    const html=await response.text();
+    assert.match(html,/<script type="module" src="\/renderer\.mjs"><\/script>/u);
+    const rendererResponse=await fetch(new URL('/renderer.mjs',assets.localAIOrigin));
+    assert.equal(rendererResponse.status,200);
+    assert.match(await rendererResponse.text(),/api\.onTask\(task=>/u);
+    const task=FakeWindow.last.webContents.messages.at(-1).value;
+    f.ipcMain.emit('reel-local-ai:progress',{sender:FakeWindow.last.webContents,senderFrame:FakeWindow.last.webContents.mainFrame},
+      {requestID:task.requestID,phase:'renderer_probe_received'});
+    await operation;
+  }finally{
+    f.bridge.dispose();
+    await assets.close();
+  }
 });
 
 test('accepts results only from the isolated window and matches the current request',async()=>{
