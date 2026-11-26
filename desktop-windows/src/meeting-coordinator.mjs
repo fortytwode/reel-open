@@ -52,6 +52,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
   let active = null;
   let stopPromise = null;
   let tickPromise = null;
+  let manualJoinPromise = null;
   let generation = 0;
   let refreshSequence = 0;
   let disposed = false;
@@ -86,7 +87,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     try { profile = auth.getProfile(); settings = getSettings(); } catch { return null; }
     const key = settingsKey(settings);
     if (!profile?.userID || !profile.email || profile.calendarConnected !== true || !key
-      || settings.ownerUserID !== profile.userID || !settings.autoJoin
+      || settings.ownerUserID !== profile.userID
       || !settings.participantConsent || !settings.systemAudioConsent) return null;
     return { ownerUserID: profile.userID, email: profile.email.toLowerCase(), settings, key };
   }
@@ -167,10 +168,11 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     finally { active = null; stopPromise = null; }
   }
 
-  async function refresh() {
+  async function refresh({ manual = false } = {}) {
     if (disposed) return;
     let eligible = eligibility();
     if (!eligible) { await invalidate('not_enabled'); return; }
+    if (!eligible.settings.autoJoin && !manual && !active && !joinController && !manualJoinPromise) return;
     if (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID || snapshot.ownerEmail !== eligible.email
       || snapshot.settingsKey !== eligible.key)) {
       await invalidate('settings_changed');
@@ -217,11 +219,11 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     // or disappears; tick can still start a different eligible meeting.
     const currentFailure = failedKey && meetings.find(item => occurrence(item)?.key === failedKey && timeOf(item.end) > clock());
     if (!active && !joinController && currentFailure) emit({ ...state, meetingId: currentFailure.id });
-    if (!active && !joinController && !currentFailure) emit({ phase: meetings.length ? 'scheduled' : 'idle', ownerUserID,
+    if (!active && !joinController && !currentFailure) emit({ phase: eligible.settings.autoJoin && meetings.length ? 'scheduled' : 'idle', ownerUserID,
       meetingId: null, attempts: 0, reason: null });
   }
 
-  async function attempt(item, eligible) {
+  async function attempt(item, eligible, manual = false) {
     const { meeting, link, key, start, end } = item;
     const scopedKey = entryKey(eligible.ownerUserID, key);
     const entry = entries.get(scopedKey) ?? { attempts: 0, retryAfter: 0, terminal: false, completed: false };
@@ -255,7 +257,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
         || !Number.isSafeInteger(result.pid) || result.pid <= 0) {
         await closeNative(nativeSessionId);
         const reason = NATIVE_FAILURES.has(result?.state) ? result.state : 'join_failed';
-        if (RETRYABLE.has(reason) && entry.attempts < MAX_ATTEMPTS) {
+        if (!manual && RETRYABLE.has(reason) && entry.attempts < MAX_ATTEMPTS) {
           entry.retryAfter = clock() + RETRY_DELAY_MS;
           emit({ phase: 'retry_wait', reason });
         } else { entry.terminal = true; emit({ phase: 'failed', reason }); }
@@ -328,7 +330,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
       for (const sessionId of [...unresolvedSessions]) await closeNative(sessionId);
       if (!unresolvedSessions.size) {
         const current = eligibility();
-        emit({ phase: !disposed && snapshot && current ? 'scheduled' : 'idle',
+        emit({ phase: !disposed && snapshot && current?.settings.autoJoin ? 'scheduled' : 'idle',
           ownerUserID: current?.ownerUserID ?? null, meetingId: null, reason: null });
       }
       return;
@@ -351,7 +353,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
         await stopActive(inspected?.state === 'left' ? 'meeting_left' : 'meeting_uncertain');
       return;
     }
-    if (joinController || !snapshot || !eligible) return;
+    if (joinController || manualJoinPromise || !snapshot || !eligible.settings.autoJoin) return;
     const instant = clock();
     const candidates = snapshot.meetings.map(occurrence).filter(Boolean)
       .sort((a, b) => a.start - b.start || a.key.localeCompare(b.key));
@@ -376,9 +378,38 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     tickPromise = tickImpl();
     return tickPromise.finally(() => { tickPromise = null; });
   }
+  async function joinMeeting({ meetingId, ownerUserID }) {
+    const eligible = eligibility();
+    if (!eligible || eligible.ownerUserID !== ownerUserID) throw Error('Connect your calendar and confirm recording permissions before joining.');
+    if (disposed || active || joinController || manualJoinPromise || stopPromise || unresolvedSessions.size)
+      throw Error('Finish the current meeting action before joining another meeting.');
+    const version = generation;
+    const previous = snapshot;
+    const operation = (async () => {
+      // Recheck the selected calendar and cloud ownership before opening Chrome.
+      await refresh({ manual: true });
+      if (generation !== version) throw Error('Your account or recording settings changed. Refresh and try again.');
+      const item = snapshot?.meetings.map(occurrence).find(candidate => candidate?.meeting.id === meetingId);
+      if (snapshot === previous || !item || !stillEligible(ownerUserID, eligible.key, item.key))
+        throw Error('This meeting is no longer available for local recording. Refresh your meetings.');
+      if (hasCompleted({ ownerUserID, occurrenceKey: item.key }) !== false)
+        throw Error('This meeting has already been recorded.');
+      await attempt(item, eligible, true);
+    })();
+    manualJoinPromise = operation;
+    try { await operation; }
+    finally { manualJoinPromise = null; }
+  }
   async function cancel() {
     await invalidate('cancelled');
     if (tickPromise) await tickPromise;
+    if (manualJoinPromise) await manualJoinPromise.catch(() => {});
+  }
+  async function cancelJoin(ownerUserID) {
+    if (state.phase !== 'joining' || state.ownerUserID !== ownerUserID || !joinController) return;
+    const entry = entries.get(entryKey(ownerUserID, joinController.occurrenceKey));
+    if (entry) entry.terminal = true;
+    await cancel();
   }
   function onStateChange(listener) {
     if (typeof listener !== 'function') throw TypeError('listener must be a function');
@@ -397,5 +428,5 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     await cancel();
     if (unresolvedSessions.size) throw new Error('The owned meeting window still needs to be closed.');
   }
-  return { refresh, tick, cancel, dispose, getState: () => publicState(state), onStateChange };
+  return { refresh, tick, joinMeeting, cancelJoin, cancel, dispose, getState: () => publicState(state), onStateChange };
 }

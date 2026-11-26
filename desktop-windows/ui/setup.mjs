@@ -8,6 +8,7 @@ let saveTimer = null;
 let renderGeneration = 0;
 let currentOwner = null;
 let pendingSignIn = null;
+let pendingJoin = false;
 let actionError = null;
 
 function node(tag, className, text) {
@@ -102,18 +103,31 @@ function renderDashboard() {
   const settings=byId('settingsContent'); clear(settings); settings.append(consentControls(currentSettings(),true));
   const phase=snapshot.status?.phase ?? 'idle'; byId('statusTitle').textContent=phaseLabel(phase);
   byId('statusMessage').textContent=snapshot.status?.message ?? (snapshot.profile?.calendarConnected?'Reel is checking your calendar.':'Connect a calendar to see upcoming meetings.');
+  byId('cancelJoinButton').classList.toggle('hidden', phase !== 'joining');
   byId('stopButton').classList.toggle('hidden',phase!=='capturing');
   byId('stopButton').disabled = phase !== 'capturing';
   byId('stopButton').textContent = phase === 'saving' ? 'Saving recording…' : 'Stop and save recording';
   renderMeetings(); renderRecordings();
 }
-function phaseLabel(phase) { return ({capturing:'Recording your meeting',saving:'Saving your recording',close_required:'Close the meeting window manually to continue',completed:'Recording saved',joining:'Joining a meeting',scheduled:'Ready for your next meeting',calendar_unavailable:'Calendar needs attention',save_failed:'Could not save recording',failed:'Meeting could not start',retry_wait:'Retrying meeting connection',idle:'Waiting for your next meeting'})[phase] ?? 'Reel status'; }
+function phaseLabel(phase) { return ({capturing:'Recording your meeting',cancelled:'Meeting join cancelled',saving:'Saving your recording',close_required:'Close the meeting window manually to continue',completed:'Recording saved',joining:'Joining a meeting',scheduled:'Ready for your next meeting',calendar_unavailable:'Calendar needs attention',save_failed:'Could not save recording',failed:'Meeting could not start',retry_wait:'Retrying meeting connection',idle:'Waiting for your next meeting'})[phase] ?? 'Reel status'; }
 function formatDate(value) { const d=new Date(value); return Number.isNaN(d.getTime())?escText(value):new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(d); }
 function renderMeetings() {
   const list=byId('meetingsList'); clear(list); const meetings=snapshot.meetings ?? [];
   if (!meetings.length) { list.append(node('p','empty','No upcoming meetings found.')); return; }
-  for (const meeting of meetings) { const row=node('div','meeting-row'); const left=node('div'); left.append(node('div','meeting-name',meeting.title || 'Untitled meeting')); left.append(node('div','meeting-meta',meeting.platform || 'Meeting'));
-    row.append(left,node('div','meeting-time',formatDate(meeting.start))); list.append(row); }
+  const busy = pendingJoin || ['joining', 'capturing', 'saving', 'close_required', 'retry_wait'].includes(snapshot.status?.phase);
+  for (const meeting of meetings) {
+    const row = node('div', 'meeting-row');
+    const details = node('div');
+    details.append(node('div', 'meeting-name', meeting.title || 'Untitled meeting'),
+      node('div', 'meeting-meta', meeting.platform || 'Meeting'));
+    const actions = node('div', 'meeting-actions');
+    const join = button('Join & record', 'joinMeeting', false);
+    join.dataset.meetingId = meeting.id;
+    join.disabled = busy || saving;
+    actions.append(node('div', 'meeting-time', formatDate(meeting.start)), join);
+    row.append(details, actions);
+    list.append(row);
+  }
 }
 function renderRecordings() {
   const list=byId('recordingsList'); clear(list); const recordings=(snapshot.recordings ?? []);
@@ -156,6 +170,7 @@ function applySnapshot(next, expectedGeneration = null) {
   if (owner !== currentOwner || (snapshot?.profile?.calendarConnected === true && next.profile?.calendarConnected !== true)) {
     clearTimeout(saveTimer); saveTimer=null; saving=false; localSettings=null; renderGeneration++;
     pendingSignIn=null;
+    pendingJoin=false;
     actionError=null;
     currentOwner=owner;
   }
@@ -235,6 +250,22 @@ document.addEventListener('click', event=>{
   const target=event.target.closest('[data-action]'); if(!target || target.disabled) return;
   const action=target.dataset.action;
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if (action === 'joinMeeting') {
+    if (pendingJoin || saving || !snapshot?.profile?.userID) return;
+    pendingJoin = true;
+    render();
+    const generation = renderGeneration;
+    void perform(action, {id:target.dataset.meetingId,expectedOwnerUserID:snapshot.profile.userID}).finally(() => {
+      if (generation !== renderGeneration) return;
+      pendingJoin = false;
+      render();
+    });
+    return;
+  }
+  if (action === 'cancelJoin') {
+    void perform(action, {expectedOwnerUserID:snapshot?.profile?.userID});
+    return;
+  }
   if(action==='shareRecording') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID,...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{})}); return; }
   perform(action);
 });

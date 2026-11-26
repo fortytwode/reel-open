@@ -37,7 +37,7 @@
         <section class="card settings-card"><div class="card-heading"><div><p class="eyebrow">PREFERENCES</p><h2>Meeting setup</h2></div><span id="saveState" class="save-state" aria-live="polite"></span></div>
           <div id="settingsContent"></div>
         </section>
-        <section class="card status-card"><p class="eyebrow">REEL STATUS</p><h2 id="statusTitle">Waiting for your next meeting</h2><p id="statusMessage" class="muted"></p><button id="stopButton" class="danger hidden" type="button" data-action="stopRecording">Stop and save recording</button></section>
+        <section class="card status-card"><p class="eyebrow">REEL STATUS</p><h2 id="statusTitle">Waiting for your next meeting</h2><p id="statusMessage" class="muted"></p><button id="cancelJoinButton" class="outline hidden" type="button" data-action="cancelJoin">Cancel join</button><button id="stopButton" class="danger hidden" type="button" data-action="stopRecording">Stop and save recording</button></section>
       </div>
       <section class="card meetings-card"><div class="card-heading"><div><p class="eyebrow">UP NEXT</p><h2>Upcoming meetings</h2></div></div><div id="meetingsList" class="meeting-list"></div></section>
       <section class="card recordings-card"><div class="card-heading"><div><p class="eyebrow">RECENT</p><h2>Latest recordings</h2></div><button class="text-button" type="button" data-action="openRecordings">Open recordings folder ↗</button></div><p class="share-disclosure">Anyone with the link can watch the shared video. Choose “Share video and transcript” to include the finished transcript. The attendee list and meeting notes stay private.</p><div id="recordingsList" class="recording-list"></div></section>

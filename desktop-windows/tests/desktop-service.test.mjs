@@ -262,3 +262,38 @@ test('coordinator refresh rechecks cloud ownership of cached Google discovery be
   assert.equal(JSON.stringify(service.state()).includes('firebase-routing-token'),false);
   await service.dispose();
 });
+
+test('a manual join accepts only an owner and opaque calendar ID and rechecks cloud routing', async () => {
+  const joins = [];
+  let cloudOwned = false;
+  const profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
+  const meeting = { id: 'meeting-one', calendarID: 'cal', title: 'QA', start: '2026-11-06T15:00:00Z',
+    end: '2026-11-06T16:00:00Z', platform: 'google_meet', joinURL: 'https://meet.google.com/aaa-bbbb-ccc' };
+  const settings = { ...initial(profile.userID), participantConsent: true, systemAudioConsent: true };
+  const auth = { getProfile: () => profile, getIdToken: async () => 'fixture-token', onStateChange: () => () => {},
+    cancelSignIn() {} };
+  const service = createDesktopService({ org, auth,
+    store: { getSettings: () => settings, list: () => [], hasCompleted: () => false, markCompleted: () => {} },
+    discover: async () => ({ ownerUserID: profile.userID, calendars: [], meetings: [meeting] }),
+    fetch: async () => Response.json({ events: [], cloud_providers: [], cloud_events: cloudOwned
+      ? [{ join_url: meeting.joinURL, start: meeting.start }] : [] }),
+    createCoordinator: options => createMeetingCoordinator({ ...options,
+      native: { join: async args => { joins.push(args); return { state: 'sign_in_required' }; }, inspect: async () => {}, close: async () => {} },
+      recorder: { start: async () => { assert.fail('No verified joined window'); }, stop: async () => {} },
+      now: () => new Date('2026-11-06T14:50:00Z') })
+  });
+  await service.pulse();
+  assert.equal(service.state().meetings[0].id, meeting.id);
+  const selection = { id: meeting.id, expectedOwnerUserID: profile.userID };
+  await assert.rejects(service.action('joinMeeting', { ...selection, url: meeting.joinURL }), /Choose a meeting/);
+  await assert.rejects(service.action('joinMeeting', { id: meeting.id }), /account changed/);
+  cloudOwned = true;
+  await assert.rejects(service.action('joinMeeting', selection), /no longer available/);
+  assert.deepEqual(joins, []);
+  cloudOwned = false;
+  await service.action('joinMeeting', selection);
+  assert.equal(joins.length, 1);
+  assert.equal(joins[0].url, meeting.joinURL);
+  assert.equal(service.state().status.phase, 'failed');
+  await service.dispose();
+});

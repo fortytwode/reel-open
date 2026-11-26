@@ -10,7 +10,7 @@ const messages = {
   saving:'Finishing your local recording.', completed:'Your recording was saved on this computer.',
   close_required:'Close the meeting window Reel opened, then refresh to continue.',
   calendar_unavailable:'Calendar could not be refreshed. Check your connection or reconnect Google Calendar.',
-  failed:'The meeting could not start automatically. Check Chrome and join the meeting manually.',
+  failed:'The meeting could not start. Check the meeting and your Chrome profile, then try again.',
   save_failed:'The recording could not be completed. Open the recordings folder to recover available local files.',
   retry_wait:'Reel will retry the meeting connection shortly.', cancelled:'Meeting setup was cancelled.'
 };
@@ -200,6 +200,20 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if (version!==generation || requireOwner()!==id) throw Error('The account changed. Refresh your settings.');
         if (revision!==settingsRevision) return state();
         settingsCache=saved;error=null;emit();await pulse();
+      } else if(name==='joinMeeting') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (typeof payload?.id !== 'string' || !payload.id || payload.id.length > 4_096
+          || Object.keys(payload).some(key => key !== 'id' && key !== 'expectedOwnerUserID'))
+          throw Error('Choose a meeting from your calendar.');
+        const version=generation, revision=settingsRevision;
+        await settingsTail;
+        if (version!==generation || revision!==settingsRevision || requireOwner()!==id || closing)
+          throw Error('Your account or recording settings changed. Refresh and try again.');
+        cache=null;
+        await coordinator.joinMeeting({meetingId:payload.id,ownerUserID:id});
+      } else if(name==='cancelJoin') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        await coordinator.cancelJoin(id);
       } else if(name==='retryProcessing') {
         const id=requireOwner(payload?.expectedOwnerUserID);
         if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');
