@@ -26,7 +26,7 @@ const organizationDirectory = (base, org) => path.join(base, 'organizations', or
 const sessionPath = base => path.join(base, 'session.encrypted');
 const ownerPath = base => path.join(base, 'recordings', hash(ownerUserID));
 const settings = { ownerUserID, autoJoin: true, participantConsent: true, systemAudioConsent: true,
-  selection: { useAll: false, ids: ['private-calendar'] } };
+  meetingReminders: false, selection: { useAll: false, ids: ['private-calendar'] } };
 
 async function seedSession(base, { projectID, allowedEmailDomain }) {
   const email = `person@${allowedEmailDomain}`;
@@ -71,6 +71,7 @@ async function startDesktop(base, org) {
   const entry = new URL(`../main.mjs?organization-state-test=${launches++}`, import.meta.url);
   const bindings = {
     electron: { app, BrowserWindow, clipboard: { writeText: noop }, desktopCapturer: { getSources: noop }, dialog: {}, shell: {},
+      Notification: class { on() {} show() {} },
       ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, Menu: { buildFromTemplate: noop, setApplicationMenu: noop },
       safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
         decryptString(bytes) { decryptions.push(bytes); return bytes.toString(); } } },
@@ -152,7 +153,7 @@ test('the same Firebase UID cannot reuse another organization’s session, conse
     assert.deepEqual(signedIn.calls, []);
     assert.deepEqual(signedIn.state.recordings, []);
     assert.deepEqual(signedIn.state.settings, { ownerUserID, autoJoin: false, participantConsent: false,
-      systemAudioConsent: false, selection: { useAll: true, ids: [] } });
+      systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
     assert.deepEqual(empty.decryptions, []);
     const expected = organizationDirectory(base, org);
     assert.deepEqual(signedIn.lockedPaths, { userData: expected, sessionData: expected });

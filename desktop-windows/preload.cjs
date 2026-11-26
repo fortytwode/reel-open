@@ -12,5 +12,11 @@ contextBridge.exposeInMainWorld('reelDesktop',Object.freeze({
     if(typeof callback!=='function') throw TypeError('State callback required');
     const listener=(_event,value)=>callback(value);ipcRenderer.on('reel-desktop:state',listener);
     return ()=>ipcRenderer.removeListener('reel-desktop:state',listener);
+  },
+  onMeetingReminder(callback){
+    if(typeof callback!=='function') throw TypeError('Meeting reminder callback required');
+    const listener=(_event,id)=>{if(typeof id==='string' && id.length>0 && id.length<=4096) callback(id);};
+    ipcRenderer.on('reel-desktop:meeting-reminder',listener);
+    return ()=>ipcRenderer.removeListener('reel-desktop:meeting-reminder',listener);
   }
 }));

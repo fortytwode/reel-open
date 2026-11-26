@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, open, writeFile, rename as fsRename } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Muxer, StreamTarget } from '../../web/vendor/mp4-muxer.mjs';
@@ -178,12 +179,13 @@ test('local playback resolves only an owned recording including older rows witho
 test('settings and durable completion deduplication remain bound to each owner', async t => {
   const { root, store } = await fixture(t);
   assert.deepEqual(store.getSettings('owner'), { ownerUserID: 'owner', autoJoin: false, participantConsent: false,
-    systemAudioConsent: false, selection: { useAll: true, ids: [] } });
+    systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
   const settings = { expectedOwnerUserID: 'owner', ownerUserID: 'owner', autoJoin: true, participantConsent: true,
-    systemAudioConsent: true, selection: { useAll: false, ids: ['calendar-b', 'calendar-a', 'calendar-a'] } };
+    systemAudioConsent: true, meetingReminders: true, selection: { useAll: false, ids: ['calendar-b', 'calendar-a', 'calendar-a'] } };
   await store.saveSettings(settings);
   await assert.rejects(store.saveSettings({ ...settings, expectedOwnerUserID: 'other' }));
   assert.deepEqual(store.getSettings('owner').selection.ids, ['calendar-b', 'calendar-a']);
+  assert.equal(store.getSettings('owner').meetingReminders, true);
   assert.equal(store.getSettings('other').participantConsent, false);
   const writer = await recorded(store);
   const recording = await writer.finish({ durationSeconds: 9 });
@@ -197,6 +199,17 @@ test('settings and durable completion deduplication remain bound to each owner',
   const restarted = createLocalRecordingStore({ root });
   assert.equal(restarted.hasCompleted(entry), true);
   assert.equal(restarted.getSettings('owner').autoJoin, true);
+});
+
+test('meeting reminders default off when reading settings written by older desktop versions', async t => {
+  const { root } = await fixture(t);
+  const ownerUserID = 'owner', directory = path.join(root, createHash('sha256').update(ownerUserID).digest('hex'));
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, 'library.json'), JSON.stringify({ version: 1, ownerUserID,
+    settings: { ownerUserID, autoJoin: true, participantConsent: true, systemAudioConsent: true,
+      selection: { useAll: true, ids: [] } }, recordings: [], completed: {} }));
+  const store = createLocalRecordingStore({ root });
+  assert.equal(store.getSettings(ownerUserID).meetingReminders, false);
 });
 
 test('new meeting audio and processing checkpoints survive restart with owner isolation', async t => {

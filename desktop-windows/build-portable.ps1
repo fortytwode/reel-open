@@ -83,7 +83,7 @@ $productFiles = @(
     'desktop-windows/organization.json', 'web/reel/organization.js',
     'desktop-windows/main.mjs', 'desktop-windows/preload.cjs',
     'desktop-windows/src/auth.mjs', 'desktop-windows/src/asset-server.mjs',
-    'desktop-windows/src/desktop-service.mjs', 'desktop-windows/src/google-calendar.mjs',
+    'desktop-windows/src/desktop-service.mjs', 'desktop-windows/src/google-calendar.mjs', 'desktop-windows/src/meeting-reminders.mjs',
     'desktop-windows/src/local-recordings.mjs', 'desktop-windows/src/meeting-coordinator.mjs', 'desktop-windows/src/meeting-processing.mjs', 'desktop-windows/src/meeting-share.mjs',
     'desktop-windows/src/native-bridge.mjs', 'desktop-windows/src/recorder.mjs',
     'desktop-windows/ui/index.html', 'desktop-windows/ui/setup.css', 'desktop-windows/ui/setup.mjs',

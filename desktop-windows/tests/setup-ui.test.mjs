@@ -36,8 +36,30 @@ class Element {
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
   get firstChild() { return this.children[0] ?? null; }
   setAttribute() {}
-  scrollIntoView() {}
+  scrollIntoView() { this.scrolled = true; }
+  focus() { this.focused = true; }
 }
+
+test('clicking a reminder scrolls to its meeting and does not join it', async () => {
+  const elements = new Map();
+  const getElement = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
+  const target = new Element('button'); target.dataset.meetingId = 'meeting-1';
+  let onMeetingReminder, actionCount = 0;
+  const api = { onMeetingReminder: fn => { onMeetingReminder = fn; }, state: async () => ({ configured: true, settings: {} }),
+    action: async () => { actionCount++; } };
+  const document = { getElementById: getElement, createElement: tag => new Element(tag),
+    querySelectorAll: selector => selector === '[data-meeting-id]' ? [target] : [], querySelector: () => null,
+    addEventListener() {} };
+  const context = { window: { reelDesktop: api }, document, setTimeout, clearTimeout,
+    Intl, Date, Number, String, Array, Set, Boolean, Math, Promise };
+  const source = await readFile(new URL('../ui/setup.mjs', import.meta.url), 'utf8');
+  vm.runInNewContext(source, context);
+  await new Promise(resolve => setImmediate(resolve));
+  onMeetingReminder('meeting-1');
+  assert.equal(target.scrolled, true);
+  assert.equal(target.focused, true);
+  assert.equal(actionCount, 0);
+});
 
 test('action failure remains visible when the next service pulse rerenders setup', async () => {
   const elements = new Map();

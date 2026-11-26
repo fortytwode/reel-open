@@ -10,6 +10,7 @@ let currentOwner = null;
 let pendingSignIn = null;
 let pendingJoin = false;
 let microphoneMeetingId = null;
+let pendingReminderMeetingID = null;
 let actionError = null;
 
 function node(tag, className, text) {
@@ -29,7 +30,7 @@ function showError(message = '') {
 function currentSettings() {
   const s = localSettings ?? snapshot?.settings ?? {};
   return { autoJoin: s.autoJoin === true, participantConsent: s.participantConsent === true,
-    systemAudioConsent: s.systemAudioConsent === true,
+    systemAudioConsent: s.systemAudioConsent === true, meetingReminders: s.meetingReminders === true,
     selection: { useAll: s.selection?.useAll === true, ids: Array.isArray(s.selection?.ids) ? [...s.selection.ids] : [] } };
 }
 function onboarding() {
@@ -90,6 +91,11 @@ function consentControls(settings, dashboard) {
     const text=node('span'); text.append(node('strong','','Automatically join and record eligible meetings'));
     text.append(node('small','',enabled?'Reel joins selected upcoming meetings and starts local capture.':'Connect your calendar and confirm both permissions to enable auto-join.'));
     auto.append(box,text); wrap.append(auto);
+    const reminder=node('label','setting'); const reminderBox=node('input'); reminderBox.type='checkbox';
+    reminderBox.dataset.setting='meetingReminders'; reminderBox.checked=settings.meetingReminders;
+    const reminderText=node('span'); reminderText.append(node('strong','','Prompt when a calendar meeting starts'));
+    reminderText.append(node('small','','Show a local Windows notification at meeting start. Reel will not join or record from this reminder.'));
+    reminder.append(reminderBox,reminderText); wrap.append(reminder);
     if (snapshot?.startup) {
       wrap.append(node('div','divider'), node('p','calendar-heading','Start at Windows sign-in'));
       if (snapshot.startup.mode === 'windows-settings') {
@@ -154,6 +160,13 @@ function renderMeetings() {
     row.append(details, actions);
     list.append(row);
   }
+  focusReminderMeeting();
+}
+function focusReminderMeeting(id = pendingReminderMeetingID) {
+  if(typeof id==='string' && id) pendingReminderMeetingID=id;
+  if(!pendingReminderMeetingID) return;
+  const target=[...document.querySelectorAll('[data-meeting-id]')].find(element=>element.dataset.meetingId===pendingReminderMeetingID);
+  if(target) { pendingReminderMeetingID=null; target.scrollIntoView({behavior:'smooth',block:'center'}); target.focus(); }
 }
 function renderRecordings() {
   const list=byId('recordingsList'); clear(list); const recordings=(snapshot.recordings ?? []);
@@ -242,6 +255,7 @@ function applySnapshot(next, expectedGeneration = null) {
     pendingSignIn=null;
     pendingJoin=false;
     microphoneMeetingId=null;
+    pendingReminderMeetingID=null;
     clearMeetingLink();
     actionError=null;
     currentOwner=owner;
@@ -397,4 +411,5 @@ document.addEventListener('submit', event => {
   void startMeeting('joinMeetingLink', { url, participantsConfirmed, includeMicrophone: byId('meetingLinkMicrophone').checked });
 });
 if (api?.onState) api.onState(next=>applySnapshot(next));
+if (api?.onMeetingReminder) api.onMeetingReminder(focusReminderMeeting);
 if (api?.state) { const initialGeneration=renderGeneration; api.state().then(next=>applySnapshot(next,initialGeneration)).catch(error=>showError(error?.message||'Reel could not load its current state.')); }

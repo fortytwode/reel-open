@@ -1,7 +1,7 @@
 import { routeGoogleMeetings } from './google-calendar.mjs';
 
 const defaults = ownerUserID => ({ownerUserID, autoJoin:false, participantConsent:false,
-  systemAudioConsent:false, selection:{useAll:true,ids:[]}});
+  systemAudioConsent:false, meetingReminders:false, selection:{useAll:true,ids:[]}});
 const messages = {
   idle:'Keep Reel open and this computer awake to check upcoming meetings.',
   scheduled:'Ready for upcoming meetings in your selected calendars.',
@@ -15,7 +15,7 @@ const messages = {
   save_failed:'The recording could not be completed. Open the recordings folder to recover available local files.',
   retry_wait:'Reel will retry the meeting connection shortly.', cancelled:'Meeting setup was cancelled.'
 };
-const keys = ['ownerUserID','expectedOwnerUserID','autoJoin','participantConsent','systemAudioConsent','selection'];
+const keys = ['ownerUserID','expectedOwnerUserID','autoJoin','participantConsent','systemAudioConsent','meetingReminders','selection'];
 const selectionKey = value => JSON.stringify({useAll:value.useAll,ids:[...new Set(value.ids)].sort()});
 
 export function desktopLaunchAction(args = []) {
@@ -65,7 +65,7 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,copyText,startup,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,copyText,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
@@ -95,6 +95,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   function emit() { if (!closed) onState(state()); }
   function invalidate() {
     generation++; settingsRevision++; cache=null; calendarController?.abort(); calendarController=null;
+    reminderScheduler?.update({owner:null,reminders:false,meetings:[]});
     calendars=[];meetings=[];calendarOwner=null;routingUnavailable=false;error=null;settingsCache=null;
   }
   async function calendarDiscover(args) {
@@ -147,11 +148,12 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     }
     const operation=(async()=>{
       const profile=auth.getProfile(), version=generation;
-      if (!profile?.calendarConnected) { await coordinator.refresh(); await coordinator.tick(); emit(); return; }
+      if (!profile?.calendarConnected) { reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]}); await coordinator.refresh(); await coordinator.tick(); emit(); return; }
       const controller=new AbortController(); calendarController=controller;
       try {
         const result=await calendarDiscover({auth,selection:settings().selection,now:new Date(),signal:controller.signal});
         if (closed || closing || version!==generation || profile.userID!==auth.getProfile()?.userID) return;
+        reminderScheduler?.update({owner:profile.userID,reminders:settings().meetingReminders,meetings:result.meetings,at:new Date()});
         calendarOwner=profile.userID;
         calendars=result.calendars.map(({id,title,primary})=>({id,title,primary:primary===true}));
         meetings=result.meetings.map(({id,title,start,end,platform})=>({id,title,start,end,platform}));
@@ -159,6 +161,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       } catch {
         if (closed || closing || version!==generation) return;
         cache=null;calendars=[];meetings=[];
+        reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]});
         error='Could not refresh your calendar. Reconnect Google Calendar or try again.';
         await coordinator.cancel();emit();
       } finally { if(calendarController===controller) calendarController=null; }
@@ -196,7 +199,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(); auth.disconnectCalendar();await coordinator.cancel();
         const write=settingsTail.catch(()=>{}).then(()=>{
           const value=store.getSettings(id);
-          return store.saveSettings({...value,ownerUserID:id,expectedOwnerUserID:id,autoJoin:false});
+          return store.saveSettings({...value,ownerUserID:id,expectedOwnerUserID:id,autoJoin:false,meetingReminders:false});
         });
         settingsTail=write;write.catch(()=>{});await write;
       } else if(name==='saveSettings') {
@@ -205,12 +208,12 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(payload.expectedOwnerUserID), version=generation;
         if (payload.expectedOwnerUserID!==id || (payload.ownerUserID!==undefined && payload.ownerUserID!==id))
           throw Error('The account changed. Refresh your settings.');
-        if (![payload.autoJoin,payload.participantConsent,payload.systemAudioConsent].every(flag=>typeof flag==='boolean')
+        if (![payload.autoJoin,payload.participantConsent,payload.systemAudioConsent,payload.meetingReminders].every(flag=>typeof flag==='boolean')
           || typeof payload.selection?.useAll!=='boolean' || !Array.isArray(payload.selection.ids)
           || payload.selection.ids.length>250 || payload.selection.ids.some(value=>typeof value!=='string'||!value||value.length>1024))
           throw Error('Invalid recording settings.');
         const next={ownerUserID:id,autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
-          participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,
+          participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,meetingReminders:payload.meetingReminders,
           selection:{useAll:payload.selection.useAll,ids:[...new Set(payload.selection.ids)]}};
         if(next.autoJoin && !auth.getProfile().calendarConnected) throw Error('Connect Google Calendar first.');
         const revision=++settingsRevision, changed=JSON.stringify(settings())!==JSON.stringify(next);
@@ -218,6 +221,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if(changed) {
           // Revoke immediately, before disk I/O; only durable settings can enable a new capture.
           settingsCache={...next,autoJoin:false};cache=null;calendarController?.abort();
+          if(!next.meetingReminders) reminderScheduler?.update({owner:id,reminders:false,meetings:[]});
           cancellation=coordinator.cancel();
         }
         // Enqueue at action arrival, before awaiting cancellation, so a slower
@@ -319,7 +323,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const failure=Error('Your latest recording settings have not been saved. Free disk space or restore access to your local files, then retry saving before quitting.');
         failure.code='settings_not_saved';throw failure;
       }
-      await cancellation;await coordinator?.dispose();
+      await cancellation;await coordinator?.dispose();reminderScheduler?.dispose();
       processor?.dispose();closed=true;unsubscribeStatus?.();unsubscribeProcessing?.();unsubscribeAuth?.();
     })().catch(cause=>{closing=false;disposePromise=null;throw cause;});
     return disposePromise;
