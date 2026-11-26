@@ -70,6 +70,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
   const activeShares=new Set();
+  const activeRecordingOperations=new Map();
   let settingsTail=Promise.resolve(),disposePromise=null;
   let calendars=[],meetings=[],calendarOwner=null,routingUnavailable=false;
   const routingMessage='Cloud routing could not be checked. Local Meet and Teams joins are paused. Zoom can continue.';
@@ -88,7 +89,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     const currentCalendar=calendarOwner===profile?.userID;
     return {configured,profile,settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
       meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
-        ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`)})) : [],
+        ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`),localOperation:activeRecordingOperations.get(`${profile.userID}:${recording.id}`)?.label ?? null})) : [],
       status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},error};
   }
   function emit() { if (!closed) onState(state()); }
@@ -185,7 +186,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       startup.setEnabled(payload.enabled);
     }
     else {
-      if (!configured) throw Error('Automatic meetings are unavailable in this build.');
+      if (!configured && !['renameRecording','deleteRecording'].includes(name)) throw Error('Automatic meetings are unavailable in this build.');
       if (name==='signIn' || name==='connectCalendar') {
         await auth.signIn({connectCalendar:name==='connectCalendar'});
         invalidate();owner=auth.getProfile()?.userID ?? null; await pulse();
@@ -282,6 +283,23 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           ...(typeof payload.password === 'string' ? { password:payload.password } : {}),
           ...(typeof payload.expiry === 'string' ? { expiry:payload.expiry } : {})}); }
         finally { activeShares.delete(key);emit(); }
+      } else if(name==='renameRecording' || name==='deleteRecording') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null), deleting=name==='deleteRecording';
+        const allowed=deleting?['expectedOwnerUserID','id','localOnlyConfirmed']:['expectedOwnerUserID','id','title'];
+        if (!payload || typeof payload!=='object' || Array.isArray(payload) || Object.keys(payload).some(key=>!allowed.includes(key))
+          || typeof payload.id!=='string' || (deleting ? payload.localOnlyConfirmed!==true : typeof payload.title!=='string'))
+          throw Error(deleting ? 'Confirm that this action deletes only the local copy.' : 'Invalid recording title.');
+        if (typeof store[deleting?'deleteRecording':'rename']!=='function') throw Error('Local recording management is unavailable.');
+        const version=generation,key=`${id}:${payload.id}`,operation={label:deleting?'deleting':'renaming'};
+        activeRecordingOperations.set(key,operation);emit();
+        try {
+          const args={ownerUserID:id,expectedOwnerUserID:id,id:payload.id,
+            isCurrent:()=>version===generation&&auth.getProfile()?.userID===id,
+            ...(deleting?{}:{title:payload.title})};
+          if (deleting) await store.deleteRecording({...args,localOnlyConfirmed:true});
+          else await store.rename(args);
+          if (version!==generation || requireOwner()!==id) throw Error('The account changed. Refresh your recordings.');
+        } finally { if(activeRecordingOperations.get(key)===operation) activeRecordingOperations.delete(key);emit(); }
       } else if(name==='stopRecording') { await coordinator.cancel();emit(); }
       else if(name==='refresh') { cache=null;await pulse(); }
       else throw Error('Unknown Reel action.');

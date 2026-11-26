@@ -3,6 +3,7 @@ import * as C from '../../web/reel/core.js';
 import { StorageClient, FirestoreClient } from '../../web/reel/cloud.js';
 
 const check = (value, message) => { if (!value) throw Error(message); };
+const MIN_PASSWORD_LENGTH = 12;
 
 /** Explicit, main-process-only sharing for completed local meeting recordings. */
 export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {}, copy = () => {}, now = () => new Date(),
@@ -31,8 +32,8 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
         check(typeof password === 'string' && password.length <= 1024, 'Invalid recording password.');
         let key = null, passwordSalt = null;
         if (password) {
-          check(password.length >= C.ACCESS.minimumPasswordLength,
-            `Use at least ${C.ACCESS.minimumPasswordLength} characters for the recording password.`);
+          check(password.length >= MIN_PASSWORD_LENGTH,
+            `Use at least ${MIN_PASSWORD_LENGTH} characters for the recording password.`);
           passwordSalt = C.newSalt();
           key = await C.deriveKey(password, passwordSalt);
           check(C.isValidKey(key), "Couldn't derive a key from that password.");
@@ -140,7 +141,9 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
   function share(args) {
     const key = `${args?.ownerUserID}:${args?.id}`;
     if (active.has(key)) return active.get(key);
-    const task = runShare(args).finally(() => active.delete(key));
+    const task = (store.withRecordingLock
+      ? store.withRecordingLock({ ownerUserID: args?.ownerUserID, id: args?.id }, () => runShare(args))
+      : runShare(args)).finally(() => active.delete(key));
     active.set(key, task); return task;
   }
   return { share };

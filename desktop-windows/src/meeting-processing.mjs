@@ -198,7 +198,9 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
     if (jobs.has(key) && !jobs.get(key).controller.signal.aborted) return jobs.get(key).promise;
     const controller = new AbortController();
     requireCurrent(ownerUserID, id, controller);
-    const promise = queue.catch(() => {}).then(() => run(ownerUserID, id, controller)).finally(() => {
+    const execute = () => run(ownerUserID, id, controller);
+    const promise = queue.catch(() => {}).then(() => store.withRecordingLock
+      ? store.withRecordingLock({ ownerUserID, id }, execute) : execute()).finally(() => {
       // A cancelled job may have a replacement queued behind it. Its cleanup
       // must not remove that replacement's cancellation or deduplication entry.
       if (jobs.get(key)?.controller === controller) jobs.delete(key);

@@ -178,9 +178,9 @@ function renderRecordings() {
       const initialShare = !sharing;
       let sharePassword = null, shareExpiry = null;
       if (initialShare) {
-        const passwordLabel = node('label', 'recording-share-setting', 'Password (optional)');
+        const passwordLabel = node('label', 'recording-share-setting', 'Password (optional; at least 12 characters)');
         sharePassword = node('input'); sharePassword.type = 'password'; sharePassword.autocomplete = 'off';
-        sharePassword.maxLength = 1024; sharePassword.dataset.sharePassword = recording.id;
+        sharePassword.maxLength = 1024; sharePassword.minLength = 12; sharePassword.dataset.sharePassword = recording.id;
         passwordLabel.append(sharePassword);
         const expiryLabel = node('label', 'recording-share-setting', 'Link expires');
         shareExpiry = node('select'); shareExpiry.dataset.shareExpiry = recording.id;
@@ -204,6 +204,11 @@ function renderRecordings() {
       }
       if(sharing?.failed) left.append(node('div','recording-meta','Sharing failed. Select Retry sharing to try again.'));
     }
+    if (recording.localOperation) left.append(node('div','recording-meta',recording.localOperation==='deleting'?'Deleting local copy…':'Saving title…'));
+    const rename=node('button','','Rename'); rename.type='button'; rename.dataset.action='renameRecording'; rename.dataset.recordingId=recording.id;
+    rename.disabled=recording.localOperation==='deleting'; left.append(rename);
+    const remove=node('button','','Delete local copy'); remove.type='button'; remove.dataset.action='deleteRecording'; remove.dataset.recordingId=recording.id;
+    remove.disabled=recording.localOperation==='deleting'; left.append(remove);
     row.append(left); list.append(row); }
 }
 function render() {
@@ -335,6 +340,19 @@ document.addEventListener('click', event=>{
     const payload = { id:target.dataset.recordingId, expectedOwnerUserID:snapshot?.profile?.userID,
       ...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{}), ...(password?{password}:{}), ...(expiry!=='never'?{expiry}:{}) };
     void perform(action,payload).finally(()=>{ if(target.sharePasswordInput) target.sharePasswordInput.value=''; });
+    return;
+  }
+  if(action==='renameRecording') {
+    const recording=(snapshot.recordings??[]).find(item=>item.id===target.dataset.recordingId);
+    if (!recording) return;
+    const title=window.prompt('Rename saved recording',recording.title||'Recording');
+    if(title!==null) void perform(action,{id:recording.id,title,expectedOwnerUserID:snapshot.profile.userID});
+    return;
+  }
+  if(action==='deleteRecording') {
+    const recording=(snapshot.recordings??[]).find(item=>item.id===target.dataset.recordingId);
+    if (!recording || !window.confirm(`Delete “${recording.title||'Recording'}” from this computer? This removes the local recording only. Any cloud share link remains available.`)) return;
+    void perform(action,{id:recording.id,localOnlyConfirmed:true,expectedOwnerUserID:snapshot.profile.userID});
     return;
   }
   perform(action);

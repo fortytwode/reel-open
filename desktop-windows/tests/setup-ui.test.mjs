@@ -17,8 +17,12 @@ test('the dashboard can retry a saved recording through the restricted preload',
   await api.action('shareRecording', recording);
   await api.action('playRecording', recording);
   await api.action('copyTranscript', recording);
+  await api.action('renameRecording', recording);
+  await api.action('deleteRecording', recording);
   await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
-  assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'copyTranscript', recording]]);
+  assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording],
+    ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'copyTranscript', recording],
+    ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording]]);
 });
 
 class Element {
@@ -158,14 +162,46 @@ test('a saved meeting is shared only when its explicit button is selected', asyn
   assert.ok(button); assert.equal(button.textContent,'Share recording');
   const password = button.sharePasswordInput, expiry = button.shareExpiryInput;
   assert.equal(password.type,'password'); assert.equal(expiry.tagName,'select');
-  password.value='birdhouse'; expiry.value='week';
+  assert.equal(password.minLength,12);
+  const passwordLabel=getElement('recordingsList').children[0].children[0].children.find(child=>child.tagName==='label');
+  assert.match(passwordLabel.textContent,/at least 12 characters/i);
+  password.value='birdhouse123'; expiry.value='week';
   onClick({target:{closest:selector=>selector==='[data-action]'?button:null}});
   await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',password:'birdhouse',expiry:'week'}]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',password:'birdhouse123',expiry:'week'}]]);
   assert.equal(password.value,'','The password field should be cleared after the action.');
   onClick({target:{closest:selector=>selector==='[data-action]'?transcriptButton:null}});
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))),['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',includeTranscript:true,expiry:'week'}]);
+});
+
+test('saved recordings expose rename and clearly local-only deletion controls', async () => {
+  const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onClick; const calls=[], confirmations=[];
+  const snapshot={configured:true,profile:{userID:'owner-a',email:'a@example.com',calendarConnected:true},
+    settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},
+    meetings:[],status:{phase:'idle'},recordings:[{id:'meeting-id',title:'Weekly meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9}]};
+  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
+  const context={window:{reelDesktop:api,prompt:(_label,value)=>`${value} renamed`,confirm:message=>{confirmations.push(message);return true;}},
+    document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  const controls=getElement('recordingsList').children[0].children[0].children;
+  const rename=controls.find(child=>child.dataset.action==='renameRecording');
+  const remove=controls.find(child=>child.dataset.action==='deleteRecording');
+  assert.equal(rename.textContent,'Rename'); assert.equal(remove.textContent,'Delete local copy');
+  onClick({target:{closest:selector=>selector==='[data-action]'?rename:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  onClick({target:{closest:selector=>selector==='[data-action]'?remove:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[
+    ['renameRecording',{id:'meeting-id',title:'Weekly meeting renamed',expectedOwnerUserID:'owner-a'}],
+    ['deleteRecording',{id:'meeting-id',localOnlyConfirmed:true,expectedOwnerUserID:'owner-a'}],
+  ]);
+  assert.match(confirmations[0],/local recording only/i);
+  assert.match(confirmations[0],/cloud share link remains/i);
 });
 
 test('a persisted uploading share is retryable after app restart', async () => {
