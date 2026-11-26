@@ -242,10 +242,11 @@ async function cleanupProcesses() {
       && process.path.toLowerCase() === edgePath.toLowerCase()
       && !baselineEdgePids.has(process.pid)).map(process => process.pid);
     if (!pids.length) return;
-    powershell(String.raw`
-$ids = @($env:REEL_SMOKE_EDGE_PIDS.Split(',') | ForEach-Object { [int]$_ })
-foreach ($id in $ids) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
-`, { ...process.env, REEL_SMOKE_EDGE_PIDS: pids.join(',') });
+    for (const pid of pids) {
+      // taskkill is a Windows inbox executable and avoids PowerShell module
+      // autoload during cleanup on fresh hosted runners.
+      spawnSync('taskkill.exe', ['/PID', String(pid), '/F'], { encoding: 'utf8', windowsHide: true });
+    }
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   const remaining = (await inspect()).processes.filter(process => process.path
