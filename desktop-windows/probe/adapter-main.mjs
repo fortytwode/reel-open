@@ -6,11 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { startAssetServer } from '../src/asset-server.mjs';
 import { createLocalRecordingStore } from '../src/local-recordings.mjs';
 import { createWindowsRecorder } from '../src/recorder.mjs';
+import { createNativeBridge } from '../src/native-bridge.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outArg = process.argv.find(arg => arg.startsWith('--out='));
 const outDir = path.resolve(outArg ? outArg.slice(6) : path.join(here, 'adapter-out'));
 const abortNegative = process.argv.includes('--abort-negative');
+const verifyOutputSwitch = process.argv.includes('--verify-output-switch');
 const ownerUserID = 'synthetic-probe';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
@@ -58,7 +60,7 @@ async function run() {
   await mkdir(outDir, { recursive: true });
   const assets = await startAssetServer();
   const fixture = await fixtureServer();
-  let fixtureWindow;
+  let fixtureWindow, bridge, recorder, activeCapture;
   try {
     fixtureWindow = new BrowserWindow({ width: 840, height: 560, x: 40, y: 40, show: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true } });
@@ -69,7 +71,19 @@ async function run() {
     const exact = sources.filter(source => /^window:(\d+):[01]$/.test(source.id) && source.id.split(':')[1] === id);
     if (exact.length !== 1) throw Error('Fixture did not have one exact window source');
     const store = createLocalRecordingStore({ root: path.join(outDir, 'recordings') });
-    const recorder = createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain, store, origin: assets.origin,
+    let originalEndpoint, changedAt;
+    if (verifyOutputSwitch) {
+      bridge = createNativeBridge({ executable: path.join(here, '../native/ReelNativeJoin.exe') });
+      originalEndpoint = await bridge.defaultRenderEndpoint();
+      if (!originalEndpoint) throw Error('The fixture needs a default Windows output device');
+    }
+    async function observeOutput() {
+      const current = await bridge.defaultRenderEndpoint();
+      if (current && current !== originalEndpoint) changedAt ??= Date.now();
+      return current;
+    }
+    recorder = createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain, store, origin: assets.origin,
+      defaultRenderEndpoint: verifyOutputSwitch ? observeOutput : undefined,
       onFailure: error => failures.push(error.message) });
     const controller = new AbortController();
     const argumentsForCapture = { hwnd: id, pid: process.pid, meeting: { title: 'Fixture' },
@@ -91,26 +105,41 @@ async function run() {
         hwnd: id, sourceId: exact[0].id, electron: process.versions.electron };
     }
     const beganAt = Date.now();
-    const handle = await recorder.start(argumentsForCapture);
+    activeCapture = await recorder.start(argumentsForCapture);
     const captureWindows = BrowserWindow.getAllWindows().filter(window => !window.isDestroyed() && window !== fixtureWindow);
     if (captureWindows.length !== 1 || captureWindows[0].isVisible()) throw Error('Recorder was not one hidden window');
-    await sleep(Math.max(0, 13_500 - (Date.now() - beganAt)));
-    const recording = await recorder.stop(handle);
+    if (verifyOutputSwitch) {
+      await sleep(5_000);
+      if (changedAt) throw Error('Default output changed before the control sample');
+      await writeFile(path.join(outDir, 'switch-ready.json'), JSON.stringify({ originalEndpoint }));
+      const deadline = Date.now() + 45_000;
+      while (!changedAt && Date.now() < deadline) await sleep(200);
+      if (!changedAt) throw Error('Windows did not report a different default output device');
+      await fixtureWindow.webContents.executeJavaScript('tone.frequency.value = 660');
+      await sleep(10_000);
+    } else {
+      await sleep(Math.max(0, 13_500 - (Date.now() - beganAt)));
+    }
+    const recording = await recorder.stop(activeCapture);
+    activeCapture = null;
     const bytes = await readFile(recording.path);
     const segmentCount = fragments(bytes);
     if (!recording.playable || segmentCount < 3 || bytes.length < 10_000 || bytes.length > 20 * 1024 * 1024
       || store.list(ownerUserID).length !== 1 || failures.length) throw Error('Real adapter did not save a complete local recording');
     return { ok: true, method: 'production-recorder-exact-source', hwnd: id, sourceId: exact[0].id,
       recording, bytes: bytes.length, segmentCount, recorderWindowHidden: true,
+      ...(verifyOutputSwitch ? { outputSwitched: true, changeAfterStartSeconds: (changedAt - beganAt) / 1000 } : {}),
       electron: process.versions.electron, chromium: process.versions.chrome };
   } finally {
+    if (activeCapture) await recorder.stop(activeCapture).catch(() => {});
+    await bridge?.dispose();
     if (fixtureWindow && !fixtureWindow.isDestroyed()) fixtureWindow.destroy();
     await fixture.close(); await assets.close();
   }
 }
 
 let finished = false;
-const watchdog = setTimeout(() => { void finish({ ok: false, error: 'Adapter probe timed out after 75 seconds' }); }, 75_000);
+const watchdog = setTimeout(() => { void finish({ ok: false, error: 'Adapter probe timed out' }); }, verifyOutputSwitch ? 110_000 : 75_000);
 async function finish(result) {
   if (finished) return;
   finished = true; clearTimeout(watchdog);
