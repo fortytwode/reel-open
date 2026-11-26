@@ -1,8 +1,45 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildMeetingSummary, mixToMono, normalizeSegments, resample,
+  buildMeetingSummary, mixToMono, normalizeSegments, resample, transcribePCM,
 } from "../../web/reel/meeting-transcription.js";
+import * as C from "../../web/reel/core.js";
+import { WHISPER_LANGUAGE_CODES, normalizeWhisperLanguage, whisperLanguageOptions } from "../../web/reel/whisper-languages.js";
+
+test("transcription language settings round-trip and reject unsupported persisted values", () => {
+  assert.equal(C.decodeSettings({}).transcriptionLanguage, "en");
+  const saved = C.decodeSettings({ transcriptionLanguage: "fr" });
+  assert.equal(C.decodeSettings(JSON.parse(JSON.stringify(saved))).transcriptionLanguage, "fr");
+  assert.equal(C.decodeSettings({ transcriptionLanguage: "yue" }).transcriptionLanguage, "en");
+  assert.equal(C.decodeSettings({ transcriptionLanguage: "not-a-language" }).transcriptionLanguage, "en");
+  assert.equal(normalizeWhisperLanguage("haw"), "haw");
+  assert.equal(WHISPER_LANGUAGE_CODES.length, 99);
+  assert.equal(WHISPER_LANGUAGE_CODES.includes("yue"), false);
+  const options = whisperLanguageOptions();
+  assert.equal(options.length, WHISPER_LANGUAGE_CODES.length);
+  assert.equal(options.find(({ code }) => code === "en").label, "English");
+  assert.ok(options.find(({ code }) => code === "haw").label.length > 2);
+});
+
+test("selected language reaches the local worker and invalid worker requests fall back to English", async (t) => {
+  const previousWorker = globalThis.Worker;
+  const messages = [];
+  globalThis.Worker = class {
+    constructor() { this.terminated = false; }
+    postMessage(message) {
+      messages.push(message);
+      queueMicrotask(() => this.onmessage({ data: { type: "result", text: "Bonjour.", chunks: [], language: message.language } }));
+    }
+    terminate() { this.terminated = true; }
+  };
+  t.after(() => { globalThis.Worker = previousWorker; });
+
+  const french = await transcribePCM(new Float32Array(16_000), { language: "fr" });
+  const hawaiian = await transcribePCM(new Float32Array(16_000), { language: "haw" });
+  const invalid = await transcribePCM(new Float32Array(16_000), { language: "yue" });
+  assert.deepEqual(messages.map(({ language }) => language), ["fr", "haw", "en"]);
+  assert.deepEqual([french.language, hawaiian.language, invalid.language], ["fr", "haw", "en"]);
+});
 
 test("mixes audio channels without dropping or duplicating samples", () => {
   const mono = mixToMono({ numberOfChannels: 2, length: 3,
