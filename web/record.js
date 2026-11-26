@@ -14,7 +14,7 @@ import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, CLOUD_CONFIG, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
 import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-hls-publication";
-import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-drawing";
+import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-audio-timestamp-alignment";
 import { chooseRecordingRegion } from "./reel/region-picker.js";
 import { createAnnotationPanel } from "./reel/annotation-panel.js?v=20261126-drawing";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";

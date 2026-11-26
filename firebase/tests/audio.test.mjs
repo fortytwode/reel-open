@@ -33,3 +33,11 @@ test("large stereo blocks split across batches and the partial tail stays planar
     { frames: 5, samples: [8, 9, 10, 11, 12, 108, 109, 110, 111, 112] },
   ]);
 });
+
+test("audio batches preserve selected source frames and insert silent gaps as zeros", () => {
+  const batch = new AudioBatch(8, 2), output = [];
+  batch.add(block([[0, 1, 2, 3, 4], [10, 11, 12, 13, 14]]), (samples, frames) => output.push({ samples: Array.from(samples), frames }), 2, 2);
+  batch.addSilence(3, (samples, frames) => output.push({ samples: Array.from(samples), frames }));
+  batch.flush((samples, frames) => output.push({ samples: Array.from(samples), frames }));
+  assert.deepEqual(output, [{ frames: 5, samples: [2, 3, 0, 0, 0, 12, 13, 0, 0, 0] }]);
+});

@@ -120,6 +120,113 @@ test("stopping a paused recording never draws new frames to fill a backlog", asy
   }
 });
 
+test("audio timestamp gaps are filled with silence while paused samples stay excluded", async () => {
+  const originals = new Map();
+  const replace = (name, value) => { originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, { configurable: true, writable: true, value }); };
+  let time = 0, encodedFrames = 0, encodedSignalFrames = 0, slowDrain = false;
+  const messages = [];
+  replace("self", { postMessage(message) { messages.push(message); } });
+  replace("OffscreenCanvas", class { getContext() { return { fillRect() {}, drawImage() {} }; } async convertToBlob() {} });
+  replace("VideoFrame", class { close() {} });
+  replace("VideoEncoder", class {
+    static async isConfigSupported() { return { supported: true }; }
+    configure() { this.state = "configured"; this.encodeQueueSize = 0; }
+    encode() {}
+    async flush() {}
+    close() {}
+  });
+  replace("AudioData", class {
+    constructor(init) { Object.assign(this, init); this.closed = false; }
+    copyTo(destination, { planeIndex, frameOffset, frameCount }) {
+      if (this.data) destination.set(this.data.subarray(planeIndex * this.numberOfFrames + frameOffset,
+        planeIndex * this.numberOfFrames + frameOffset + frameCount));
+      else destination.fill(planeIndex + 0.25, 0, frameCount);
+    }
+    close() { this.closed = true; }
+  });
+  replace("AudioEncoder", class {
+    static async isConfigSupported() { return { supported: true }; }
+    configure() { this.state = "configured"; this.encodeQueueSize = 0; }
+    encode(data) {
+      encodedFrames += data.numberOfFrames;
+      if (data.data) encodedSignalFrames += Array.from(data.data).filter(sample => sample !== 0).length / data.numberOfChannels;
+      if (slowDrain) {
+        this.encodeQueueSize++;
+        setTimeout(() => { this.encodeQueueSize = Math.max(0, this.encodeQueueSize - 1); }, 1);
+      }
+    }
+    async flush() {}
+    close() {}
+  });
+  mock.method(globalThis, "setInterval", () => 1);
+  mock.method(globalThis, "clearInterval", () => {});
+  mock.method(performance, "now", () => time);
+  const audio = (timestampSeconds, frames) => new AudioData({ timestamp: Math.round(timestampSeconds * 1e6),
+    numberOfFrames: frames, numberOfChannels: 2, sampleRate: 48000, format: "f32-planar" });
+  const sendAudio = (timestampSeconds, frames) => self.onmessage({ data: {
+    type: "audio", data: audio(timestampSeconds, frames), audioTime: timestampSeconds,
+  } });
+  try {
+    await import(`../../web/reel/encoder-worker.js?audio-gap-pause-${Date.now()}`);
+    await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000,
+      audio: true, audioSampleRate: 48000, audioChannels: 2, audioClockTime: 10 } });
+    await self.onmessage({ data: { type: "begin", audioTime: 10 } });
+    await sendAudio(10, 4800);
+    time = 500;
+    await self.onmessage({ data: { type: "pause", pauseID: 1, audioTime: 10.5 } });
+    // A queued pre-pause block may arrive after the worker handles Pause.
+    await sendAudio(10.1, 4800);
+    await sendAudio(10.5, 96000);
+    time = 2500;
+    await self.onmessage({ data: { type: "resume", audioTime: 12.5 } });
+    await sendAudio(13.58, 4800);
+    time = 3680;
+    await self.onmessage({ data: { type: "stop", audioTime: 13.68 } });
+    assert.equal(encodedFrames, 80640,
+      "0.5s before pause + 1.18s after resume should be encoded; the 1.08s active gap becomes silence and 2s paused samples are excluded");
+    assert.equal(encodedSignalFrames, 14400,
+      "all three 0.1s signal blocks, including the delayed pre-pause block, must survive; the gap is silence");
+
+    encodedFrames = 0; encodedSignalFrames = 0; time = 0; slowDrain = true;
+    await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000,
+      audio: true, audioSampleRate: 48000, audioChannels: 2, audioClockTime: 10 } });
+    await self.onmessage({ data: { type: "begin", audioTime: 10 } });
+    await sendAudio(10, 4800);
+    await sendAudio(12, 4800);
+    await self.onmessage({ data: { type: "stop", audioTime: 12.1 } });
+    slowDrain = false;
+    assert.equal(messages.at(-1).type, "done", `a 1.9s gap should wait for AAC batches to drain instead of overflowing the existing queue limit: ${JSON.stringify(messages.slice(-3))}`);
+    assert.equal(encodedFrames, 100800, "0.1s input + 1.9s silence + 0.1s input spans 2.1s");
+
+    await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000,
+      audio: true, audioSampleRate: 48000, audioChannels: 2, audioClockTime: 10 } });
+    await self.onmessage({ data: { type: "begin", audioTime: 10 } });
+    await sendAudio(10, 4800);
+    await sendAudio(13.1, 4800);
+    assert.equal(messages.at(-1).type, "error");
+    assert.match(messages.at(-1).message, /missed more than two seconds/i,
+      "a longer gap should stop capture instead of allocating an unbounded silence buffer");
+
+    encodedFrames = 0; encodedSignalFrames = 0; time = 0;
+    await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000,
+      audio: true, audioSampleRate: 48000, audioChannels: 2, audioClockTime: 10 } });
+    await self.onmessage({ data: { type: "begin", audioTime: 10 } });
+    await sendAudio(10, 4800);
+    time = 500;
+    await self.onmessage({ data: { type: "stop", audioTime: 10.5 } });
+    assert.equal(encodedFrames, 24000,
+      "stop must flush 0.4s of active silence after the last 0.1s input block, despite the shifted timestamp origin");
+    assert.equal(encodedSignalFrames, 4800, "the input signal remains present before the stop-tail silence");
+  } finally {
+    slowDrain = false;
+    if (self.onmessage) await self.onmessage({ data: { type: "cancel" } });
+    mock.restoreAll();
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];
+    }
+  }
+});
+
 test("legacy audio ReadableStream is consumed and its frames are closed", async () => {
   const originals = new Map();
   const replace = (name, value) => { originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, { configurable: true, writable: true, value }); };

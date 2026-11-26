@@ -9,13 +9,14 @@
 // expiry, trim, crash recovery of a killed tab, and delete.
 import http from "node:http";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 import { chromium } from "playwright";
 import * as C from "../../web/reel/core.js";
 import { boxes } from "../../web/reel/fmp4.js";
+import { activeClockTimeToOutputTime, recordedToneWindowIsPresent } from "./recorder-smoke-audio-assertions.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(HERE, "../../web");
@@ -83,6 +84,13 @@ function ffprobe(file) {
     "-of", "json", file], { encoding: "utf8" });
   return JSON.parse(out);
 }
+function ffmpegMeanVolume(file, start, duration, filter = "volumedetect") {
+  const result = spawnSync("ffmpeg", ["-hide_banner", "-v", "info", "-ss", String(start), "-t", String(duration), "-i", file,
+    "-vn", "-af", filter, "-f", "null", "-"], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+  if (result.status !== 0) throw new Error(`ffmpeg volume probe failed: ${result.stderr}`);
+  const match = result.stderr.match(/mean_volume: (-?\d+(?:\.\d+)?|-inf|inf) dB/i);
+  return match && !/inf/i.test(match[1]) ? Number(match[1]) : -Infinity;
+}
 /** Saves a PNG of one frame (seconds from the start, or negative from the end) for eyeballing the bubble / blur. */
 function frame(file, name, at = 2) {
   const seek = at < 0 ? ["-sseof", String(at)] : ["-ss", String(at)];
@@ -125,12 +133,103 @@ await ctx.route(/\/reel\/meeting-transcription-worker\.js(?:\?.*)?$/, (route) =>
   'self.onmessage = () => self.postMessage({type:"result",text:"The recorder integration fixture verifies transcript publishing.",chunks:[{timestamp:[0,2],text:"The recorder integration fixture verifies transcript publishing."}]});' }));
 const target = await ctx.newPage();
 await target.goto(ORIGIN + "/target");
+await sleep(2500);
+const delayedContextProbe = await target.evaluate(async () => {
+  const context = new AudioContext({ sampleRate: 48000 });
+  await context.resume();
+  const destination = context.createMediaStreamDestination(), oscillator = context.createOscillator();
+  oscillator.frequency.value = 997; oscillator.connect(destination); oscillator.start();
+  const processor = new MediaStreamTrackProcessor({ track: destination.stream.getAudioTracks()[0] });
+  const reader = processor.readable.getReader(), offsets = [];
+  let signalFrames = 0, contextOffset = null;
+  for (let i = 0; i < 24; i++) {
+    const { value } = await reader.read();
+    const performanceTime = performance.now() / 1000;
+    offsets.push(value.timestamp / 1e6 - performanceTime);
+    if (contextOffset == null) contextOffset = value.timestamp / 1e6 - context.currentTime;
+    if (i === 0) {
+      const samples = new Float32Array(value.numberOfFrames);
+      value.copyTo(samples, { planeIndex: 0, frameOffset: 0, frameCount: value.numberOfFrames, format: "f32-planar" });
+      signalFrames = samples.reduce((count, sample) => count + (Math.abs(sample) > 0.0001 ? 1 : 0), 0);
+    }
+    value.close();
+  }
+  const sortedOffsets = offsets.slice().sort((a, b) => a - b), medianPerformanceOffset = sortedOffsets[Math.floor(sortedOffsets.length / 2)];
+  const result = { contextOffset, medianPerformanceOffset, performanceOffsetRange: sortedOffsets.at(-1) - sortedOffsets[0], signalFrames };
+  oscillator.stop(); await reader.cancel().catch(() => {}); await context.close();
+  return result;
+});
+check("delayed AudioContext creation produces nonzero MediaStream audio on a shifted PTS clock",
+  delayedContextProbe.contextOffset > 0.5 && Math.abs(delayedContextProbe.medianPerformanceOffset) < 0.1 &&
+  delayedContextProbe.performanceOffsetRange < 0.05 && delayedContextProbe.signalFrames > 0, JSON.stringify(delayedContextProbe));
 
 async function openRecorder() {
   const page = await ctx.newPage();
   page.errors = [];
   page.on("pageerror", (e) => page.errors.push(String(e)));
   page.on("console", (m) => { if (process.env.SMOKE_DEBUG || ["error", "warning"].includes(m.type())) console.log("    [page]", m.type(), m.text().slice(0, 300)); });
+  await page.addInitScript(() => {
+    const NativeAudioContext = window.AudioContext;
+    window.AudioContext = new Proxy(NativeAudioContext, { construct(Target, args) {
+      const context = new Target(...args), createDestination = context.createMediaStreamDestination.bind(context);
+      context.createMediaStreamDestination = () => {
+        const destination = createDestination(), oscillator = context.createOscillator(), gain = context.createGain();
+        oscillator.frequency.value = 997; gain.gain.value = 0.1;
+        oscillator.connect(gain).connect(destination); oscillator.start();
+        window.__reelTestTone = { oscillator, gain, destination };
+        return destination;
+      };
+      return context;
+    } });
+    const NativeWorker = window.Worker;
+    window.Worker = new Proxy(NativeWorker, { construct(Target, args) {
+      const worker = new Target(...args), post = worker.postMessage.bind(worker);
+      let delayed = [];
+      worker.postMessage = (message, ...transfer) => {
+        if (message?.type === "begin" && window.__reelTestBeginAudioTime == null) window.__reelTestBeginAudioTime = message.audioTime;
+        if (message?.type === "audio" && window.__reelTestAudioOriginOffset == null && Number.isFinite(message.audioTime)) {
+          window.__reelTestAudioOriginOffset = message.data.timestamp / 1e6 - message.audioTime;
+        }
+        if (window.__reelDelayAudioBeforePause && message?.type === "audio") {
+          const samples = new Float32Array(message.data.numberOfFrames);
+          let signalFrames = 0, firstSignalFrame = -1, lastSignalFrame = -1;
+          try {
+            message.data.copyTo(samples, { planeIndex: 0, frameOffset: 0, frameCount: message.data.numberOfFrames, format: "f32-planar" });
+            for (let i = 0; i < samples.length; i++) if (Math.abs(samples[i]) > 0.0001) {
+              signalFrames++;
+              if (firstSignalFrame < 0) firstSignalFrame = i;
+              lastSignalFrame = i;
+            }
+          } catch {}
+          delayed.push({ message, transfer, frames: message.data.numberOfFrames, timestamp: message.data.timestamp / 1e6,
+            signalFrames, firstSignalFrame, lastSignalFrame });
+          return;
+        }
+        if (message?.type === "pause" && window.__reelDelayAudioBeforePause && delayed.length) {
+          post(message, ...transfer);
+          const first = delayed[0].message.audioTime, last = delayed.at(-1).message.audioTime;
+          for (const block of delayed) post(block.message, ...block.transfer);
+          const firstSignal = delayed.find(block => block.firstSignalFrame >= 0);
+          window.__reelTestDelayedPauseAudio = {
+            frames: delayed.reduce((sum, block) => sum + block.frames, 0),
+            signalFrames: delayed.reduce((sum, block) => sum + block.signalFrames, 0),
+            audioTimeStart: first, audioTimeEnd: last, pauseAudioTime: message.audioTime,
+            beginAudioTime: window.__reelTestBeginAudioTime,
+            signalTimestamp: firstSignal && firstSignal.timestamp + firstSignal.firstSignalFrame / 48000,
+          };
+          delayed = [];
+          window.__reelDelayAudioBeforePause = false;
+          return;
+        }
+        if ((message?.type === "stop" || message?.type === "cancel") && delayed.length) {
+          for (const block of delayed) post(block.message, ...block.transfer);
+          delayed = [];
+        }
+        return post(message, ...transfer);
+      };
+      return worker;
+    } });
+  });
   await page.goto(ORIGIN + "/record" + Q);
   return page;
 }
@@ -236,6 +335,7 @@ try {
     await until(() => page.evaluate(() => window.__reel.state().phase === "idle"), 10000);
   }
   await configure(page);
+  await sleep(2500);
 
   // ---- 1. record: screen (tab) + camera bubble + mic + tab audio, live upload, pause
   console.log("recording 1: live upload, pause, stop");
@@ -247,6 +347,10 @@ try {
   check("bubble window (Document Picture-in-Picture) opened", !!pipPage, pipPage ? "" : "no PiP page event (headless?)");
   const info = await page.evaluate(() => window.__reel.state().session.info);
   check("WebCodecs encoders", info && /^avc1\./.test(info.video), JSON.stringify(info));
+  await until(() => page.evaluate(() => Number.isFinite(window.__reelTestAudioOriginOffset)), 5000);
+  const audioOriginOffset = await page.evaluate(() => window.__reelTestAudioOriginOffset);
+  check("capture uses the page monotonic clock for MediaStream PTS", Math.abs(audioOriginOffset) < 0.1,
+    `${audioOriginOffset}s difference between AudioData.timestamp and performance.now()`);
   check("meta.json says recording while capturing", await until(async () => (await meta(r.shareID)).status === "recording", 10000));
   check("room document created", await until(async () => (await room(r.shareID)).ownerUid, 10000), JSON.stringify(await room(r.shareID)));
   check("first live segment uploaded while recording", await until(async () => (await fetchObj(r.shareID, C.segmentFile(1))).ok, 15000));
@@ -269,10 +373,13 @@ try {
   check("global Recorder shortcut pauses and resumes without acting while editing a field",
     shortcut.stayedRecording && shortcut.paused && shortcut.resumed, JSON.stringify(shortcut));
   await sleep(3000);
+  await page.evaluate(() => { window.__reelDelayAudioBeforePause = true; });
+  await sleep(500);
   await page.locator("#pause").click();
   // The click changes the controls immediately. Sample once the encoder has paused its clock.
   const pauseConfirmed = await until(() => page.evaluate(() => window.__reel.state().session.pauseConfirmed), 5000);
   const pausedAt = await page.evaluate(() => window.__reel.state().session.elapsed);
+  const delayedAudio = await page.evaluate(() => window.__reelTestDelayedPauseAudio || null);
   await sleep(2500);
   const stillPaused = await page.evaluate(() => window.__reel.state().session.elapsed);
   check("pause stops the clock", pauseConfirmed && Math.abs(stillPaused - pausedAt) < 0.6,
@@ -362,6 +469,21 @@ try {
   const v = probe.streams.find((s) => s.codec_type === "video"), a = probe.streams.find((s) => s.codec_type === "audio");
   const dur = parseFloat(probe.format.duration);
   check("video.mp4: H.264 + AAC stereo 48 kHz", v && v.codec_name === "h264" && a && /aac|opus/.test(a.codec_name) && a.channels === 2 && a.sample_rate === "48000", JSON.stringify(probe.streams));
+  const heldStartInOutput = activeClockTimeToOutputTime(delayedAudio?.audioTimeStart,
+    delayedAudio?.beginAudioTime, delayedAudio?.pauseAudioTime);
+  const signalStart = activeClockTimeToOutputTime(delayedAudio?.signalTimestamp,
+    delayedAudio?.beginAudioTime, delayedAudio?.pauseAudioTime);
+  const pauseOutputTime = delayedAudio?.pauseAudioTime - delayedAudio?.beginAudioTime;
+  const beforePauseMeanVolume = ffmpegMeanVolume(mp4, Math.max(0, signalStart ?? 0), 0.05, "bandpass=f=997:w=80,volumedetect");
+  const toneFilter = "bandpass=f=997:w=80,volumedetect";
+  const priorToneVolume = ffmpegMeanVolume(mp4, Math.max(0, heldStartInOutput - 0.25), 0.05, toneFilter);
+  const resumedToneVolume = ffmpegMeanVolume(mp4, pauseOutputTime + 0.25, 0.05, toneFilter);
+  const backgroundToneVolume = Math.min(priorToneVolume, resumedToneVolume);
+  check("delayed pre-pause audio signal survives in the recorded media",
+    delayedAudio?.frames >= 18000 && delayedAudio.signalFrames > 0 && signalStart != null && heldStartInOutput != null &&
+    delayedAudio.audioTimeEnd <= delayedAudio.pauseAudioTime &&
+    recordedToneWindowIsPresent(beforePauseMeanVolume, backgroundToneVolume),
+    JSON.stringify({ delayedAudio, heldStartInOutput, signalStart, pauseOutputTime, beforePauseMeanVolume, priorToneVolume, resumedToneVolume, pausedAt }));
   check("audio duration stays synchronized with video across pause", a && Number.isFinite(Number(a.duration)) && Math.abs(Number(a.duration) - dur) < 0.6,
     `${a?.duration} s audio, ${dur} s video`);
   check("video.mp4 duration = meta, shorter than wall time by the pause", Math.abs(dur - m1.durationSeconds) < 0.5 && dur > 9 && dur < (stopAcceptedT - startT) / 1000 - 2,
