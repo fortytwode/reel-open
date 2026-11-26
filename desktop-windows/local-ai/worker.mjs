@@ -29,3 +29,4 @@ self.onmessage=async({data})=>{
     self.postMessage({type:'result',requestID,text:result.text||'',chunks:result.chunks||[],language});
   }catch(error){const detail=error?.message?` ${error.message}`:'';self.postMessage({type:'error',requestID,message:`Local Whisper could not load or run. The first model download requires an internet connection; once cached, retry offline.${detail}`});}
 };
+self.postMessage({type:'ready'});

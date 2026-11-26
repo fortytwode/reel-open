@@ -17,7 +17,10 @@ const MODEL_CDN_PATHS=new Set([
 const MODEL_CDN_QUERY_KEYS=['Expires','Hash-Algorithm','Key-Pair-Id','Policy','Signature','X-Xet-Cas-Uid',
   'response-content-disposition','user_id','xip'].sort();
 const SAFE_PROGRESS_PHASES=new Set(['worker_message_sent','worker_started','model_loading','model_downloading',
-  'model_ready','inference','inference_complete','worker_failed','worker_dispatch_failed']);
+  'model_ready','inference','inference_complete','worker_failed','worker_dispatch_failed','renderer_task_received',
+  'worker_creation_started','worker_created','worker_creation_failed','worker_error']);
+const SAFE_RENDERER_PHASES=new Set(['renderer_script_started','renderer_script_ready','worker_creation_started',
+  'worker_created','worker_script_ready','worker_error_before_task','worker_creation_failed','renderer_probe_received']);
 
 function isModelFileURLPath(pathname,prefix=MODEL_PATH){
   return pathname.startsWith(prefix)&&MODEL_FILES.has(pathname.slice(prefix.length));
@@ -68,7 +71,8 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   const parsedOrigin=new URL(origin);
   check(parsedOrigin.protocol==='http:'&&parsedOrigin.hostname==='127.0.0.1'&&parsedOrigin.pathname==='/'&&!parsedOrigin.username&&!parsedOrigin.password,
     'Local transcription must use its private loopback origin.');
-  let window=null,loading=null,active=null,disposed=false;
+  let window=null,loading=null,active=null,disposed=false,rendererStartup=null;
+  const pendingProbes=new Map();
   const pageURL=origin+'/local-ai/';
   const diagnostic=(phase,progress)=>{
     try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{})});}catch{}
@@ -88,7 +92,23 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     else job.reject(Error(typeof value.error==='string'?value.error.slice(0,500):'Local transcription failed.'));
   });
   ipcMain.on('reel-local-ai:progress',(event,value)=>{
-    if(!currentWindow(event)||!active||value?.requestID!==active.requestID||!SAFE_PROGRESS_PHASES.has(value?.phase))return;
+    if(!currentWindow(event))return;
+    if(SAFE_RENDERER_PHASES.has(value?.phase)&&value?.requestID===undefined){
+      diagnostic(value.phase);
+      if(rendererStartup?.contents===event.sender){
+        if(value.phase==='worker_script_ready'){
+          clearTimeout(rendererStartup.timer);const startup=rendererStartup;rendererStartup=null;startup.resolve();
+        }else if(value.phase==='worker_error_before_task'||value.phase==='worker_creation_failed'){
+          clearTimeout(rendererStartup.timer);const startup=rendererStartup;rendererStartup=null;startup.reject(Error('Local inference worker could not start.'));
+        }
+      }
+      return;
+    }
+    if(value?.phase==='renderer_probe_received'&&typeof value.requestID==='string'){
+      const probe=pendingProbes.get(value.requestID);if(!probe)return;
+      pendingProbes.delete(value.requestID);clearTimeout(probe.timer);diagnostic(value.phase);probe.resolve();return;
+    }
+    if(!active||value?.requestID!==active.requestID||!SAFE_PROGRESS_PHASES.has(value?.phase))return;
     diagnostic(value.phase,value.progress);
   });
   function createWindow(){
@@ -101,6 +121,9 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     contents.on('dom-ready',()=>diagnostic('renderer_dom_ready'));
     contents.on('did-finish-load',()=>diagnostic('renderer_load_complete'));
     contents.on('did-fail-load',()=>diagnostic('renderer_load_failed'));
+    contents.on('preload-error',()=>diagnostic('preload_error'));
+    contents.on('console-message',(_event,details)=>{if(details?.level>=2)diagnostic('renderer_console_error');});
+    contents.on('render-process-gone',()=>diagnostic('renderer_process_gone'));
     const session=contents.session,allowedHubRedirects=new Set();
     session.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
     session.setPermissionCheckHandler(()=>false);
@@ -138,9 +161,27 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     contents.setWindowOpenHandler(()=>({action:'deny'}));
     contents.on('will-navigate',event=>{if(contents.getURL()!==pageURL)event.preventDefault();});
     contents.on('will-redirect',event=>event.preventDefault());
-    window.on('closed',()=>{window=null;cancelActive();});
+    window.on('closed',()=>{
+      window=null;cancelActive();
+      if(rendererStartup?.contents===contents){clearTimeout(rendererStartup.timer);const startup=rendererStartup;rendererStartup=null;startup.reject(Error('Local transcription window closed before initialization.'));}
+    });
+    let startupResolve,startupReject;
+    const startupReady=new Promise((resolve,reject)=>{startupResolve=resolve;startupReject=reject;});
+    rendererStartup={contents,resolve:startupResolve,reject:startupReject,timer:setTimeout(()=>{
+      if(rendererStartup?.contents!==contents)return;
+      rendererStartup=null;diagnostic('renderer_startup_timeout');startupReject(Error('Local inference renderer did not become ready.'));
+    },15_000)};
     diagnostic('renderer_load_started');
-    loading=contents.loadURL(pageURL).then(()=>{diagnostic('renderer_ready');return window;}).catch(cause=>{diagnostic('renderer_load_failed');window?.destroy();window=null;throw Error(`Local transcription window could not start: ${cause.message}`);}).finally(()=>{loading=null;});
+    loading=contents.loadURL(pageURL).then(async()=>{
+      diagnostic('renderer_document_loaded');
+      await startupReady;
+      diagnostic('renderer_ready');
+      return window;
+    }).catch(cause=>{
+      if(rendererStartup?.contents===contents){clearTimeout(rendererStartup.timer);rendererStartup=null;}
+      diagnostic('renderer_load_failed');window?.destroy();window=null;
+      throw Error(`Local transcription window could not start: ${cause.message}`);
+    }).finally(()=>{loading=null;});
     return loading;
   }
   async function transcribe({ownerUserID,id,samples,language='en',signal}={}){
@@ -162,6 +203,21 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     diagnostic('task_sent');
     });
   }
-  function dispose(){disposed=true;cancelActive('Local transcription stopped while Reel closed.');if(window&&!window.isDestroyed())window.destroy();window=null;}
-  return {transcribe,dispose};
+  async function probeRenderer(){
+    check(!disposed,'Local transcription is unavailable.');
+    const view=await createWindow(),requestID=randomUUID();
+    return new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{pendingProbes.delete(requestID);diagnostic('renderer_probe_timeout');reject(Error('Local renderer handoff probe timed out.'));},5_000);
+      pendingProbes.set(requestID,{resolve,reject,timer});
+      diagnostic('renderer_probe_sent');
+      view.webContents.send('reel-local-ai:task',{type:'probe',requestID});
+    });
+  }
+  function dispose(){
+    disposed=true;cancelActive('Local transcription stopped while Reel closed.');
+    if(rendererStartup){clearTimeout(rendererStartup.timer);const startup=rendererStartup;rendererStartup=null;startup.reject(Error('Local transcription stopped while Reel closed.'));}
+    for(const probe of pendingProbes.values()){clearTimeout(probe.timer);probe.reject(Error('Local transcription stopped while Reel closed.'));}
+    pendingProbes.clear();if(window&&!window.isDestroyed())window.destroy();window=null;
+  }
+  return {transcribe,probeRenderer,dispose};
 }

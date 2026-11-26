@@ -44,9 +44,13 @@ async function bounded(phase,operation,timeoutMs){
 }
 const phaseLimits={
   window_create_requested:30_000,window_reused:30_000,renderer_load_started:30_000,renderer_dom_ready:30_000,
-  renderer_load_complete:30_000,renderer_ready:30_000,task_sent:15_000,worker_message_sent:15_000,
+  renderer_load_complete:30_000,renderer_document_loaded:30_000,renderer_script_started:15_000,
+  renderer_script_ready:15_000,worker_creation_started:15_000,worker_created:15_000,worker_script_ready:15_000,
+  renderer_ready:15_000,renderer_startup_timeout:5_000,renderer_probe_sent:5_000,renderer_probe_received:5_000,
+  renderer_probe_timeout:5_000,renderer_task_received:10_000,task_sent:15_000,worker_message_sent:15_000,
   worker_started:30_000,model_loading:5*60_000,model_downloading:35*60_000,model_ready:2*60_000,
   inference:10*60_000,inference_complete:2*60_000,worker_dispatch_failed:5_000,worker_failed:5_000,
+  worker_error_before_task:5_000,worker_creation_failed:5_000,preload_error:5_000,renderer_console_error:5_000,
 };
 function reportProgress(event){
   const key=`${currentRun}:${event.phase}`;
@@ -102,17 +106,18 @@ async function runSmoke(){
     log('smoke_start');
     if(startupOnly){
       await bounded('electron_startup',()=>app.whenReady(),20_000);
-      log('electron_ready');
-      log('smoke_startup_preflight_passed');
-      return;
-    }
-    await bounded('electron_startup',()=>app.whenReady(),60_000);
+    }else await bounded('electron_startup',()=>app.whenReady(),60_000);
     log('electron_ready');
     assets=await bounded('asset_server_startup',()=>startAssetServer({root:packagedRoot}),15_000);
     log('packaged_asset_server_ready');
     local=createLocalWhisper({BrowserWindow:SmokeWindow,ipcMain,origin:assets.localAIOrigin,ownerID:()=> 'smoke-owner',
       onDiagnostic:reportProgress,
       allowRemoteModelRequest:()=>{if(modelNetworkBlocked){blockedRemoteRequests++;return false;}return true;}});
+    if(startupOnly){
+      await bounded('renderer_task_handoff_probe',()=>local.probeRenderer(),20_000);
+      log('smoke_startup_preflight_passed');
+      return;
+    }
     const samples=await bounded('audio_fixture_load',async()=>whisperSamples(new Blob([await readFile(audioPath)])),30_000);
     log('audio_fixture_ready');
     const first=await transcribeWithBounds('first',samples,45*60_000);

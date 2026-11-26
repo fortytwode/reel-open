@@ -8,7 +8,7 @@ class FakeWebContents extends EventEmitter {
   getURL(){return this.url;}
   setWindowOpenHandler(){}
   send(channel,value){this.messages.push({channel,value});}
-  loadURL(url){this.url=url;return Promise.resolve();}
+  loadURL(url){this.url=url;setImmediate(()=>FakeWindow.onLoad?.(this));return Promise.resolve();}
 }
 class FakeWindow extends EventEmitter {
   constructor(){super();this.webContents=new FakeWebContents();this.destroyed=false;FakeWindow.last=this;}
@@ -18,7 +18,7 @@ class FakeWindow extends EventEmitter {
   hide(){}
   destroy(){this.destroyed=true;this.emit('closed');}
 }
-function setup({allowRemoteModelRequest,onDiagnostic}={}){const ipcMain=new EventEmitter();let owner='owner-a';const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin:'http://127.0.0.1:4321',ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{}),...(onDiagnostic?{onDiagnostic}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
+function setup({allowRemoteModelRequest,onDiagnostic}={}){const ipcMain=new EventEmitter();let owner='owner-a';FakeWindow.onLoad=contents=>{const event={sender:contents,senderFrame:contents.mainFrame};ipcMain.emit('reel-local-ai:progress',event,{phase:'renderer_script_ready'});ipcMain.emit('reel-local-ai:progress',event,{phase:'worker_script_ready'});};const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin:'http://127.0.0.1:4321',ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{}),...(onDiagnostic?{onDiagnostic}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
 const samples=new Float32Array([0,.1,-.1]);
 
 test('local inference network access is restricted to the pinned model and GET requests',()=>{
@@ -108,6 +108,21 @@ test('diagnostics accept only the current renderer request and bounded stage fie
   assert.ok(diagnostics.some(value=>value.phase==='renderer_load_started'));
   f.complete({requestID,ok:true,result:{text:'ok',chunks:[]}});
   await operation;
+  f.bridge.dispose();
+});
+
+test('renderer startup waits for worker module and task channel probe without starting inference',async()=>{
+  const diagnostics=[],f=setup({onDiagnostic:value=>diagnostics.push(value)});
+  const operation=f.bridge.probeRenderer();
+  await new Promise(resolve=>setImmediate(resolve));
+  const view=FakeWindow.last,task=view.webContents.messages.at(-1).value;
+  assert.deepEqual(task,{type:'probe',requestID:task.requestID});
+  f.ipcMain.emit('reel-local-ai:progress',{sender:view.webContents,senderFrame:view.webContents.mainFrame},
+    {requestID:task.requestID,phase:'renderer_probe_received'});
+  await operation;
+  assert.ok(diagnostics.some(value=>value.phase==='renderer_script_ready'));
+  assert.ok(diagnostics.some(value=>value.phase==='worker_script_ready'));
+  assert.ok(diagnostics.some(value=>value.phase==='renderer_probe_received'));
   f.bridge.dispose();
 });
 

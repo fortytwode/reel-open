@@ -13,14 +13,14 @@ const workerSource=`
   });
 `;
 
-function createRenderer({throwOnce=false}={}){
+function createRenderer({throwOnce=false,throwCreateOnce=false}={}){
   const status={textContent:'',progressHidden:true,value:0};
   const progress={hidden:true,value:0};
   const workers=[];
   const completions=[],progressEvents=[];
-  let taskHandler,resolveCompletion,shouldThrow=throwOnce;
+  let taskHandler,resolveCompletion,shouldThrow=throwOnce,shouldThrowCreate=throwCreateOnce;
   class BrowserWorker{
-    constructor(){this.worker=new NodeWorker(workerSource,{eval:true});workers.push(this);this.worker.on('message',data=>this.onmessage?.({data}));this.worker.on('error',error=>this.onerror?.({message:error.message}));}
+    constructor(){if(shouldThrowCreate){shouldThrowCreate=false;throw new Error('Worker constructor failure');}this.worker=new NodeWorker(workerSource,{eval:true});workers.push(this);this.worker.on('message',data=>this.onmessage?.({data}));this.worker.on('error',error=>this.onerror?.({message:error.message}));}
     postMessage(data,transfer){
       if(shouldThrow){shouldThrow=false;throw new DOMException('Transfer list contains an invalid object.','DataCloneError');}
       this.worker.postMessage(data,transfer);
@@ -59,4 +59,12 @@ test('synchronous postMessage errors complete the job and leave the renderer rea
   const retried=await renderer.dispatch({type:'transcribe',requestID:'request-3',samples:new Float32Array([0,.25,-.25]),language:'en'});
   assert.equal(retried.ok,true);
   assert.equal(retried.result.text,'worker received 3 PCM samples');
+});
+
+test('renderer reports listener readiness, worker constructor failures and main-to-renderer probe receipt',async t=>{
+  const renderer=createRenderer({throwCreateOnce:true});t.after(()=>renderer.close());
+  assert.ok(renderer.progressEvents.some(value=>value.phase==='worker_creation_failed'));
+  assert.ok(renderer.progressEvents.some(value=>value.phase==='renderer_script_ready'));
+  renderer.dispatch({type:'probe',requestID:'probe-1'});
+  assert.ok(renderer.progressEvents.some(value=>value.phase==='renderer_probe_received'&&value.requestID==='probe-1'));
 });
