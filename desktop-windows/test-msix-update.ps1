@@ -36,8 +36,6 @@ $certificate = $null
 $trustedCertificate = $null
 $rootCertificate = $null
 $server = $null
-$testPackageFullName = $null
-$testPackageInstallPath = $null
 
 function Find-SignTool {
     $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
@@ -65,7 +63,10 @@ try {
     $python = (Get-Command python -ErrorAction Stop).Source
     $serverStdout = Join-Path $tempRoot 'http.out.log'
     $serverStderr = Join-Path $tempRoot 'http.err.log'
-    $server = Start-Process -FilePath $python -ArgumentList @('-m', 'http.server', "$port", '--directory', $serveRoot, '--bind', '127.0.0.1') `
+    $rangeProbe = Join-Path $serveRoot 'range-probe.msix'
+    [IO.File]::WriteAllBytes($rangeProbe, [byte[]](65..72))
+    $serverScript = Join-Path $PSScriptRoot 'msix-test-server.py'
+    $server = Start-Process -FilePath $python -ArgumentList @($serverScript, '--port', "$port", '--directory', $serveRoot, '--bind', '127.0.0.1') `
         -PassThru -NoNewWindow -RedirectStandardOutput $serverStdout -RedirectStandardError $serverStderr
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
@@ -73,6 +74,18 @@ try {
         try { $null = Invoke-WebRequest -UseBasicParsing "$baseUri/"; break } catch { }
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($server.HasExited) { throw 'The local App Installer feed server did not start.' }
+    Write-Output 'Checking byte-range, MIME, Content-Length, and HEAD behavior before package install.'
+    $head = Invoke-WebRequest -UseBasicParsing -Method Head "$baseUri/range-probe.msix"
+    if ($head.StatusCode -ne 200 -or $head.Headers['Content-Length'] -ne '8'
+        -or $head.Headers['Content-Type'] -ne 'application/msix' -or $head.Headers['Accept-Ranges'] -ne 'bytes') {
+        throw 'The local MSIX server HEAD response is missing required metadata.'
+    }
+    $range = Invoke-WebRequest -UseBasicParsing -Headers @{ Range = 'bytes=0-0' } "$baseUri/range-probe.msix"
+    if ($range.StatusCode -ne 206 -or $range.Headers['Content-Length'] -ne '1'
+        -or $range.Headers['Content-Range'] -ne 'bytes 0-0/8' -or $range.Content.Length -ne 1) {
+        throw 'The local MSIX server does not correctly serve a byte-range GET.'
+    }
+    Remove-Item -LiteralPath $rangeProbe -Force
 
     Write-Output 'Creating a unique, one-day MSIX test certificate on the disposable runner.'
     $certificate = New-SelfSignedCertificate -Subject $publisher -Type CodeSigningCert -KeySpec Signature `
@@ -108,8 +121,6 @@ try {
     if ($null -eq $installed -or $installed.Version.ToString() -ne $Version) {
         throw 'App Installer did not install the initial package version.'
     }
-    $testPackageFullName = $installed.PackageFullName
-    $testPackageInstallPath = [IO.Path]::GetFullPath($installed.InstallLocation)
 
     # Publish the newer feed at the same URI registered by the initial install.
     Write-Output 'Publishing the newer feed at the registered update URI.'
@@ -130,13 +141,14 @@ try {
     Write-Output "MSIX App Installer install/upgrade passed: $Version -> $NextVersion ($Architecture)."
 } finally {
     Write-Output 'Removing the test package, local server, and per-run trust certificate.'
-    if ($testPackageInstallPath) {
+    $testPackage = Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue |
+        Where-Object { $_.Publisher -eq $publisher } | Select-Object -First 1
+    if ($testPackage) {
+        $testPackageInstallPath = [IO.Path]::GetFullPath($testPackage.InstallLocation)
         Get-CimInstance Win32_Process -Filter "Name = 'Reel.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq (Join-Path $testPackageInstallPath 'Reel.exe') } |
+            Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq (Join-Path $testPackageInstallPath 'Reel.exe') } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    }
-    if ($testPackageFullName) {
-        Remove-AppxPackage -Package $testPackageFullName -ErrorAction SilentlyContinue
+        Remove-AppxPackage -Package $testPackage.PackageFullName -ErrorAction SilentlyContinue
     }
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if ($trustedCertificate) {
