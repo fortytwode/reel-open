@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
+test('the dashboard can retry a saved recording through the restricted preload', async () => {
+  let api;
+  const calls = [];
+  const electron = {
+    contextBridge: { exposeInMainWorld: (_, value) => { api = value; } },
+    ipcRenderer: { invoke: async (...args) => { calls.push(args); } },
+  };
+  const preload = await readFile(new URL('../preload.cjs', import.meta.url), 'utf8');
+  vm.runInNewContext(preload, { require: () => electron });
+  const recording = { id: 'saved-meeting', expectedOwnerUserID: 'owner-a' };
+  await api.action('retryProcessing', recording);
+  await api.action('shareRecording', recording);
+  await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
+  assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording]]);
+});
+
 class Element {
   constructor(tag = 'div') {
     this.tagName = tag; this.children = []; this.dataset = {}; this.disabled = false;
@@ -92,4 +108,50 @@ test('stale autosave failure cannot clear or report over the new owner state', a
   assert.equal(newOwnerPayload.participantConsent, true);
   assert.equal(newOwnerPayload.systemAudioConsent, true);
   assert.equal(getElement('banner').textContent, '');
+});
+
+test('a saved meeting is shared only when its explicit button is selected', async () => {
+  const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onClick; const calls=[];
+  const snapshot={configured:true,profile:{userID:'owner-a',email:'a@example.com',calendarConnected:true},
+    settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},
+    meetings:[],status:{phase:'idle'},recordings:[{id:'meeting-id',title:'Weekly meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9,
+      processing:{phase:'completed',transcriptReady:true},shareStatus:null}]};
+  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
+  const context={window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.length,0,'rendering a saved meeting must not start an upload');
+  const button=getElement('recordingsList').children[0].children[0].children.find(child=>child.dataset.action==='shareRecording');
+  const transcriptButton=getElement('recordingsList').children[0].children[0].children.find(child=>child.dataset.includeTranscript==='true');
+  assert.equal(transcriptButton.textContent,'Share video and transcript');
+  assert.ok(button); assert.equal(button.textContent,'Share recording');
+  onClick({target:{closest:selector=>selector==='[data-action]'?button:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a'}]]);
+  onClick({target:{closest:selector=>selector==='[data-action]'?transcriptButton:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))),['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',includeTranscript:true}]);
+});
+
+test('a persisted uploading share is retryable after app restart', async () => {
+  const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onClick; const calls=[];
+  const snapshot={configured:true,profile:{userID:'owner-a',email:'a@example.com',calendarConnected:true},
+    settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},
+    meetings:[],status:{phase:'idle'},recordings:[{id:'meeting-id',title:'Weekly meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9,
+      processing:{phase:'completed'},shareStatus:'uploading',sharing:false}]};
+  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),
+    {window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise});
+  await new Promise(resolve=>setImmediate(resolve));
+  const button=getElement('recordingsList').children[0].children[0].children.find(child=>child.dataset.action==='shareRecording');
+  assert.equal(button.textContent,'Retry sharing'); assert.equal(button.disabled,false);
+  onClick({target:{closest:selector=>selector==='[data-action]'?button:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a'}]]);
 });

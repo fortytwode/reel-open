@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, open } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm, open, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Muxer, StreamTarget } from '../../web/vendor/mp4-muxer.mjs';
 import { SegmentSplitter, boxes } from '../../web/reel/fmp4.js';
+import * as C from '../../web/reel/core.js';
 import { createLocalRecordingStore } from '../src/local-recordings.mjs';
 
 // These encoded bytes prove container structure and preservation, not decodability.
@@ -51,6 +53,7 @@ test('streams exact fragments to an owner-generated path and persists metadata w
   const result = await writer.finish({ durationSeconds: 9 });
   assert.strictEqual(await writer.finish({ durationSeconds: 9 }), result);
   assert.equal(result.playable, true);
+  assert.deepEqual([result.width,result.height],[640,360]);
   assert.match(result.id, /^[0-9a-f]{32}$/);
   assert.equal(path.dirname(path.dirname(result.path)), root);
   assert.match(path.basename(path.dirname(result.path)), /^[0-9a-f]{64}$/);
@@ -206,4 +209,27 @@ test('new meeting audio and processing checkpoints survive restart with owner is
   await rm(recording.path);
   assert.equal(restored.getProcessing({ ownerUserID: 'owner', id: recording.id }), null);
   await assert.rejects(restored.saveProcessing({ ownerUserID: 'owner', id: recording.id, processing }), /no longer exists/);
+});
+
+test('saved meeting sharing is persisted under its original local owner only', async t => {
+  const { root, store } = await fixture(t);
+  const writer = await store.begin({ ownerUserID:'owner', title:'Share me', createdAt:'2026-11-06T12:00:00Z', meeting:{attendees:[]} });
+  await writer.appendInit(encoded.init);
+  for (let i=0;i<encoded.segments.length;i++) await writer.appendFragment({index:i+1,duration:4,bytes:encoded.segments[i]});
+  const saved=await writer.finish({durationSeconds:8});
+  const nonce='ab'.repeat(16), shareID=await C.ownerShareID('owner',nonce);
+  assert.equal(await store.getShareRecord({ownerUserID:'other',id:saved.id}),null);
+  const bound=await store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,recordingNonce:nonce,shareID});
+  assert.equal(bound.shareID,shareID); assert.equal(bound.upload,'pending');
+  await assert.rejects(store.bindShare({ownerUserID:'other',expectedOwnerUserID:'other',id:saved.id,recordingNonce:nonce,shareID}),/unavailable/);
+  await assert.rejects(store.bindShare({ownerUserID:'owner',expectedOwnerUserID:'other',id:saved.id,recordingNonce:nonce,shareID}),/owner changed/);
+  await store.saveShareState({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,shareID,upload:'uploaded'});
+  assert.equal(store.list('owner')[0].shareStatus,'uploaded');
+  assert.equal(store.list('other').length,0);
+  const libraryPath=path.join(root,createHash('sha256').update('owner').digest('hex'),'library.json');
+  const legacy=JSON.parse(await readFile(libraryPath,'utf8')); delete legacy.recordings[0].width; delete legacy.recordings[0].height;
+  await writeFile(libraryPath,JSON.stringify(legacy));
+  const restored=await createLocalRecordingStore({root}).getShareRecord({ownerUserID:'owner',id:saved.id});
+  assert.equal(restored.share.recordingNonce,nonce); assert.deepEqual([restored.width,restored.height],[640,360]);
+  await assert.rejects(store.saveShareState({ownerUserID:'owner',expectedOwnerUserID:'owner',id:saved.id,shareID:'r2'+'0'.repeat(38),upload:'uploaded'}),/no longer bound/);
 });

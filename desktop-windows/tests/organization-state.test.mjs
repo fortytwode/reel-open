@@ -70,7 +70,7 @@ async function startDesktop(base, org) {
   });
   const entry = new URL(`../main.mjs?organization-state-test=${launches++}`, import.meta.url);
   const bindings = {
-    electron: { app, BrowserWindow, desktopCapturer: { getSources: noop }, dialog: {}, shell: {},
+    electron: { app, BrowserWindow, clipboard: { writeText: noop }, desktopCapturer: { getSources: noop }, dialog: {}, shell: {},
       ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, Menu: { buildFromTemplate: noop, setApplicationMenu: noop },
       safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
         decryptString(bytes) { decryptions.push(bytes); return bytes.toString(); } } },

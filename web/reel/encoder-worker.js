@@ -21,7 +21,10 @@ self.onmessage = async (e) => {
     if (m.type === "start") await start(m);
     else if (m.type === "audio") encodeAudio(m.data);
     else if (m.type === "begin") begin();
-    else if (m.type === "pause") { S.clock.pause(now()); }
+    else if (m.type === "pause") {
+      S.clock.pause(now());
+      postTick(m.pauseID);
+    }
     else if (m.type === "resume") { S.clock.resume(now()); }
     else if (m.type === "layout") { S.composite = m.composite; S.bubbleScale = m.bubbleScale ?? S.bubbleScale; }
     else if (m.type === "stop") await stop();
@@ -182,7 +185,14 @@ function tick() {
   while (S.frames < target && n++ < 3) emitFrame();
   if (S.frames < target - S.fps) S.frames = target - 1;   // fell far behind (machine asleep): skip ahead
   const wall = now();
-  if (!(wall - (S.lastTick || 0) < 0.25)) { S.lastTick = wall; post({ type: "tick", elapsed: S.frames / S.fps, segments: S.segments, queue: S.venc.encodeQueueSize }); }
+  if (wall - (S.lastTick || 0) >= 0.25) {
+    S.lastTick = wall;
+    postTick();
+  }
+}
+
+function postTick(pauseID) {
+  post({ type: "tick", elapsed: S.frames / S.fps, segments: S.segments, queue: S.venc.encodeQueueSize, pauseID });
 }
 
 function draw() {

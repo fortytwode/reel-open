@@ -55,3 +55,33 @@ API basis: [Electron session media handler](https://www.electronjs.org/docs/late
 [desktopCapturer](https://www.electronjs.org/docs/latest/api/desktop-capturer),
 [source ID format](https://www.electronjs.org/docs/latest/api/structures/desktop-capturer-source),
 and [Electron 45 window-source change](https://www.electronjs.org/blog/electron-45-0).
+
+## Change speakers during capture
+
+With two working Windows playback devices, build the native helper with
+`desktop-windows/native/build.cmd`. From `desktop-windows/probe` run the
+adapter with a fresh output directory:
+
+```powershell
+.\node_modules\electron\dist\electron.exe .\adapter-main.mjs --verify-output-switch --out=C:\ReelQA\switch-1
+```
+
+When `switch-ready.json` appears, choose the other default playback device in
+Windows Sound. The probe detects the Windows endpoint change, raises the
+fixture tone from 440 Hz to 660 Hz and records ten more seconds. Once
+`result.json` appears, run:
+
+```powershell
+node .\adapter-verify.mjs --out=C:\ReelQA\switch-1
+```
+
+The verifier checks the fixture on both sides of the switch in the decoded
+MP4 and checks both tones in the separate audio used for transcription.
+
+On November 26, 2026, Electron 45.2.3 on a Windows 11 ARM64 guest passed
+both directions using two Windows playback devices. The ARM64 build switched
+from USB Audio to HD Audio during a 22.47-second recording. The x64 build ran
+under Windows emulation and switched back during a 21.40-second recording.
+Both MP4s decoded in full, kept the expected window visible and contained
+the correct tone on each side of the switch. The transcription audio passed
+the same before-and-after frequency check.

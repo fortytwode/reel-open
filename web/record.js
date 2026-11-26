@@ -6,14 +6,14 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
 import { organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
-import * as C from "./reel/core.js?v=20261126-local-import";
+import * as C from "./reel/core.js?v=20261126-meeting-transcript";
 import * as store from "./reel/store.js?v=20261126-local-import";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, CLOUD_CONFIG, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
 import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-local-import";
-import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261119-tab1";
+import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-pause";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
 import { createCameraEffect, effectsSupported, preloadEffects } from "./reel/effects.js";
@@ -771,7 +771,7 @@ function processRecording(recording, { resumeNotes = false } = {}) {
         ...(result.timingGranularity ? { timingGranularity: result.timingGranularity } : {}) };
       if (publisher.deletions.has(id) || (meeting && authGeneration !== expectedGeneration)) return;
       if (!await store.putTranscript(id, new Blob([JSON.stringify(transcript)], { type: "application/json" }),
-        new Blob([transcriptText(transcript)], { type: "text/plain" }))) return;
+        new Blob([C.transcriptText(transcript)], { type: "text/plain" }))) return;
       // Uploading continues during local inference/file writes. Preserve its latest state.
       r = library.get(id);
       if (!r) return;
@@ -837,10 +837,6 @@ function processRecording(recording, { resumeNotes = false } = {}) {
   }).finally(() => { transcriptionJobs.delete(id); transcriptionProgress.delete(id); renderList(); });
   transcriptionJobs.set(id, task); transcriptionQueue = task;
   return task;
-}
-function transcriptText(t) {
-  const timingNotice = t.timingGranularity === "chunk" ? "Times are approximate audio-chunk boundaries, not word timestamps.\n\n" : "";
-  return t.title + "\n\n" + timingNotice + t.segments.map((s) => `[${fmt(s.start)}] ${s.text}`).join("\n") + "\n";
 }
 async function downloadTranscript(id) {
   const blob = await store.getFile(id, C.File.transcriptText);

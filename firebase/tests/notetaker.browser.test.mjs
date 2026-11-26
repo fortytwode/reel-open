@@ -4,12 +4,15 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const web = new URL('../../web/', import.meta.url).pathname;
+const web = fileURLToPath(new URL('../../web/', import.meta.url));
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.svg': 'image/svg+xml' };
 const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const launchOptions = existsSync(chrome) ? { headless: true, executablePath: chrome } : { headless: true };
+const launchOptions = { headless: true };
+if (process.env.REEL_BROWSER) launchOptions.channel = process.env.REEL_BROWSER;
+else if (existsSync(chrome)) launchOptions.executablePath = chrome;
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://localhost').pathname;
   const file = path === '/record' ? '/record.html' : path === '/notetaker' ? '/notetaker.html' : path === '/notetaker-meetings' ? '/notetaker-meetings.html' : path;
@@ -44,6 +47,11 @@ test('Notetaker launches separately without capture and legacy meeting links rem
       assert.equal(`${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`, icon.sizes, icon.src);
     }
     await page.goto(`${origin}/record`);
+    assert.equal(await page.title(), 'Reel Recorder');
+    const recorderManifest = await page.locator('link[rel=manifest]').getAttribute('href');
+    const recorder = await (await page.request.get(origin + recorderManifest)).json();
+    assert.equal(recorder.id, '/record');
+    assert.equal(recorder.start_url, '/record');
     await page.locator('#recording-kind-label').waitFor({ state: 'hidden' });
     assert.equal(await page.locator('#meeting-calendar-panel .mc-card').count(), 0);
     await page.goto(`${origin}/record#calendar-meeting=event-1`);

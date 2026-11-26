@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDesktopService } from '../src/desktop-service.mjs';
+import { createDesktopService, desktopBrowserAppArguments, desktopLaunchAction, desktopProductURL } from '../src/desktop-service.mjs';
 import { createMeetingCoordinator } from '../src/meeting-coordinator.mjs';
 
 const org = {meetingServiceURL:'https://meetings.northwind.example', viewerBase:'https://library.northwind.example', viewerPath:'reel', notesBaseURL:'https://library.northwind.example/reel', webBase:'https://record.northwind.example'};
@@ -8,7 +8,22 @@ const initial = ownerUserID => ({ ownerUserID, autoJoin: false, participantConse
   systemAudioConsent: false, selection: { useAll: true, ids: [] } });
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
-function fixture({ realCoordinator = false, discover } = {}) {
+
+test('MSIX product launch arguments select the configured Recorder and Notetaker routes', () => {
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder']), 'openRecorder');
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-notetaker']), 'openNotetaker');
+  assert.equal(desktopLaunchAction(['Reel.exe']), null);
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder', '--open-notetaker']), null);
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder', '--open-recorder']), 'openRecorder');
+  assert.equal(desktopProductURL('openRecorder', org), 'https://record.northwind.example/record');
+  assert.equal(desktopProductURL('openNotetaker', org), 'https://record.northwind.example/notetaker');
+  assert.deepEqual(desktopBrowserAppArguments('openRecorder', org), ['--app=https://record.northwind.example/record']);
+  assert.deepEqual(desktopBrowserAppArguments('openNotetaker', org), ['--app=https://record.northwind.example/notetaker']);
+  assert.throws(() => desktopProductURL('openLibrary', org), /Unknown Reel product launch/);
+  assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
+});
+
+function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
   const settings = new Map(), calls = [], writes = [], snapshots = [], listeners = new Set();
@@ -28,7 +43,9 @@ function fixture({ realCoordinator = false, discover } = {}) {
       getState: () => status, onStateChange: fn => { statusNotify = fn; return () => {}; },
       refresh: async () => { calls.push('refresh'); }, tick: async () => { calls.push('tick'); },
       cancel: async () => { calls.push('cancel'); }, dispose: async () => { calls.push('dispose'); } }; return coordinator; },
-    openExternal: async url => calls.push(url), openRecordings: async owner => calls.push(owner), onState: value => snapshots.push(value) });
+    openExternal: async url => calls.push(url), openProduct: async name => calls.push(name),
+    openRecordings: async owner => calls.push(owner), shareMeeting,
+    onState: value => snapshots.push(value) });
   return { service, auth, store, coordinator, settings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
     changeOwner(value) { profile = value; notify(); }, status(value) { status = value; statusNotify(value); } };
 }
@@ -79,9 +96,26 @@ test('sign-out stops local capture and only fixed external destinations can be o
   const f = fixture();
   await f.service.action('openLibrary', {url:'https://bad.example'});
   assert.equal(f.calls[0], 'https://library.northwind.example/reel');
+  await f.service.action('openRecorder');
+  await f.service.action('openNotetaker', {url:'https://bad.example'});
+  assert.deepEqual(f.calls.slice(1), ['openRecorder', 'openNotetaker']);
   await f.service.action('signOut');
   assert.equal(f.service.state().profile, null); assert.ok(f.calls.includes('cancel'));
   await assert.rejects(f.service.action('openRecordings'), /sign in/i);
+  await f.service.dispose();
+});
+
+test('sharing is an explicit owner-bound action and never accepts a renderer URL', async () => {
+  const shared=[];
+  const f=fixture({shareMeeting:{share:async value=>{shared.push(value);return {uploaded:true};}}});
+  await assert.rejects(f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-b'}),/account changed/i);
+  await assert.rejects(f.service.action('shareRecording',{id:'recording'}),/account changed/i);
+  assert.deepEqual(shared,[]);
+  await f.service.action('shareRecording',{id:'recording',url:'https://evil.example',expectedOwnerUserID:'owner-a'});
+  assert.deepEqual(shared,[{ownerUserID:'owner-a',id:'recording'}]);
+  f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
+  await assert.rejects(f.service.action('shareRecording',{id:'recording',expectedOwnerUserID:'owner-a'}),/account changed/i);
+  assert.equal(shared.length,1);
   await f.service.dispose();
 });
 

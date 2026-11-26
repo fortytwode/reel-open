@@ -19,7 +19,7 @@ assert.ok(result.recording.durationSeconds >= 12 && result.segmentCount >= 3);
 const ownerHash = createHash('sha256').update('synthetic-probe').digest('hex');
 const recordingPath = path.resolve(result.recording.path);
 const sidecar = await readFile(recordingPath.replace(/\.mp4$/, '.pcm'));
-assert.ok(sidecar.length >= 12 * 16000 * 2 && sidecar.length <= 20 * 16000 * 2, 'Expected complete 16 kHz mono PCM sidecar');
+assert.ok(sidecar.length >= 12 * 16000 * 2 && sidecar.length <= (result.outputSwitched ? result.recording.durationSeconds + 3 : 20) * 16000 * 2, 'Expected complete 16 kHz mono PCM sidecar');
 let energy = 0; for (let i = 0; i < sidecar.length; i += 2) energy += (sidecar.readInt16LE(i) / 32768) ** 2;
 assert.ok(Math.sqrt(energy / (sidecar.length / 2)) > 0.002, 'Expected audible synthetic sidecar audio');
 assert.equal(path.dirname(recordingPath), path.join(outDir, 'recordings', ownerHash));
@@ -49,29 +49,41 @@ function pixels(seconds) {
   assert.ok(magenta(tl) && green(tr) && green(bl) && magenta(br), `Wrong fixture pixels at ${seconds}s`);
   return [tl, tr, bl, br];
 }
-function tone(seconds) {
-  const pcm = run('ffmpeg', ['-v', 'error', '-ss', String(seconds), '-i', recordingPath, '-map', '0:a:0',
+function tone(seconds, frequency = 440, input = recordingPath) {
+  const rawPCM = input.endsWith('.pcm') ? ['-f', 's16le', '-ar', '16000', '-ac', '1'] : [];
+  const pcm = run('ffmpeg', ['-v', 'error', '-ss', String(seconds), ...rawPCM, '-i', input, '-map', '0:a:0',
     '-t', '2', '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1']);
   const count = Math.floor(pcm.length / 4);
-  let sum = 0, best440 = 0, best550 = 0;
+  let sum = 0, bestSignal = 0, best550 = 0;
   for (let offset = 0; offset + 12_000 < count; offset += 12_000) {
-    let sin440 = 0, cos440 = 0, sin550 = 0, cos550 = 0;
+    let sinSignal = 0, cosSignal = 0, sin550 = 0, cos550 = 0;
     for (let i = 0; i < 12_000; i++) {
       const value = pcm.readFloatLE((offset + i) * 4);
       sum += value * value;
       const t = i / 48_000;
-      sin440 += value * Math.sin(2 * Math.PI * 440 * t);
-      cos440 += value * Math.cos(2 * Math.PI * 440 * t);
+      sinSignal += value * Math.sin(2 * Math.PI * frequency * t);
+      cosSignal += value * Math.cos(2 * Math.PI * frequency * t);
       sin550 += value * Math.sin(2 * Math.PI * 550 * t);
       cos550 += value * Math.cos(2 * Math.PI * 550 * t);
     }
-    best440 = Math.max(best440, Math.hypot(sin440, cos440) / 12_000);
+    bestSignal = Math.max(bestSignal, Math.hypot(sinSignal, cosSignal) / 12_000);
     best550 = Math.max(best550, Math.hypot(sin550, cos550) / 12_000);
   }
   const rms = Math.sqrt(sum / (Math.floor(count / 12_000) * 12_000));
-  assert.ok(rms > 0.002 && best440 > 0.003 && best440 > best550 * 4, `Wrong fixture audio at ${seconds}s`);
-  return { rms, best440, best550 };
+  assert.ok(rms > 0.002 && bestSignal > 0.003 && bestSignal > best550 * 4, `Wrong fixture audio at ${seconds}s`);
+  return { rms, frequency, bestSignal, best550, ...(frequency === 440 ? { best440: bestSignal } : {}) };
 }
-console.log(JSON.stringify({ verified: true, sourceId: result.sourceId, fragments: result.segmentCount,
+const lateTime = result.outputSwitched ? Number(probe.format.duration) - 3 : 10;
+if (result.outputSwitched) {
+  assert.ok(Number.isFinite(result.changeAfterStartSeconds) && result.changeAfterStartSeconds >= 5);
+  assert.ok(lateTime > result.changeAfterStartSeconds, 'Late sample must follow the Windows output change');
+}
+const sidecarTones = {};
+if (result.outputSwitched) {
+  const pcmPath = recordingPath.replace(/\.mp4$/, '.pcm');
+  sidecarTones.early = tone(1, 440, pcmPath);
+  sidecarTones.late = tone(lateTime, 660, pcmPath);
+}
+console.log(JSON.stringify({ ...(result.outputSwitched ? { sidecarTones } : {}), verified: true, sourceId: result.sourceId, fragments: result.segmentCount,
   bytes: result.bytes, durationSeconds: result.recording.durationSeconds,
-  earlyPixels: pixels(2), latePixels: pixels(11), earlyTone: tone(1), lateTone: tone(10) }));
+  earlyPixels: pixels(2), latePixels: pixels(lateTime + 1), earlyTone: tone(1), lateTone: tone(lateTime, result.outputSwitched ? 660 : 440) }));
