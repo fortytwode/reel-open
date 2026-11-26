@@ -10,20 +10,24 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ($env:OS -ne 'Windows_NT') { throw 'Run this update test on disposable Windows CI.' }
+if ($env:OS -ne 'Windows_NT' -or $env:GITHUB_ACTIONS -ne 'true' -or $env:CI -ne 'true') {
+    throw 'This test may install ephemeral trust only on a disposable GitHub Actions Windows runner.'
+}
 if ([version]$NextVersion -le [version]$Version) { throw 'NextVersion must be greater than Version.' }
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'The disposable runner must be an administrator to install and remove ephemeral MSIX test trust.'
+}
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('reel-msix-update-' + [guid]::NewGuid().ToString('N'))
 $serveRoot = Join-Path $tempRoot 'feed'
 New-Item -ItemType Directory -Path $serveRoot | Out-Null
-$publisher = 'CN=Reel Ephemeral CI Test'
+$publisher = 'CN=Reel Ephemeral CI Test ' + [guid]::NewGuid().ToString('N')
 $identity = 'RocketShipHQ.Reel'
 $certificate = $null
 $trustedCertificate = $null
 $rootCertificate = $null
 $server = $null
-$appInstalled = $false
-$testPassword = 'ephemeral-' + [guid]::NewGuid().ToString('N')
 
 function Find-SignTool {
     $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
@@ -42,6 +46,14 @@ function Sign-TestPackage([string]$path, [string]$tool, [string]$thumbprint) {
 }
 
 try {
+    if (Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue) {
+        throw 'Refusing to replace an existing Reel package in the test account.'
+    }
+    foreach ($store in @('Cert:\CurrentUser\My', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\TrustedPeople')) {
+        if (Get-ChildItem $store -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq $publisher }) {
+            throw 'Refusing to reuse an existing test signing certificate.'
+        }
+    }
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     $listener.Start()
     $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
@@ -60,15 +72,17 @@ try {
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($server.HasExited) { throw 'The local App Installer feed server did not start.' }
 
+    Write-Output 'Creating a unique, one-day MSIX test certificate on the disposable runner.'
     $certificate = New-SelfSignedCertificate -Subject $publisher -Type CodeSigningCert -KeySpec Signature `
         -KeyLength 2048 -HashAlgorithm SHA256 -CertStoreLocation 'Cert:\CurrentUser\My' -NotAfter (Get-Date).AddDays(1)
     $cer = Join-Path $tempRoot 'test-publisher.cer'
     Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
-    $trustedCertificate = Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople'
-    $rootCertificate = Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\CurrentUser\Root'
+    $trustedCertificate = Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople'
+    $rootCertificate = Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\LocalMachine\Root'
     $signTool = Find-SignTool
 
     foreach ($release in @(@{ Version = $Version; Name = 'v1' }, @{ Version = $NextVersion; Name = 'v2' })) {
+        Write-Output "Building and signing test package version $($release.Version) ($Architecture)."
         $msixName = 'Reel-{0}-win32-{1}.msix' -f $release.Version.Substring(0, $release.Version.LastIndexOf('.')), $Architecture
         $msix = Join-Path $serveRoot $msixName
         $feed = Join-Path $tempRoot ($release.Name + '.appinstaller')
@@ -82,23 +96,24 @@ try {
         Sign-TestPackage $msix $signTool $certificate.Thumbprint
         if ($release.Name -eq 'v1') {
             Copy-Item -LiteralPath $feed -Destination (Join-Path $serveRoot $feedName)
-        } else {
-            $nextFeed = Join-Path $serveRoot $feedName
         }
     }
 
     $initialFeed = Join-Path $serveRoot $feedName
+    Write-Output 'Installing the first package from its App Installer feed.'
     Add-AppxPackage -AppInstallerFile $initialFeed
     $installed = Get-AppxPackage -Name $identity
     if ($null -eq $installed -or $installed.Version.ToString() -ne $Version) {
         throw 'App Installer did not install the initial package version.'
     }
-    $appInstalled = $true
 
     # Publish the newer feed at the same URI registered by the initial install.
+    Write-Output 'Publishing the newer feed at the registered update URI.'
     Copy-Item -LiteralPath (Join-Path $tempRoot 'v2.appinstaller') -Destination $initialFeed -Force
     $launcher = "shell:AppsFolder\$($installed.PackageFamilyName)!Companion"
+    Write-Output 'Launching the installed Companion app to trigger the App Installer update check.'
     Start-Process -FilePath explorer.exe -ArgumentList $launcher
+    Write-Output "Waiting for Windows to install version $NextVersion from the registered feed."
     $deadline = [DateTime]::UtcNow.AddMinutes(2)
     do {
         Start-Sleep -Seconds 2
@@ -110,14 +125,15 @@ try {
     }
     Write-Output "MSIX App Installer install/upgrade passed: $Version -> $NextVersion ($Architecture)."
 } finally {
+    Write-Output 'Removing the test package, local server, and per-run trust certificate.'
     Get-Process -Name Reel -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if ($trustedCertificate) {
-        Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPeople\$($trustedCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPeople\$($trustedCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
     }
     if ($rootCertificate) {
-        Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$($rootCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "Cert:\LocalMachine\Root\$($rootCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
     }
     if ($certificate) {
         Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
