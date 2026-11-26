@@ -158,12 +158,12 @@ try {
     $packageUriText = [Security.SecurityElement]::Escape($PackageUri.AbsoluteUri)
     $feed = @"
 <?xml version="1.0" encoding="utf-8"?>
-<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2017/2"
+<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2021"
               Version="$Version" Uri="$feedUriText">
   <MainPackage Name="$identity" Publisher="$escapedPublisher" Version="$Version"
                ProcessorArchitecture="$arch" Uri="$packageUriText" />
   <UpdateSettings>
-    <OnLaunch HoursBetweenUpdateChecks="$UpdateCheckHours" UpdateBlocksActivation="true" ShowPrompt="false" />
+    <OnLaunch HoursBetweenUpdateChecks="$UpdateCheckHours" ShowPrompt="false" />
   </UpdateSettings>
 </AppInstaller>
 "@
