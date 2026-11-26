@@ -90,6 +90,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     const messageKey = currentStatus && status.reason === 'microphone_unavailable' ? status.reason : phase;
     const currentCalendar=calendarOwner===profile?.userID;
     return {configured,profile,settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
+      meetingReminderError:reminderScheduler?.error ?? null,
       meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
         ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`),localOperation:activeRecordingOperations.get(`${profile.userID}:${recording.id}`)?.label ?? null})) : [],
       status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},error};

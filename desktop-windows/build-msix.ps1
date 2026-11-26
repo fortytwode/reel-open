@@ -96,8 +96,9 @@ try {
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+         xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap desktop rescap">
+         IgnorableNamespaces="uap desktop com rescap">
   <Identity Name="$identity" Publisher="$escapedPublisher" Version="$Version" ProcessorArchitecture="$arch" />
   <Properties>
     <DisplayName>Reel</DisplayName>
@@ -123,6 +124,16 @@ try {
           Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png"
           BackgroundColor="#FFFFFF" />
       <Extensions>
+        <desktop:Extension Category="windows.toastNotificationActivation">
+          <desktop:ToastNotificationActivation ToastActivatorCLSID="{A4E2C27A-6732-45DA-B357-C33516B7901B}" />
+        </desktop:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer Executable="Reel.exe" DisplayName="Reel Companion" Arguments="----AppNotificationActivated:">
+              <com:Class Id="{A4E2C27A-6732-45DA-B357-C33516B7901B}" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
         <desktop:Extension Category="windows.startupTask" Executable="Reel.exe" EntryPoint="Windows.FullTrustApplication">
           <desktop:StartupTask TaskId="ReelCompanionAtLogon" Enabled="false" DisplayName="Reel Companion" />
         </desktop:Extension>

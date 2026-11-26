@@ -99,8 +99,9 @@ function consentControls(settings, dashboard) {
     const reminder=node('label','setting'); const reminderBox=node('input'); reminderBox.type='checkbox';
     reminderBox.dataset.setting='meetingReminders'; reminderBox.checked=settings.meetingReminders;
     const reminderText=node('span'); reminderText.append(node('strong','','Prompt when a calendar meeting starts'));
-    reminderText.append(node('small','','Show a local Windows notification at meeting start. Reel will not join or record from this reminder.'));
+    reminderText.append(node('small','','Windows schedules a local notification even when Companion is closed. Reel will not join or record from this reminder.'));
     reminder.append(reminderBox,reminderText); wrap.append(reminder);
+    if(snapshot?.meetingReminderError) wrap.append(node('p','muted',snapshot.meetingReminderError));
     if (snapshot?.startup) {
       wrap.append(node('div','divider'), node('p','calendar-heading','Start at Windows sign-in'));
       if (snapshot.startup.mode === 'windows-settings') {

@@ -184,6 +184,9 @@ jobs:
           path: ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
           if-no-files-found: warn
           retention-days: 7
+      - name: Verify persistent reminders with Windows Task Scheduler
+        shell: pwsh
+        run: node desktop-windows/tests/windows-reminder-task.smoke.mjs portable
       - name: Launch the extracted app and verify first-run setup
         working-directory: firebase/tests
         shell: bash
