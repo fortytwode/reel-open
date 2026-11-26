@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
-import {readFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,mkdir,writeFile} from 'node:fs/promises';
+import os from 'node:os';
 import {startAssetServer} from '../src/asset-server.mjs';
 
 test('serves only fixed app assets and rejects mutations, host spoofing and traversal', async t=>{
@@ -29,7 +30,7 @@ test('serves only fixed app assets and rejects mutations, host spoofing and trav
     const policy=result.headers.get('content-security-policy');
     assert.match(policy,/script-src 'self' 'wasm-unsafe-eval' blob:/);
     const connect=policy.match(/connect-src ([^;]+)/)?.[1].split(' ').sort();
-    assert.deepEqual(connect,["'self'",'https://cas-bridge.xethub.hf.co','https://cdn-lfs.huggingface.co','https://huggingface.co'].sort());
+    assert.deepEqual(connect,["'self'",'https://huggingface.co','https://us.aws.cdn.hf.co','https://us.gcp.cdn.hf.co'].sort());
     assert.doesNotMatch(policy,/cdn\.jsdelivr\.net|https:\/\/\*/);
   }
   assert.equal((await fetch(server.localAIOrigin+'/../../src/auth.mjs')).status,404);
@@ -76,4 +77,16 @@ test('portable allowlist contains every static dependency of the Windows main pr
   assert.match(localUI,/First use downloads about 1\.1 GB/);
   assert.match(localUI,/never falls back to cloud transcription/);
   assert.match(packaging, /Windows Media Foundation/);
+});
+
+test('local inference assets are served from the supplied extracted package root',async t=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'reel-package-root-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const runtime=path.join(root,'desktop-windows/node_modules/@huggingface/transformers/dist');
+  await mkdir(runtime,{recursive:true});
+  await writeFile(path.join(runtime,'transformers.web.min.js'),'packaged-transformers-runtime');
+  const server=await startAssetServer({root});t.after(()=>server.close());
+  const response=await fetch(server.localAIOrigin+'/transformers.web.min.js');
+  assert.equal(response.status,200);
+  assert.equal(await response.text(),'packaged-transformers-runtime');
 });

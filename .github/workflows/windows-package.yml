@@ -46,22 +46,6 @@ jobs:
           $probe = Resolve-Path desktop-windows/probe/processing-runtime.mjs
           $process = Start-Process -FilePath $electron -ArgumentList ('"' + $probe + '"') -Wait -PassThru -NoNewWindow
           if ($process.ExitCode) { throw "Audio codec test exited with $($process.ExitCode)" }
-      - name: Verify real local Whisper inference and offline cache
-        shell: pwsh
-        run: |
-          $freeBytes = (Get-PSDrive -Name C).Free
-          if ($freeBytes -lt 4GB) { throw "Local Whisper smoke needs 4 GiB free for its pinned 1.1 GB model/cache; found $([math]::Round($freeBytes / 1GB, 2)) GiB." }
-          Add-Type -AssemblyName System.Speech
-          $audio = Join-Path $env:RUNNER_TEMP whisper-smoke.wav
-          $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-          $format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(16000, [System.Speech.AudioFormat.EncodingFormat]::Pcm, 16, 1)
-          $synth.SetOutputToWaveFile($audio, $format)
-          $synth.Speak('This local meeting verifies privacy using on-device transcription.')
-          $synth.Dispose()
-          $electron = Resolve-Path desktop-windows/probe/node_modules/electron/dist/electron.exe
-          $smoke = Resolve-Path desktop-windows/local-ai/smoke.mjs
-          $process = Start-Process -FilePath $electron -ArgumentList ('"' + $smoke + '" "' + $audio + '"') -Wait -PassThru -NoNewWindow
-          if ($process.ExitCode) { throw "Local Whisper inference/offline cache smoke exited with $($process.ExitCode)" }
       - name: Build package and run the local MP4 trim/export smoke on this architecture
         shell: pwsh
         env:
@@ -78,6 +62,41 @@ jobs:
           $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
           ./desktop-windows/build-portable.ps1 -ElectronDist desktop-windows/probe/node_modules/electron/dist -ExpectedArchitecture $env:REEL_ARCH -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials -Version "$version-ci" -OutputZip $zip
           Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP/demo-package"
+      - name: Verify packaged local Whisper inference and offline cache
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          $freeBytes = (Get-PSDrive -Name C).Free
+          if ($freeBytes -lt 4GB) { throw "Local Whisper smoke needs 4 GiB free for its pinned 1.1 GB model/cache; found $([math]::Round($freeBytes / 1GB, 2)) GiB." }
+          Add-Type -AssemblyName System.Speech
+          $audio = Join-Path $env:RUNNER_TEMP whisper-smoke.wav
+          $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
+          $synth.SetOutputToWaveFile($audio, $format)
+          $synth.Speak('This local meeting verifies privacy using on-device transcription.')
+          $synth.Dispose()
+          $electron = Resolve-Path "$env:RUNNER_TEMP/demo-package/Reel.exe"
+          $appRoot = Resolve-Path "$env:RUNNER_TEMP/demo-package/resources/app"
+          $packagePath = Join-Path $appRoot 'package.json'
+          $originalPackage = [IO.File]::ReadAllText($packagePath)
+          $smoke = Join-Path $appRoot 'desktop-windows/local-ai/smoke.mjs'
+          try {
+            Copy-Item -LiteralPath 'desktop-windows/local-ai/smoke.mjs' -Destination $smoke
+            $package = $originalPackage | ConvertFrom-Json
+            $package.main = 'desktop-windows/local-ai/smoke.mjs'
+            $utf8 = New-Object Text.UTF8Encoding($false)
+            [IO.File]::WriteAllText($packagePath, ($package | ConvertTo-Json), $utf8)
+            $env:REEL_WHISPER_SMOKE_AUDIO = $audio
+            $env:REEL_WHISPER_SMOKE_ROOT = $appRoot
+            $env:REEL_WHISPER_SMOKE_ARCH = $env:REEL_ARCH
+            $process = Start-Process -FilePath $electron -Wait -PassThru -NoNewWindow
+            if ($process.ExitCode) { throw "Packaged local Whisper inference/offline cache smoke exited with $($process.ExitCode)" }
+          } finally {
+            [IO.File]::WriteAllText($packagePath, $originalPackage, (New-Object Text.UTF8Encoding($false)))
+            Remove-Item -LiteralPath $smoke -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH -ErrorAction SilentlyContinue
+          }
       - name: Launch the extracted app and verify first-run setup
         working-directory: firebase/tests
         shell: bash

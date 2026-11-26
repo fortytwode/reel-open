@@ -40,6 +40,14 @@ From the repository root, install the pinned local transcription runtime assets:
 Transformers.js and ONNX WebAssembly runtime but not the Whisper model. Users who
 opt in to local transcription download the pinned model on first use; it remains
 in the Companion's separate model-cache profile for offline retries.
+The isolated inference window allows Hub requests only for known files at the
+pinned revision, then CDN redirects only for the two exact quantized ONNX blob
+paths and their fixed signed-query key set. Hugging Face issues expiring opaque
+CDN signatures that Reel cannot independently validate. Instead, it records the
+exact signed URL returned by an HTTPS redirect from the pinned Hub request and
+permits only that URL; modified signatures or extra query parameters are
+rejected. This boundary relies on the trusted Hub's HTTPS response and the
+pinned inference runtime remaining uncompromised.
 Also install the Windows 10 SDK (with `Windows.winmd`) and the .NET Framework
 4.5 targeting pack; the build compiles and tests the local trim helper against
 Windows' built-in Media Foundation editing APIs. No media executable is bundled.
