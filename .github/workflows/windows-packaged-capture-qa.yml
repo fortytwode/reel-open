@@ -1,0 +1,97 @@
+name: Windows packaged capture QA
+
+on:
+  push:
+    branches: ['qa/packaged-capture-353f243']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_SHA: 353f24327c0275ee0ca24336db823199e41bc0e5
+
+jobs:
+  packaged-capture:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, arch: x64 }
+          - { runner: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout this QA workflow
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: qa
+          persist-credentials: false
+      - name: Checkout exact production candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRODUCTION_SHA }}
+          path: production
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.arch }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify checkout is the selected production source
+        shell: pwsh
+        run: |
+          $actual = (git -C production rev-parse HEAD).Trim()
+          if ($actual -ne $env:PRODUCTION_SHA) { throw "Expected $env:PRODUCTION_SHA; got $actual" }
+          "Production source: $actual" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+      - name: Run Windows desktop unit tests
+        working-directory: production/desktop-windows
+        run: npm test
+      - name: Install pinned Electron runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix production/desktop-windows/probe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node production/desktop-windows/probe/node_modules/electron/install.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Install the existing FFmpeg test dependency
+        shell: pwsh
+        run: choco install ffmpeg --no-progress -y
+      - name: Build and extract a synthetic demo package
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          Push-Location production
+          try {
+            python scripts/configure-organization.py organization.example.json
+            if ($LASTEXITCODE) { throw 'Organization fixture generation failed.' }
+            $org = Get-Content desktop-windows/organization.json -Raw | ConvertFrom-Json
+            if ($org.projectID -ne 'demo-reel') { throw 'Expected the synthetic demo organization.' }
+            $credentials = Join-Path $env:RUNNER_TEMP demo-installed.json
+            @{ installed = @{ client_id = $org.googleDesktopClientId; client_secret = 'demo-installed-client' } } |
+              ConvertTo-Json | Set-Content -Encoding utf8NoBOM $credentials
+            $zip = Join-Path $env:RUNNER_TEMP demo-portable.zip
+            $packageRoot = Join-Path $env:RUNNER_TEMP demo-portable
+            $electron = Join-Path (Get-Location) 'desktop-windows/probe/node_modules/electron/dist'
+            $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
+            ./desktop-windows/build-portable.ps1 -ElectronDist $electron -ExpectedArchitecture $env:REEL_ARCH `
+              -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials `
+              -Version "$version-ci-capture" -OutputZip $zip
+            if ($LASTEXITCODE) { throw 'Portable package build failed.' }
+            Expand-Archive -LiteralPath $zip -DestinationPath $packageRoot
+            "Architecture: $env:REEL_ARCH`nPackage SHA-256: $((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant())" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "PACKAGE_ROOT=$packageRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } finally { Pop-Location }
+      - name: Capture and decode a synthetic meeting using the extracted package
+        shell: pwsh
+        run: |
+          $productionRoot = (Resolve-Path production).Path
+          & qa/desktop-windows/probe/run-packaged-capture.ps1 `
+            -SourceRoot $productionRoot `
+            -PackageRoot $env:PACKAGE_ROOT `
+            -ExpectedArchitecture '${{ matrix.arch }}'
