@@ -35,6 +35,32 @@ test("failed online library writes and deletes throw a retryable visible error",
   } finally { globalThis.fetch = old; }
 });
 
+test("room deletion retries only bounded 409 conflicts and surfaces persistent conflicts", async (t) => {
+  const client = new FirestoreClient(session);
+  let deletes = 0;
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    if (options.method === "GET") return new Response("{}");
+    if (options.method === "DELETE") {
+      deletes++;
+      return deletes === 1 ? new Response(JSON.stringify({ error: { status: "ABORTED", message: "concurrent update" } }), { status: 409 })
+        : new Response("{}", { status: 200 });
+    }
+    return new Response("{}");
+  });
+  await client.deleteRoom(id);
+  assert.equal(deletes, 2, "A single conflict is retried and the next successful delete completes.");
+
+  deletes = 0;
+  t.mock.restoreAll();
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    if (options.method === "GET") return new Response("{}");
+    if (options.method === "DELETE") { deletes++; return new Response(JSON.stringify({ error: { status: "ABORTED", message: "still busy" } }), { status: 409 }); }
+    return new Response("{}");
+  });
+  await assert.rejects(client.deleteRoom(id), /HTTP 409.*still busy/);
+  assert.equal(deletes, 4, "Persistent conflicts exhaust the bounded retry count instead of being treated as success.");
+});
+
 test("backfill indexes only uploaded entries owned by the current account and surfaces errors", async () => {
   const entries = [recording, { ...recording, id: "other", shareID: "other0123456789012345" }, { ...recording, id: "local", upload: "localOnly" }];
   const saved = [], errors = [];

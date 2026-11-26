@@ -294,6 +294,27 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   assert.equal((await getDocs(collection(ownerDB,'videos',retryRoom,'reactions'))).size,1,'Delete retry does not duplicate reactions.');
   assert.equal(await ownerCloud.ownsRoom(deleteSourceRoom),false,'Successful retry removes the source room only after all children are deleted.');
 
+  // A Firestore room DELETE may conflict with an in-flight viewer write. Retry
+  // the idempotent migration and verify the destination discussion is still
+  // copied once, while the source room is eventually removed.
+  const conflictSourceRoom=retryRoom;
+  let conflictDeleteCalls=0;
+  globalThis.fetch=async(input,init)=>{
+    const url=String(input?.url??input);
+    if(init?.method==='DELETE'&&url.endsWith(`/videos/${conflictSourceRoom}`)&&conflictDeleteCalls++===0)
+      return new Response(JSON.stringify({error:{status:'ABORTED',message:'injected concurrent room update'}}),{status:409});
+    return nativeFetch(input,init);
+  };
+  try {
+    await restartedShare.updateAccess({ownerUserID:ownerID,id,password:'meeting-access-222'});
+  } finally { globalThis.fetch=nativeFetch; }
+  assert.equal(conflictDeleteCalls,2,'The room DELETE is retried once after a transient Firestore conflict.');
+  let conflictRetry=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  let conflictRoom=C.room(shareID,conflictRetry.share.access.key);
+  assert.equal((await getDocs(collection(ownerDB,'videos',conflictRoom,'comments'))).size,2,'Conflict retry preserves comments exactly once.');
+  assert.equal((await getDocs(collection(ownerDB,'videos',conflictRoom,'reactions'))).size,1,'Conflict retry preserves reactions exactly once.');
+  assert.equal(await ownerCloud.ownsRoom(conflictSourceRoom),false,'Conflict retry removes the old room after cleanup succeeds.');
+
   const expiryUpdate=await restartedShare.updateAccess({ownerUserID:ownerID,id,expiry:'hour'});
   assert.equal(expiryUpdate.url,result.url);
   afterChange=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
@@ -377,6 +398,7 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
     passwordDeniedThenAccepted:true,publicMetadataStubOnly:true,publicMediaDenied:true,expiryPublished:true,
     accessPasswordChanged:true,oldAccessRevoked:true,oldKeyAccessCanPersistDuringFailedRevocation:true,expiryUpdated:true,passwordRemoved:true,failureRetrySurvivesRestart:true,
     partialFirestoreMigrationRetryIsIdempotent:true,sourceReadFailureStaysPending:true,childDeleteFailureStaysPending:true,
+    firestoreDeleteConflictRetried:true,
     publicToProtected:true,publicAccessRemainsPossibleDuringFailedRevocation:true,videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
   await context.close();
 } finally {
