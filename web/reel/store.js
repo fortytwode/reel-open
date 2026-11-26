@@ -3,7 +3,7 @@
 // per file (init.mp4, segNNNNN.m4s, video.mp4, thumb.jpg, trimmed.mp4). Every segment is stored
 // the moment the encoder closes it, so a crashed or closed tab can be recovered on the next visit
 // (the Mac app's recording.json + segments/ folder + Recovery).
-import * as C from "./core.js?v=20261119-owner2";
+import * as C from "./core.js?v=20261126-serving-import";
 import { organizationStorageKey } from "../organization.js?v=20261118-orgstate1";
 
 const DB = organizationStorageKey("reel-recorder"), VERSION = 1;
@@ -94,6 +94,15 @@ export async function loadRecordings() {
 }
 
 const fileKey = (id, file) => id + "/" + file;
+export async function saveImportedVideo(recording, file, isCurrent) {
+  const db = await open();
+  if (!isCurrent()) throw new Error("Your account changed. Choose the file again.");
+  const tx = db.transaction(["recordings", "files"], "readwrite");
+  tx.objectStore("recordings").add({ id: recording.id, json: C.recordingToJSON(recording) });
+  tx.objectStore("files").put(file, fileKey(recording.id, C.File.video));
+  await done(tx);
+}
+
 export async function putFile(id, file, data) {
   const db = await open();
   const tx = db.transaction("files", "readwrite");

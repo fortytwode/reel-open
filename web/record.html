@@ -164,6 +164,8 @@
 
     <section class="library" id="local-recordings">
       <div class="lib-head"><h2>Your recordings</h2><span class="muted small">Stored in this browser; uploaded ones are also on the web.</span></div>
+      <button id="import-video" type="button">Import MP4</button>
+      <input id="local-video-file" type="file" accept="video/mp4,.mp4" hidden>
       <ol id="list" class="rec-list"></ol>
       <p id="empty" class="muted">No recordings yet.</p>
     </section>
@@ -224,6 +226,6 @@
   <div id="toast" class="toast" role="status" hidden></div>
   <footer class="foot muted small"><a href="/notetaker" class="muted">Open Reel Notetaker</a></footer>
   <script type="module" src="/reel/install.js?v=20261119-products1"></script>
-  <script type="module" src="/record.js?v=20261120-partial-recovery"></script>
+  <script type="module" src="/record.js?v=20261126-serving-import"></script>
 </body>
 </html>

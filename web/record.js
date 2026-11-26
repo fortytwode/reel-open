@@ -6,13 +6,13 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-partial-recovery";
 import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
-import * as C from "./reel/core.js?v=20261119-choice1";
-import * as store from "./reel/store.js?v=20261119-owner2";
+import * as C from "./reel/core.js?v=20261126-serving-import";
+import * as store from "./reel/store.js?v=20261126-serving-import";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
-import { Library, Publisher, APP } from "./reel/publisher.js?v=20261119-owner2";
+import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-serving-import";
 import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261119-tab1";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
@@ -62,6 +62,21 @@ $("last-copy").addEventListener("click", () => copyText($("last-link").href));
 
 let auth = null, am = null, user = null;
 let authGeneration = 0;
+function visibleToCurrentAccount(recording) {
+  return C.canViewLocalRecording(recording, user?.uid, false);
+}
+function clearImportedAccountDetails() {
+  $("list").replaceChildren();
+  $("last").hidden = true;
+  $("last-link").removeAttribute("href");
+  $("last-link").textContent = "";
+  $("toast").hidden = true;
+  for (const id of ["share-dialog", "trim-dialog", "meeting-notes-dialog"]) {
+    if ($(id).open) $(id).close("account-changed");
+  }
+  for (const url of thumbURLs.values()) if (url) URL.revokeObjectURL(url);
+  thumbURLs.clear();
+}
 let authReady;
 let libraryReady;
 const authReadyPromise = new Promise((r) => { authReady = r; });
@@ -86,7 +101,10 @@ async function initAuth() {
       am.signOut(auth).catch(() => {});
       u = null;
     } else if (u) $("auth-msg").hidden = true;
-    if (user?.uid !== u?.uid) authGeneration++;
+    if (user?.uid !== u?.uid) {
+      authGeneration++;
+      if (library.list().some(r => r.localImport)) clearImportedAccountDetails();
+    }
     user = u;
     $("user").textContent = u ? (u.displayName || u.email) : "Not signed in: recordings stay in this browser";
     $("sign-in").hidden = !!u; $("sign-out").hidden = !u;
@@ -520,10 +538,12 @@ function renderList() {
   renderPending = true;
   requestAnimationFrame(async () => {
     renderPending = false;
-    const list = $("list"), items = library.list();
+    const generation = authGeneration;
+    const list = $("list"), items = library.list().filter(visibleToCurrentAccount);
     $("empty").hidden = items.length > 0;
     const frag = document.createDocumentFragment();
     for (const r of items) frag.appendChild(await renderItem(r));
+    if (generation !== authGeneration) return;
     list.textContent = "";
     list.appendChild(frag);
   });
@@ -536,6 +556,7 @@ async function renderItem(r) {
   const body = document.createElement("div");
   const title = document.createElement("button"); title.className = "rec-title"; title.textContent = r.title; title.title = "Rename";
   title.addEventListener("click", async () => {
+    if (!visibleToCurrentAccount(r)) return;
     const t = window.prompt("Rename recording", r.title);
     if (t != null) await publisher.rename(r, t);
   });
@@ -549,7 +570,7 @@ async function renderItem(r) {
   const p = library.progress.get(r.id);
   if (p != null) { const bar = document.createElement("div"); bar.className = "progress"; const f = document.createElement("div"); f.style.width = Math.round(p * 100) + "%"; bar.appendChild(f); body.appendChild(bar); }
   const actions = document.createElement("div"); actions.className = "rec-actions";
-  const btn = (label, fn, cls) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; if (cls) b.className = cls; b.addEventListener("click", fn); actions.appendChild(b); return b; };
+  const btn = (label, fn, cls) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; if (cls) b.className = cls; b.addEventListener("click", () => { if (visibleToCurrentAccount(r)) fn(); }); actions.appendChild(b); return b; };
   const remote = C.isMeeting(r) ? r.upload === "uploaded" : r.upload === "uploaded" || r.playback.hls || r.playback.mp4;
   const busy = r.captureState === "recording" || r.captureState === "finalizing";
   if (remote) {
@@ -561,7 +582,7 @@ async function renderItem(r) {
     meta.textContent = bits.join(" · ");
     btn("Meeting notes", () => openMeetingNotes(r));
   }
-  if (!busy && !C.isMeeting(r)) {
+  if (!busy && !C.isMeeting(r) && !r.localImport) {
     bits.push(transcriptionProgress.get(r.id) || "Transcript: " + r.transcriptStatus);
     meta.textContent = bits.join(" · ");
     if (r.transcriptStatus === "ready") btn("Transcript", () => downloadTranscript(r.id));
@@ -580,7 +601,7 @@ async function renderItem(r) {
     });
   }
   if (!busy && r.upload === "uploaded") btn("Sharing…", () => openShare(r));
-  if (!busy) btn("Trim…", () => openTrim(r));
+  if (!busy && !r.localImport) btn("Trim…", () => openTrim(r));
   if (!transcriptionJobs.has(r.id) && !publisher.uploads.has(r.id) && !notionJobs.has(r.id) && !(R.recording && R.recording.id === r.id && R.phase !== "idle")) btn("Delete", async () => {
     if (!window.confirm(`Delete “${r.title}”?${C.isMeeting(r) ? " Local video and its portal entry will be removed; Notion notes remain." : ""}${remote ? " The link will stop working." : ""}`)) return;
     if (await publisher.delete(r)) {
@@ -595,6 +616,7 @@ async function renderItem(r) {
 
 async function download(r) {
   const b = await store.getFile(r.id, C.File.video);
+  if (!visibleToCurrentAccount(r)) return;
   if (!b) { toast("video.mp4 isn't in this browser.", true); return; }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(b);
@@ -602,6 +624,48 @@ async function download(r) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 30000);
 }
+
+let importAccount = null;
+const importButton = $("import-video"), localVideoFile = $("local-video-file");
+importButton.addEventListener("click", () => {
+  if (!user) { toast("Sign in to import an MP4.", true); return; }
+  importAccount = { uid: user.uid, generation: authGeneration };
+  localVideoFile.click();
+});
+localVideoFile.addEventListener("change", async () => {
+  const file = localVideoFile.files[0], account = importAccount;
+  localVideoFile.value = "";
+  importAccount = null;
+  if (!file) return;
+  importButton.disabled = true;
+  const video = document.createElement("video");
+  let url;
+  try {
+    const current = await session.session();
+    if (!current || current.uid !== account?.uid || authGeneration !== account.generation) {
+      throw new Error("Your account changed. Choose the file again.");
+    }
+    if (!file.size || !/\.mp4$/i.test(file.name)) throw new Error("Choose a playable MP4 video.");
+    url = URL.createObjectURL(file);
+    video.preload = "metadata";
+    await new Promise((resolve, reject) => {
+      video.onloadedmetadata = resolve;
+      video.onerror = () => reject(new Error("This browser couldn't read that MP4."));
+      video.src = url;
+    });
+    await library.importLocalVideo(file, { durationSeconds: video.duration, width: video.videoWidth, height: video.videoHeight }, current);
+    if (current.isCurrent()) toast("Saved in this browser. Use Upload to create a new share.");
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    video.onloadedmetadata = video.onerror = null;
+    video.removeAttribute("src");
+    video.load();
+    if (url) URL.revokeObjectURL(url);
+    importButton.disabled = false;
+  }
+});
+
 
 // ---------------------------------------------------------------- local transcription + authenticated meeting Notion delivery
 const transcriptionJobs = new Map();
@@ -648,7 +712,7 @@ async function removeMeetingMetadata(r) {
   if (!response.ok) throw new Error("Portal sync failed");
 }
 function processRecording(recording, { resumeNotes = false } = {}) {
-  if (!recording || !["complete", "recovered"].includes(recording.captureState)) return Promise.resolve();
+  if (!recording || recording.localImport || !["complete", "recovered"].includes(recording.captureState)) return Promise.resolve();
   if (transcriptionJobs.has(recording.id)) return transcriptionJobs.get(recording.id);
   const id = recording.id;
   const expectedOwnerUID = user?.uid ?? null, expectedGeneration = authGeneration;
@@ -961,7 +1025,7 @@ function openShare(r) {
   $("share-password").value = ""; $("share-remove").checked = false; $("share-remove").disabled = !r.access.key;
   $("share-expiry").value = "keep"; $("share-error").hidden = true;
   d.onclose = async () => {
-    if (d.returnValue !== "save") return;
+    if (d.returnValue !== "save" || !visibleToCurrentAccount(r)) return;
     const pw = $("share-password").value;
     const password = $("share-remove").checked ? { remove: true } : pw ? { set: pw } : { keep: true };
     const choice = $("share-expiry").value;
@@ -1014,12 +1078,13 @@ async function boot() {
   await authReadyPromise;
   await publisher.recover();
   // Resume uploads a closed tab left unfinished.
-  for (const r of library.list()) {
+  const resumable = library.list().filter(r => !r.localImport);
+  for (const r of resumable) {
     if ((r.upload === "uploading" || r.upload === "pending") && (r.captureState === "complete" || r.captureState === "recovered") && settings.autoUpload && user && C.automaticCloudAllowed(r)) publisher.publish(r);
   }
-  for (const r of library.list()) if (r.transcriptStatus === "pending" && ["complete", "recovered"].includes(r.captureState)) processRecording(r);
+  for (const r of resumable) if (r.transcriptStatus === "pending" && ["complete", "recovered"].includes(r.captureState)) processRecording(r);
   resumeMeetingDelivery();
-  for (const r of library.list().slice(0, 20)) publisher.refreshViews(r).catch(() => {});
+  for (const r of resumable.slice(0, 20)) publisher.refreshViews(r).catch(() => {});
 }
 function updateRecordingKind() {
   const meeting = isMeeting();

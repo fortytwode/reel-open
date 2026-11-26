@@ -3,8 +3,8 @@
 // starts and segments stream up during capture, so the link is copied the moment recording stops
 // and plays within seconds. Then video.mp4 (assembled locally from the segments), the thumbnail
 // and meta are uploaded in the background. Same remote layout as the Mac app.
-import * as C from "./core.js?v=20261119-owner2";
-import * as store from "./store.js?v=20261119-owner2";
+import * as C from "./core.js?v=20261126-serving-import";
+import * as store from "./store.js?v=20261126-serving-import";
 import { StorageClient, FirestoreClient, SegmentUploader, CloudError, concurrently } from "./cloud.js?v=20261119-owner2";
 import { remux, parseInit, fragmentDuration } from "./fmp4.js";
 
@@ -45,6 +45,23 @@ export class Library extends EventTarget {
     if (!saved || !this.items.has(r.id)) return false;
     this.items.set(r.id, C.preserveRecordingBinding(structuredClone(r), saved));
     this.changed(); return true;
+  }
+  async importLocalVideo(file, { durationSeconds, width, height }, session) {
+    if (!session?.uid || !session.isCurrent()) throw new Error("Sign in to import a local video.");
+    if (!file.size || !/\.mp4$/i.test(file.name) || !Number.isFinite(durationSeconds) || durationSeconds <= 0 ||
+      !Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+      throw new Error("Choose a playable MP4 video.");
+    }
+    const createdAt = new Date(), recordingNonce = C.newRecordingNonce();
+    const shareID = await C.ownerShareID(session.uid, recordingNonce);
+    const title = C.cleanTitle(file.name.replace(/\.mp4$/i, ""));
+    const recording = C.newRecording({ shareID, title, createdAt, upload: "localOnly" });
+    Object.assign(recording, { durationSeconds, width, height, recordingNonce, recordingOwnerUID: session.uid,
+      localImport: true, captureState: "complete", transcriptStatus: "none" });
+    await store.saveImportedVideo(recording, file, session.isCurrent);
+    this.items.set(recording.id, recording);
+    this.changed();
+    return this.get(recording.id);
   }
   async remove(id) { this.items.delete(id); await store.deleteRecording(id); this.changed(); }
   setProgress(id, p) { if (p == null) this.progress.delete(id); else this.progress.set(id, p); this.changed(); }
@@ -177,7 +194,7 @@ export class Publisher {
   async recover() {
     const out = { recovered: [], discarded: [], failed: {} };
     for (const r of this.library.list()) {
-      if (r.captureState !== "recording" && r.captureState !== "finalizing") continue;
+      if (r.localImport || (r.captureState !== "recording" && r.captureState !== "finalizing")) continue;
       if (await isRecordingElsewhere(r.id)) continue;            // still recording in another tab
       try {
         const row = (await store.getRow(r.id)) || {};
