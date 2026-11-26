@@ -221,6 +221,18 @@ test('sharing is an explicit owner-bound action and never accepts a renderer URL
   await f.service.dispose();
 });
 
+test('meeting share access updates are owner-bound and accept only settings, never URLs', async () => {
+  const updates=[];
+  const f=fixture({shareMeeting:{share:async()=>{},updateAccess:async value=>updates.push(value)}});
+  await assert.rejects(f.service.action('updateMeetingShareAccess',{id:'a'.repeat(32),expectedOwnerUserID:'owner-b',password:'changed-password'}),/account changed/i);
+  await assert.rejects(f.service.action('updateMeetingShareAccess',{id:'a'.repeat(32),expectedOwnerUserID:'owner-a',url:'https://evil.example'}),/invalid meeting link settings/i);
+  await f.service.action('updateMeetingShareAccess',{id:'a'.repeat(32),expectedOwnerUserID:'owner-a',password:'changed-password',expiry:'day'});
+  assert.deepEqual(updates,[{ownerUserID:'owner-a',id:'a'.repeat(32),password:'changed-password',expiry:'day'}]);
+  f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
+  await assert.rejects(f.service.action('updateMeetingShareAccess',{id:'a'.repeat(32),expectedOwnerUserID:'owner-a'}),/account changed/i);
+  assert.equal(updates.length,1);
+});
+
 test('rename and delete are owner-bound, reject renderer paths, and confirm local-only removal', async () => {
   const f=fixture(); f.recordings.push({id:'a'.repeat(32),title:'Legacy meeting'});
   const expectedOwnerUserID='owner-a', id='a'.repeat(32);

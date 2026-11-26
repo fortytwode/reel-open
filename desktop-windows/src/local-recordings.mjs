@@ -11,6 +11,8 @@ const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantCons
   systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
 const metadata = recording => ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
   durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload), shareIncludesTranscript: recording.share.includeTranscript === true } : {}),
+  ...(recording.share?.access ? { shareAccess: { passwordProtected: Boolean(recording.share.access.key), expiresAt: recording.share.access.expiresAt ?? null,
+    updatePending: Boolean(recording.share.accessUpdate) } } : {}),
   ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()), error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
 
 // Only the boxes and sample tables produced by Reel's pinned fragmented muxer are accepted.
@@ -479,6 +481,36 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
       item.share.upload = structuredClone(upload); return state;
     });
   }
+  async function saveShareAccessUpdate({ ownerUserID, expectedOwnerUserID, id, shareID, update } = {}) {
+    check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The meeting owner changed.');
+    check(/^[0-9a-f]{32}$/.test(id ?? '') && /^r2[0-9a-f]{38}$/.test(shareID ?? ''), 'Invalid meeting share binding.');
+    if (update !== null) {
+      const validAccess = access => access && typeof access === 'object' && !Array.isArray(access)
+        && (access.key === null || /^[0-9a-f]{32}$/.test(access.key ?? ''))
+        && (access.passwordSalt === null || /^[0-9a-f]{32}$/.test(access.passwordSalt ?? ''))
+        && ((access.key === null && access.passwordSalt === null) || (access.key !== null && access.passwordSalt !== null))
+        && (access.expiresAt === null || (typeof access.expiresAt === 'string' && Number.isFinite(Date.parse(access.expiresAt))
+          && new Date(access.expiresAt).toISOString().replace('.000Z', 'Z') === access.expiresAt));
+      check(update && typeof update === 'object' && !Array.isArray(update) && validAccess(update.from) && validAccess(update.to),
+        'Invalid meeting share access update.');
+    }
+    await mutate(owner(ownerUserID), state => {
+      const item = state.recordings.find(recording => recording.id === id);
+      check(item?.share?.ownerUserID === ownerUserID && item.share.shareID === shareID
+        && (item.share.upload === 'uploaded' || item.share.accessUpdate),
+        'This meeting does not have a published link to update.');
+      if (update === null) {
+        check(item.share.accessUpdate, 'There is no pending meeting access update to complete.');
+        item.share.access = structuredClone(item.share.accessUpdate.to);
+        delete item.share.accessUpdate;
+        item.share.upload = 'uploaded';
+      } else {
+        item.share.accessUpdate = structuredClone(update);
+        item.share.upload = { failed: 'Link settings update is incomplete. Retry to finish safely.' };
+      }
+      return state;
+    });
+  }
   function listProcessing(ownerUserID) { return owner(ownerUserID).state.recordings.filter(item => item.processing && existsSync(path.join(owner(ownerUserID).dir, `${item.id}.mp4`))).map(item => ({ id: item.id, processing: structuredClone(item.processing) })); }
   async function saveProcessing({ ownerUserID, id, processing }) {
     await mutate(owner(ownerUserID), state => { const item = state.recordings.find(recording => recording.id === id);
@@ -489,5 +521,5 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     check(item?.processing?.audioFrames > 0, 'Meeting audio is unavailable');
     return { path: path.join(value.dir, `${id}.pcm`), sampleRate: 16000, channels: 1, frameCount: item.processing.audioFrames };
   }
-  return { begin, list, rename, deleteRecording, withRecordingLock, getRecordingPath, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, getShareRecord, bindShare, saveShareState, listProcessing, saveProcessing, getAudioInfo };
+  return { begin, list, rename, deleteRecording, withRecordingLock, getRecordingPath, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, getShareRecord, bindShare, saveShareState, saveShareAccessUpdate, listProcessing, saveProcessing, getAudioInfo };
 }

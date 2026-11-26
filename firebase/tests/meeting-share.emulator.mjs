@@ -12,13 +12,14 @@ import { chromium } from 'playwright';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth, connectAuthEmulator, GoogleAuthProvider, signInWithCredential } from 'firebase/auth';
 import * as C from '../../web/reel/core.js';
-import { FirestoreClient } from '../../web/reel/cloud.js';
+import { FirestoreClient, StorageClient } from '../../web/reel/cloud.js';
 import { createLocalRecordingStore } from '../../desktop-windows/src/local-recordings.mjs';
 import { createMeetingShare } from '../../desktop-windows/src/meeting-share.mjs';
 
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const org=JSON.parse(await readFile(path.join(ROOT,'.reel/test-fixture/web/organization.json'),'utf8'));
 assert.equal(org.projectID,'demo-reel','Integration smoke needs the synthetic demo-reel organization.');
+const authPort=Number(process.env.REEL_SHARE_AUTH_PORT||9099),firestorePort=Number(process.env.REEL_SHARE_FIRESTORE_PORT||8080),storagePort=Number(process.env.REEL_SHARE_STORAGE_PORT||9199);
 const temp=await mkdtemp(path.join(os.tmpdir(),'reel-windows-share-'));
 const storeRoot=path.join(temp,'recordings'), videoDir=path.join(temp,'web');
 await mkdir(videoDir,{recursive:true});
@@ -32,7 +33,7 @@ const contentTypes={'.html':'text/html','.js':'text/javascript','.mjs':'text/jav
 try {
   async function account(label) {
     const app=initializeApp({apiKey:org.apiKey,authDomain:org.authDomain,projectId:'demo-reel'},`meeting-share-${label}-${Date.now()}`);
-    const auth=getAuth(app); connectAuthEmulator(auth,'http://127.0.0.1:9099',{disableWarnings:true});
+    const auth=getAuth(app); connectAuthEmulator(auth,`http://127.0.0.1:${authPort}`,{disableWarnings:true});
     const email=`share-${label}-${Date.now()}@${org.allowedEmailDomain}`;
     const identity=JSON.stringify({sub:`${label}-${Date.now()}`,email,email_verified:true,name:'Synthetic meeting owner'});
     const result=await signInWithCredential(auth,GoogleAuthProvider.credential(identity));
@@ -50,9 +51,10 @@ try {
         text:'Synthetic caption', timingGranularity:'chunk', segments:[{start:0,end:2,text:'Synthetic caption'}], meeting:{attendees:['private-attendee@northwind.example']}}}]}));
   const store=createLocalRecordingStore({root:storeRoot});
 const port=Number(process.env.REEL_SHARE_PORT||5052), origin=`http://127.0.0.1:${port}`;
-const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://127.0.0.1:8080',viewerBase:origin};
+const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigin:`http://127.0.0.1:${firestorePort}`,viewerBase:origin};
   const copied=[];
-  const share=createMeetingShare({auth:{getProfile:()=>({userID:ownerID,email:ownerApp.user.email,displayName:'Synthetic meeting owner'}),getIdToken:()=>ownerApp.user.getIdToken()},
+  const shareAuth={getProfile:()=>({userID:ownerID,email:ownerApp.user.email,displayName:'Synthetic meeting owner'}),getIdToken:()=>ownerApp.user.getIdToken()};
+  const share=createMeetingShare({auth:shareAuth,
     store,org,cfg,copy:url=>copied.push(url)});
   const protectedPassword='birdhouse123'; // Windows shares now require at least 12 characters.
   const result=await share.share({ownerUserID:ownerID,id,includeTranscript:true,password:protectedPassword,expiry:'week'});
@@ -87,7 +89,7 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
   const roomID=C.room(shareID,key);
   assert.equal(await ownerCloud.ownsRoom(roomID),true);
   assert.equal(await otherCloud.ownsRoom(roomID),false);
-  const libraryURL=`http://127.0.0.1:8080/v1/projects/demo-reel/databases/reel/documents/users/${encodeURIComponent(ownerID)}/recordings/${shareID}`;
+  const libraryURL=`http://127.0.0.1:${firestorePort}/v1/projects/demo-reel/databases/reel/documents/users/${encodeURIComponent(ownerID)}/recordings/${shareID}`;
   const ownerDoc=await fetch(libraryURL,{headers:{Authorization:`Bearer ${await ownerApp.user.getIdToken()}`}});
   assert.equal(ownerDoc.ok,true);
   const otherDoc=await fetch(libraryURL,{headers:{Authorization:`Bearer ${await otherApp.user.getIdToken()}`}});
@@ -104,14 +106,20 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
     if(pathname.startsWith('/v/')) pathname='/v.html';
     try { const filename=pathname==='/organization.json'?path.join(ROOT,'.reel/test-fixture/web/organization.json')
       :path.resolve(web,`.${pathname==='/'?'/index.html':pathname}`);
-      const bytes=await readFile(filename);res.writeHead(200,{'Content-Type':contentTypes[path.extname(pathname)]||'application/octet-stream'});res.end(bytes);
+      let bytes=await readFile(filename);
+      if(pathname==='/reel/firebase.js'&&(authPort!==9099||firestorePort!==8080||storagePort!==9199)) {
+        bytes=Buffer.from(bytes.toString().replaceAll('http://127.0.0.1:9099',`http://127.0.0.1:${authPort}`)
+          .replaceAll('http://127.0.0.1:8080',`http://127.0.0.1:${firestorePort}`)
+          .replaceAll('http://127.0.0.1:9199',`http://127.0.0.1:${storagePort}`));
+      }
+      res.writeHead(200,{'Content-Type':contentTypes[path.extname(pathname)]||'application/octet-stream'});res.end(bytes);
     } catch { res.writeHead(404);res.end('not found'); }
   }).listen(port,'127.0.0.1');
   const pageURL=`${origin}/v/${shareID}?emulator=1`;
   assert.equal(result.url,`${origin}/v/${shareID}`,'The returned share link must match the local viewer origin.');
   browser=await chromium.launch({channel:process.env.REEL_BROWSER||'chrome',headless:true,args:['--autoplay-policy=no-user-gesture-required']});
   const context=await browser.newContext();
-  const localOrigins=new Set([origin,'http://127.0.0.1:9199','http://127.0.0.1:8080','http://127.0.0.1:9099']);
+  const localOrigins=new Set([origin,`http://127.0.0.1:${storagePort}`,`http://127.0.0.1:${firestorePort}`,`http://127.0.0.1:${authPort}`]);
   const sdk=`https://www.gstatic.com/firebasejs/12.19.0/`;
   const packageRoot=path.join(path.dirname(fileURLToPath(import.meta.url)),'node_modules/firebase');
   await context.route(/^https?:\/\//,route=>{
@@ -137,9 +145,115 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
   await page.locator('#download').waitFor({state:'visible',timeout:5000});
   await page.locator('#tab-transcript').click();
   await page.locator('#segments').getByText('Synthetic caption').first().waitFor();
+
+  // Change access on the already-published URL. The former key is expired before
+  // a replacement is written; an interrupted migration remains safely retryable.
+  const replacementPassword='meeting-access-456';
+  const changed=await share.updateAccess({ownerUserID:ownerID,id,password:replacementPassword});
+  assert.equal(changed.url,result.url,'Access updates preserve the published viewer URL.');
+  let afterChange=await store.getShareRecord({ownerUserID:ownerID,id});
+  const replacementKey=afterChange.share.access.key, replacementSalt=afterChange.share.access.passwordSalt;
+  assert.equal(await C.deriveKey(replacementPassword,replacementSalt),replacementKey);
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,key,cfg))).ok,false,'The prior password location must be revoked.');
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,replacementKey,cfg))).ok,true,'The replacement password location must play.');
+  assert.equal(await ownerCloud.ownsRoom(C.room(shareID,key)),false,'The prior comments room must be retired.');
+  assert.equal(await ownerCloud.ownsRoom(C.room(shareID,replacementKey)),true);
+
+  // Persist a pending derived key, fail before uploading new media, and retry from a
+  // freshly opened local store to exercise restart recovery without plaintext passwords.
+  let injectFailure=true;
+  const failingShare=createMeetingShare({auth:shareAuth,store,org,cfg,
+    storageFactory:(session,cloudCfg,nonce)=>{
+      const client=new StorageClient(session,cloudCfg,nonce);
+      return new Proxy(client,{get(target,keyName){
+        if(keyName==='uploadLarge') return async(...args)=>{if(injectFailure){injectFailure=false;throw Error('injected access update failure');}return target.uploadLarge(...args);};
+        const value=target[keyName];return typeof value==='function'?value.bind(target):value;
+      }});
+    },firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
+  await assert.rejects(failingShare.updateAccess({ownerUserID:ownerID,id,password:'meeting-access-789',expiry:'day'}),/injected access update failure/);
+  const pending=await store.getShareRecord({ownerUserID:ownerID,id});
+  assert.ok(pending.share.accessUpdate);assert.equal(pending.share.access.key,replacementKey);
+  const pendingKey=pending.share.accessUpdate.to.key;
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,null,cfg))).ok,false,'A pending protected update must not expose open media.');
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,replacementKey,cfg))).ok,false,'The old protected media is revoked during the pending update.');
+  await assert.rejects(share.share({ownerUserID:ownerID,id}),/link settings update is pending/i,
+    'The ordinary share action cannot republish using stale access during retry.');
+  const restartedStore=createLocalRecordingStore({root:storeRoot});
+  const restartedShare=createMeetingShare({auth:shareAuth,store:restartedStore,org,cfg,
+    storageFactory:(session,cloudCfg,nonce)=>new StorageClient(session,cloudCfg,nonce),
+    firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
+  const retried=await restartedShare.updateAccess({ownerUserID:ownerID,id});
+  assert.equal(retried.url,result.url);
+  afterChange=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  assert.equal(afterChange.share.access.key,pendingKey,'Restart retry must finish with the persisted candidate key.');
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,pendingKey,cfg))).ok,true);
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,replacementKey,cfg))).ok,false);
+
+  const expiryUpdate=await restartedShare.updateAccess({ownerUserID:ownerID,id,expiry:'hour'});
+  assert.equal(expiryUpdate.url,result.url);
+  afterChange=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  assert.ok(Math.abs(Date.parse(afterChange.share.access.expiresAt)-Date.now()-3600_000)<10_000,'Expiry-only updates persist the requested hour window.');
+  const updatedStub=await (await fetch(C.downloadURL(shareID,C.File.meta,null,cfg))).json();
+  assert.equal(Date.parse(updatedStub.expiresAt),Date.parse(afterChange.share.access.expiresAt));
+
+  const removed=await restartedShare.updateAccess({ownerUserID:ownerID,id,removePassword:true,expiry:'keep'});
+  assert.equal(removed.url,result.url);
+  const openShare=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  assert.equal(openShare.share.access.key,null);assert.equal(openShare.share.access.passwordSalt,null);
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,null,cfg))).ok,true,'Removing the password activates the staged public copy.');
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,pendingKey,cfg))).ok,false,'Removing a password retires its keyed copy.');
+  const openMeta=await (await fetch(C.downloadURL(shareID,C.File.meta,null,cfg))).json();
+  assert.equal(openMeta.locked,false,'The stable URL now opens without a password.');
+
+  // Exercise the highest-risk public -> protected transition separately. A forced
+  // failure occurs after public objects are revoked and the locked stub is installed,
+  // but before protected media is uploaded.
+  const openStoreRoot=path.join(temp,'open-recordings'),openOwnerPath=path.join(openStoreRoot,createHash('sha256').update(ownerID).digest('hex'));
+  await mkdir(openOwnerPath,{recursive:true});
+  const openID=createHash('sha256').update(`${id}:open`).digest('hex').slice(0,32),openVideo=path.join(openOwnerPath,`${openID}.mp4`);
+  await writeFile(openVideo,await readFile(fixtureMP4));
+  await writeFile(path.join(openOwnerPath,'library.json'),JSON.stringify({version:1,ownerUserID:ownerID,
+    settings:{ownerUserID:ownerID,autoJoin:false,participantConsent:false,systemAudioConsent:false,meetingReminders:false,selection:{useAll:true,ids:[]}},
+    completed:{},recordings:[{id:openID,title:'Synthetic open meeting',createdAt:'2026-11-26T10:00:00.000Z',durationSeconds:3,width:640,height:360,
+      processing:{phase:'completed',meeting:{},transcriptComplete:false}}]}));
+  const openStore=createLocalRecordingStore({root:openStoreRoot});
+  const openMeetingShare=createMeetingShare({auth:shareAuth,store:openStore,org,cfg,
+    storageFactory:(session,cloudCfg,nonce)=>new StorageClient(session,cloudCfg,nonce),
+    firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
+  const publicResult=await openMeetingShare.share({ownerUserID:ownerID,id:openID,expiry:'week'});
+  const publicBound=await openStore.getShareRecord({ownerUserID:ownerID,id:openID});
+  const publicShareID=publicBound.share.shareID;
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,true,'The source meeting starts publicly readable.');
+  let failOpenUpdate=true;
+  const failingOpenShare=createMeetingShare({auth:shareAuth,store:openStore,org,cfg,
+    storageFactory:(session,cloudCfg,nonce)=>{
+      const client=new StorageClient(session,cloudCfg,nonce);
+      return new Proxy(client,{get(target,keyName){
+        if(keyName==='uploadLarge') return async(...args)=>{if(failOpenUpdate){failOpenUpdate=false;throw Error('injected public-to-protected failure');}return target.uploadLarge(...args);};
+        const value=target[keyName];return typeof value==='function'?value.bind(target):value;
+      }});
+    },firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
+  await assert.rejects(failingOpenShare.updateAccess({ownerUserID:ownerID,id:openID,password:'protect-this-meeting-123'}),/injected public-to-protected failure/);
+  const publicPending=await openStore.getShareRecord({ownerUserID:ownerID,id:openID});
+  assert.ok(publicPending.share.accessUpdate);
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,false,
+    'Previously public video is expired before replacement publication begins.');
+  const interimStub=await (await fetch(C.downloadURL(publicShareID,C.File.meta,null,cfg))).json();
+  assert.equal(interimStub.locked,true);assert.equal(Object.hasOwn(interimStub,'title'),false);
+  const openRetryStore=createLocalRecordingStore({root:openStoreRoot});
+  const openRetry=createMeetingShare({auth:shareAuth,store:openRetryStore,org,cfg,
+    storageFactory:(session,cloudCfg,nonce)=>new StorageClient(session,cloudCfg,nonce),
+    firestoreFactory:(session,cloudCfg)=>new FirestoreClient(session,cloudCfg)});
+  const publicRetry=await openRetry.updateAccess({ownerUserID:ownerID,id:openID});
+  assert.equal(publicRetry.url,publicResult.url,'Public-to-protected retry preserves the published URL.');
+  const protectedPublicRecord=await openRetryStore.getShareRecord({ownerUserID:ownerID,id:openID});
+  const protectedPublicKey=protectedPublicRecord.share.access.key;
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,false,'The old open media path stays denied after migration.');
+  assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,protectedPublicKey,cfg))).ok,true);
   console.log(JSON.stringify({result:'PASS',ownerBoundRoom:true,otherOwnerDenied:true,privateLibraryDenied:true,
     passwordDeniedThenAccepted:true,publicMetadataStubOnly:true,publicMediaDenied:true,expiryPublished:true,
-    videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
+    accessPasswordChanged:true,oldAccessRevoked:true,expiryUpdated:true,passwordRemoved:true,failureRetrySurvivesRestart:true,
+    publicToProtected:true,publicPathRevokedBeforeFailureRetry:true,videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
   await context.close();
 } finally {
   await browser?.close().catch(()=>{});

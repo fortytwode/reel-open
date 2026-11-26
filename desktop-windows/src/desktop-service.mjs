@@ -305,6 +305,21 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           ...(typeof payload.password === 'string' ? { password:payload.password } : {}),
           ...(typeof payload.expiry === 'string' ? { expiry:payload.expiry } : {})}); }
         finally { activeShares.delete(key);emit(); }
+      } else if(name==='updateMeetingShareAccess') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!payload || typeof payload!=='object' || Array.isArray(payload)
+          || Object.keys(payload).some(key=>!['expectedOwnerUserID','id','password','removePassword','expiry'].includes(key))
+          || typeof payload.id!=='string' || !/^[0-9a-f]{32}$/.test(payload.id)
+          || (payload.password!==undefined && (typeof payload.password!=='string' || payload.password.length>1024))
+          || (payload.removePassword!==undefined && typeof payload.removePassword!=='boolean')
+          || (payload.expiry!==undefined && typeof payload.expiry!=='string') || !shareMeeting?.updateAccess)
+          throw Error('Invalid meeting link settings.');
+        const key=`${id}:${payload.id}`;activeShares.add(key);emit();
+        try { await shareMeeting.updateAccess({ownerUserID:id,id:payload.id,
+          ...(typeof payload.password==='string' && payload.password ? {password:payload.password}:{}),
+          ...(payload.removePassword===true ? {removePassword:true}:{}),
+          ...(typeof payload.expiry==='string' ? {expiry:payload.expiry}:{})}); }
+        finally { activeShares.delete(key);emit(); }
       } else if(name==='renameRecording' || name==='deleteRecording') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null), deleting=name==='deleteRecording';
         const allowed=deleting?['expectedOwnerUserID','id','localOnlyConfirmed']:['expectedOwnerUserID','id','title'];

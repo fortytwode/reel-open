@@ -15,6 +15,7 @@ test('the dashboard can retry a saved recording through the restricted preload',
   const recording = { id: 'saved-meeting', expectedOwnerUserID: 'owner-a' };
   await api.action('retryProcessing', recording);
   await api.action('shareRecording', recording);
+  await api.action('updateMeetingShareAccess', recording);
   await api.action('playRecording', recording);
   await api.action('copyTranscript', recording);
   await api.action('renameRecording', recording);
@@ -22,7 +23,7 @@ test('the dashboard can retry a saved recording through the restricted preload',
   await api.action('exportTrimmedCopy', recording);
   await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
   assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording],
-    ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'copyTranscript', recording],
+    ['reel-desktop:action', 'updateMeetingShareAccess', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'copyTranscript', recording],
     ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording],
     ['reel-desktop:action', 'exportTrimmedCopy', recording]]);
 });
@@ -255,6 +256,57 @@ test('a persisted uploading share is retryable after app restart', async () => {
   onClick({target:{closest:selector=>selector==='[data-action]'?button:null}});
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a'}]]);
+});
+
+test('a published meeting can update password and expiry while keeping its link copy action', async () => {
+  const elements=new Map();const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onClick;const calls=[];
+  const snapshot={configured:true,profile:{userID:'owner-a',email:'a@example.com',calendarConnected:true},
+    settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},meetings:[],status:{phase:'idle'},
+    recordings:[{id:'meeting-id',title:'Weekly meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9,processing:{phase:'completed'},
+      shareStatus:'uploaded',shareAccess:{passwordProtected:true,expiresAt:'2026-11-13T12:00:00Z',updatePending:false}}]};
+  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),
+    {window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise});
+  await new Promise(resolve=>setImmediate(resolve));
+  const controls=getElement('recordingsList').children[0].children[0].children;
+  const copy=controls.find(child=>child.dataset.action==='shareRecording');
+  const update=controls.find(child=>child.dataset.action==='updateMeetingShareAccess');
+  assert.equal(copy.textContent,'Copy share link');assert.equal(update.textContent,'Update link settings');
+  assert.equal(controls.find(child=>child.tagName==='div'&&child.textContent?.includes('Password protected'))?.textContent?.includes('expires'),true);
+  update.sharePasswordInput.value='changed-password-123';update.shareExpiryInput.value='day';
+  onClick({target:{closest:selector=>selector==='[data-action]'?update:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['updateMeetingShareAccess',{
+    id:'meeting-id',expectedOwnerUserID:'owner-a',password:'changed-password-123',expiry:'day'}]]);
+  assert.equal(update.sharePasswordInput.value,'');
+  onClick({target:{closest:selector=>selector==='[data-action]'?copy:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))),['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a'}]);
+});
+
+test('a failed access migration offers its safe retry and disables the old share publisher', async () => {
+  const elements=new Map();const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onClick;const calls=[];
+  const snapshot={configured:true,profile:{userID:'owner-a',email:'a@example.com',calendarConnected:true},
+    settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},meetings:[],status:{phase:'idle'},
+    recordings:[{id:'meeting-id',title:'Weekly meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9,processing:{phase:'completed'},
+      shareStatus:{failed:'update pending'},shareAccess:{passwordProtected:true,expiresAt:null,updatePending:true}}]};
+  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),
+    {window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise});
+  await new Promise(resolve=>setImmediate(resolve));
+  const controls=getElement('recordingsList').children[0].children[0].children;
+  const oldShare=controls.find(child=>child.dataset.action==='shareRecording');
+  const retry=controls.find(child=>child.dataset.action==='updateMeetingShareAccess');
+  assert.equal(oldShare.textContent,'Link update pending');assert.equal(oldShare.disabled,true);
+  assert.equal(retry.textContent,'Retry link settings update');
+  onClick({target:{closest:selector=>selector==='[data-action]'?oldShare:null}});
+  assert.equal(calls.length,0,'A pending update cannot fall back to publishing with old access.');
 });
 
 test('the dashboard joins a listed meeting with the current owner and can cancel while joining', async () => {
