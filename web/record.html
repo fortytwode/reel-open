@@ -10,7 +10,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/viewer.css">
   <link rel="stylesheet" href="/meeting-calendar.css?v=20261119-choice1">
-  <link rel="stylesheet" href="/record.css?v=20261126-capture-region">
+  <link rel="stylesheet" href="/record.css?v=20261126-drawing">
 </head>
 <body>
   <header class="bar">
@@ -149,6 +149,7 @@
         <span id="live-upload" class="muted small"></span>
         <span class="spacer"></span>
         <button id="pause" type="button">Pause</button>
+        <button id="draw" type="button" aria-haspopup="dialog" hidden>Draw</button>
         <button id="restart" type="button" title="Discard and start again with the same screen">Restart</button>
         <button id="cancel" type="button">Cancel</button>
         <button id="stop" type="button" class="primary">Stop</button>
@@ -174,6 +175,37 @@
       <p id="empty" class="muted">No recordings yet.</p>
     </section>
   </main>
+
+  <dialog id="draw-dialog" aria-labelledby="draw-title" aria-describedby="draw-status">
+    <h3 id="draw-title">Draw on recording</h3>
+    <p id="draw-status" class="draw-status" role="status">Recording paused. Close the preview, then select Resume to record with your marks.</p>
+    <div class="draw-tools">
+      <label>Tool
+        <select id="draw-tool">
+          <option value="pen">Pen</option>
+          <option value="highlighter">Highlighter</option>
+          <option value="arrow">Arrow</option>
+          <option value="rectangle">Rectangle</option>
+        </select>
+      </label>
+      <label>Color
+        <select id="draw-color">
+          <option value="#ff334f">Red</option>
+          <option value="#ffdc43">Yellow</option>
+          <option value="#5bc9ff">Blue</option>
+          <option value="#ffffff">White</option>
+          <option value="#1d1d1f">Black</option>
+        </select>
+      </label>
+      <button id="draw-undo" type="button" disabled>Undo</button>
+      <button id="draw-clear" type="button" disabled>Clear marks</button>
+    </div>
+    <video id="draw-video" muted playsinline hidden></video>
+    <canvas id="draw-preview" aria-label="Recording preview. Draw using a mouse, pen, or touch."></canvas>
+    <div class="dialog-actions">
+      <button id="draw-close" type="button" class="primary">Close preview</button>
+    </div>
+  </dialog>
 
   <dialog id="meeting-notes-dialog">
     <h3 id="meeting-notes-title">Meeting notes</h3>
@@ -252,6 +284,6 @@
   <div id="toast" class="toast" role="status" hidden></div>
   <footer class="foot muted small"><a href="/notetaker" class="muted">Open Reel Notetaker</a></footer>
   <script type="module" src="/reel/install.js?v=20261119-products1"></script>
-  <script type="module" src="/record.js?v=20261126-windows-region-shortcuts"></script>
+  <script type="module" src="/record.js?v=20261126-drawing"></script>
 </body>
 </html>

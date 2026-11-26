@@ -81,6 +81,45 @@ test("a video encoder with no startup output drains its queued frames once witho
   }
 });
 
+test("stopping a paused recording never draws new frames to fill a backlog", async () => {
+  const messages = [];
+  let time = 0, frames = 0;
+  const originals = new Map();
+  const replace = (name, value) => { originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, { configurable: true, writable: true, value }); };
+  replace("self", { postMessage(message) { messages.push(message); } });
+  replace("OffscreenCanvas", class {
+    getContext() { return { fillRect() {}, drawImage() {} }; }
+    async convertToBlob() {}
+  });
+  replace("VideoFrame", class { close() {} });
+  replace("VideoEncoder", class {
+    static async isConfigSupported() { return { supported: true }; }
+    configure() { this.state = "configured"; this.encodeQueueSize = 0; }
+    encode() { frames++; }
+    async flush() {}
+    close() {}
+  });
+  mock.method(globalThis, "setInterval", () => 1);
+  mock.method(globalThis, "clearInterval", () => {});
+  mock.method(performance, "now", () => time);
+  try {
+    await import("../../web/reel/encoder-worker.js?paused-stop-test");
+    await self.onmessage({ data: { type: "start", width: 1280, height: 720, fps: 30, bitrate: 1000000, audio: false } });
+    await self.onmessage({ data: { type: "begin" } });
+    time = 250; // A stalled timer left several frames due when Pause was pressed.
+    await self.onmessage({ data: { type: "pause", pauseID: 1 } });
+    time = 2000;
+    await self.onmessage({ data: { type: "stop" } });
+    assert.equal(frames, 1);
+    assert.equal(messages.at(-1).type, "done");
+  } finally {
+    mock.restoreAll();
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];
+    }
+  }
+});
+
 test("legacy audio ReadableStream is consumed and its frames are closed", async () => {
   const originals = new Map();
   const replace = (name, value) => { originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name)); Object.defineProperty(globalThis, name, { configurable: true, writable: true, value }); };

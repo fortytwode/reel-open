@@ -9,7 +9,7 @@
 import { AudioBatch } from "./audio.js?v=20261025-audio1";
 import { Muxer, StreamTarget } from "../vendor/mp4-muxer.mjs";
 import { SegmentSplitter, parseInit, fragmentDuration } from "./fmp4.js";
-import { PauseClock, SEGMENT_INTERVAL, frameRegion } from "./core.js?v=20261126-capture-region";
+import { PauseClock, SEGMENT_INTERVAL, drawAnnotations, drawSharedFrame } from "./core.js?v=20261126-drawing";
 
 let S = null;
 const post = (m, transfer) => self.postMessage(m, transfer || []);
@@ -25,8 +25,12 @@ self.onmessage = async (e) => {
       S.clock.pause(now());
       postTick(m.pauseID);
     }
-    else if (m.type === "resume") { S.clock.resume(now()); }
+    else if (m.type === "resume") {
+      if (m.dropScreenFrame) { S.latest.screen?.close(); S.latest.screen = null; }
+      S.clock.resume(now());
+    }
     else if (m.type === "layout") { S.composite = m.composite; S.bubbleScale = m.bubbleScale ?? S.bubbleScale; }
+    else if (m.type === "annotations" && S) S.annotations = m.strokes;
     else if (m.type === "stop") await stop();
     else if (m.type === "cancel") cancel();
   } catch (err) {
@@ -56,7 +60,7 @@ async function pickAudioConfig(sampleRate, numberOfChannels) {
 async function start(m) {
   const { width, height, fps, bitrate } = m;
   S = {
-    width, height, fps, layout: m.layout, composite: !!m.composite, bubbleScale: m.bubbleScale || 1, region: m.region,
+    width, height, fps, layout: m.layout, composite: !!m.composite, bubbleScale: m.bubbleScale || 1, region: m.region, annotations: [],
     clock: new PauseClock(), frames: 0, nextKeyFrame: 0, audioFrames: 0,
     audioChannels: m.audioChannels, audioSampleRate: m.audioSampleRate, audioBatch: m.audio ? new AudioBatch(4096, m.audioChannels) : null, running: false, stopped: false,
     latest: { screen: null, camera: null }, readers: [], segments: 0, tracks: null, codecs: { video: null, audio: null },
@@ -212,15 +216,7 @@ function draw() {
     return;
   }
   const f = S.latest.screen;
-  if (f) {
-    const source = S.region ? frameRegion(S.region, f.displayWidth, f.displayHeight)
-      : { x: 0, y: 0, width: f.displayWidth, height: f.displayHeight };
-    if (source) {
-      const scale = Math.min(W / source.width, H / source.height);
-      const dw = source.width * scale, dh = source.height * scale;
-      ctx.drawImage(f, source.x, source.y, source.width, source.height, (W - dw) / 2, (H - dh) / 2, dw, dh);
-    }
-  }
+  if (f) drawSharedFrame(ctx, f, W, H, S.region);
   const cam = S.latest.camera;
   if (S.composite && cam) {
     const short = Math.min(W, H);
@@ -237,6 +233,7 @@ function draw() {
     ctx.strokeStyle = "rgba(255,255,255,0.85)";
     ctx.beginPath(); ctx.arc(x + d / 2, y + d / 2, d / 2 - ctx.lineWidth / 2, 0, Math.PI * 2); ctx.stroke();
   }
+  drawAnnotations(ctx, S.annotations, W, H);
 }
 
 /** Fills (x, y, w, h) with the frame, cropped to cover; mirrored like a selfie view. */
@@ -287,10 +284,11 @@ function onSegment(bytes) {
 
 async function stop() {
   if (!S || S.stopped) return;
+  const wasPaused = S.clock.isPaused;
   S.clock.stop(now());
   const t = S.clock.elapsed(now());
   const target = Math.max(1, Math.round(t * S.fps));
-  while (S.frames < target) emitFrame();
+  while (!wasPaused && S.frames < target) emitFrame();
   S.running = false;
   S.stopped = true;
   clearInterval(S.timer);
