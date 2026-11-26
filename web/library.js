@@ -1,20 +1,43 @@
-import { isOrganizationEmail, loadAuth, FB_CDN, DOMAIN, CLOUD_CONFIG, EMU } from "./reel/firebase.js?v=20261118-orgstate1";
-import { organization, organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
+import * as firebase from "./reel/firebase.js?v=20261121-public-signup";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261125-complete1";
+import * as org from "./organization.js?v=20261121-public-signup";
 import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261105-parity2";
 
 import { displayedSharedTitle, resolveTitleRoom, saveSharedTitle, editSharedTitle, closeSharedTitleEditor } from "./reel/shared-title.js?v=20261105-parity2";
+
+// Older team Hosting deployments expose the same verified Google identity but
+// predate the public-signup helpers. Keep the library compatible during rollout.
+const { loadAuth, sessionSnapshot, FB_CDN, CLOUD_CONFIG, EMU } = firebase;
+const { organization, organizationStorageKey } = org;
+const publicSignup = org.publicSignup ?? false;
+const googleAccountLabel = firebase.googleAccountLabel ?? `your ${organization?.allowedEmailDomain || "work"} Google account`;
+const googleSignInProvider = firebase.googleSignInProvider ?? (am => {
+  const provider = new am.GoogleAuthProvider();
+  provider.setCustomParameters({ hd: organization.allowedEmailDomain, prompt: "select_account" });
+  return provider;
+});
+const observeReelAccount = firebase.observeReelAccount ?? ((am, auth, receive) => am.onAuthStateChanged(auth, candidate =>
+  receive(candidate?.emailVerified && firebase.isOrganizationEmail(candidate.email) ? candidate : null, candidate)));
 
 const el = (id) => document.getElementById(id);
 const status = el("status");
 let auth, am, fs, db, currentUser, entries = [], meetings = [], meetingShareIDs = new Set(), recent = [], loading = true, meetingLoading = false, loadError = "", meetingError = "", loadNumber = 0, meetingLoadNumber = 0, stopListening = () => {};
 let preferences = new Map(), folders = [], organizationReady = false, organizationError = "", organizationMessage = "", creatingFolder = false, accountNumber = 0;
+let rejectedAccount = false;
 const pendingOrganization = new Set();
 const openManagement = new Set();
 let participantMeetings = [], participantLoading = false, participantError = "", participantLoadNumber = 0;
 let note = null, noteLoading = false, noteError = "", noteLoadNumber = 0;
+let calendar = null;
+let upcomingEvents = [], upcomingLoading = false, upcomingLoaded = false, upcomingLoadNumber = 0, showAllUpcoming = false, noteTab = "Summary";
+let pastRange = "any", pastPerson = "", noteSearch = "", pastSource = "all", pastFolder = "", noteFolders = [], namingFolder = false, renamingFolder = false;
+let editingSummary = false, sharingOpen = false, workspaceBusy = false, taskFilter = "open";
+let transcriptHits = new Map(), transcriptQuery = "", transcriptTimer = null, askState = { question: "", answer: null, citations: [], busy: false, error: "", scope: null };
+let rewriteBusy = false, invitationNote = "";
+let sharedFolders = [], namingShared = false, savedPrompts = { mine: [], team: [] }, savingPrompt = false, connectState = { tokens: [], endpoint: "", created: null, loaded: false };
 const DELIVERY_API = organization?.deliveryServiceURL + "/delivery/meetings";
 const MEETINGS_API = organization?.meetingServiceURL + "/meetings";
-const validUser = (u) => !!u && u.emailVerified && isOrganizationEmail(u.email);
+const validUser = (u) => !!u;
 const shareURL = (id) => viewerURL(id, organization);
 function message(text, error = false) { status.textContent = text; status.classList.toggle("error", error); status.hidden = !text; }
 function duration(seconds) { const value = Number(seconds); const t = Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0; return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; }
@@ -43,9 +66,59 @@ function rememberRecording(id) {
   try { localStorage.setItem(recentStorageKey(currentUser.uid), JSON.stringify(recent)); }
   catch { /* Storage may be disabled; keep Recent working for this visit. */ }
 }
-const isRecent = () => location.hash === "#recent";
+// One shell serves two products. Reel Recorder holds screen recordings; Reel
+// Notetaker holds meetings, notes and the meeting calendar. Each shows only its
+// own navigation. notetaker-meetings.html is always Notetaker. Where a host
+// proxies only the library page (Mission Control), meeting links switch this
+// page to Notetaker in place, so the existing sign-in keeps working.
+const fixedNotetaker = document.documentElement.dataset.product === "notetaker";
+const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
+// A host that serves each product at its own address names both in the page:
+// <meta name="reel-recorder-url" content="/recorder"> and reel-notetaker-url.
+const hostPage = name => {
+  const path = document.querySelector(`meta[name="${name}"]`)?.content || "";
+  return /^\/[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(path) ? location.origin + path : null;
+};
+const hostRecorder = hostPage("reel-recorder-url"), hostNotetaker = hostPage("reel-notetaker-url");
+const hostPages = !!(hostRecorder && hostNotetaker);
+const proxied = !hostPages && !fixedNotetaker && !!organization && sameOrigin(location.href, organization.notesBaseURL) && !sameOrigin(location.href, organization.webBase);
+const meetingHash = () => /^#(?:meetings(?:\/.*)?|tasks|connect|calendar|calendar-meeting=.*|meeting-request=.*)$/.test(location.hash);
+let notetaker = fixedNotetaker || (proxied && meetingHash());
+// Where the library is served from another origin, open Notetaker there too so
+// people sign in once for both products.
+if (fixedNotetaker && !hostPages && organization?.notesBaseURL && organization.webBase && !publicSignup
+    && sameOrigin(organization.notesBaseURL, organization.notesBaseURL)
+    && !sameOrigin(organization.webBase, organization.notesBaseURL) && !sameOrigin(location.href, organization.notesBaseURL)) {
+  location.replace(organization.notesBaseURL + (location.hash || "#meetings"));
+}
+const productName = () => notetaker ? "Reel Notetaker" : "Reel Recorder";
+const notetakerURL = (hash = "") => hostPages ? hostNotetaker + hash
+  : !organization ? "/notetaker-meetings" + hash
+  : publicSignup ? organization.webBase + "/notetaker"
+  : proxied ? organization.notesBaseURL + (hash || "#meetings") : organization.webBase + "/notetaker-meetings" + hash;
+const recorderURL = () => hostPages ? hostRecorder : !organization ? "/library" : organization.notesBaseURL + (proxied ? "#library" : "");
+function showProduct() {
+  notetaker = fixedNotetaker || (proxied && meetingHash());
+  document.documentElement.dataset.product = notetaker ? "notetaker" : "recorder";
+  const brand = document.querySelector(".brand");
+  brand.lastChild.textContent = " " + productName();
+  brand.href = notetaker ? notetakerURL() : recorderURL();
+  document.querySelector(".library-label").textContent = notetaker ? "MEETINGS" : "LIBRARY";
+  document.querySelector(".workspace small").textContent = notetaker ? "Meeting notes" : "Personal library";
+  document.querySelector(".breadcrumb").firstChild.textContent = notetaker ? "Notetaker " : "Library ";
+  document.querySelector(".personal-library strong").textContent = notetaker ? "Your meetings" : "Personal library";
+  document.querySelector(".personal-library small").textContent = notetaker ? "Private to you and attendees" : "Private to you";
+  const other = el("other-product");
+  other.href = notetaker ? recorderURL() : notetakerURL();
+  other.firstChild.textContent = notetaker ? "Reel Recorder " : "Reel Notetaker ";
+  other.querySelector("small").textContent = notetaker ? "Screen recordings and share links" : "Meetings, notes and calendar";
+}
+const isRecent = () => !notetaker && location.hash === "#recent";
+const isCalendar = () => location.hash === "#calendar" || (notetaker && /^#(?:calendar-meeting|meeting-request)=/.test(location.hash));
 const selectedNote = () => /^#meetings\/(reel_[a-f0-9]{64})$/.exec(location.hash)?.[1] || null;
-const isMeetings = () => location.hash === "#meetings" || !!selectedNote();
+const isTasks = () => notetaker && location.hash === "#tasks";
+const isConnect = () => notetaker && location.hash === "#connect";
+const isMeetings = () => location.hash === "#meetings" || !!selectedNote() || (notetaker && !isCalendar());
 const isArchived = () => location.hash === "#archive";
 const isPinned = () => location.hash === "#pinned";
 const selectedFolder = () => /^#folder=([a-zA-Z0-9_-]{1,80})$/.exec(location.hash)?.[1] || null;
@@ -54,7 +127,7 @@ function libraryURL(hash) { const url = new URL(location.href); url.hash = hash;
 function organizationStatus() {
   const text = organizationError || organizationMessage;
   el("organization-status").textContent = text;
-  el("organization-status").hidden = !text || isMeetings();
+  el("organization-status").hidden = !text || isMeetings() || isCalendar();
   el("organization-status").classList.toggle("error", !!organizationError);
 }
 function renderFolders() {
@@ -89,26 +162,45 @@ async function savePreference(id, patch) {
 }
 function setLoading(value) {
   loading = value;
-  el("loading-grid").hidden = !value;
+  el("loading-grid").hidden = !value || isCalendar();
   el("recordings").setAttribute("aria-busy", String(value));
 }
 function updateView() {
+  showProduct();
   openManagement.clear();
   const recentView = isRecent();
   const meetingsView = isMeetings();
+  const calendarView = isCalendar();
+  if (notetaker ? publicSignup : meetingsView || calendarView) {
+    // Meetings live in Reel Notetaker. Old links into the Recorder library keep working.
+    location.replace(notetakerURL(publicSignup ? "" : location.hash));
+    return;
+  }
   const folder = folders.find((f) => f.id === selectedFolder());
-  const title = meetingsView ? "Meetings" : recentView ? "Recently viewed" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
+  const title = calendarView ? "Meeting calendar" : isTasks() ? "Tasks" : isConnect() ? "Connect an AI assistant" : meetingsView ? "Meetings" : recentView ? "Recently viewed videos" : isArchived() ? "Archive" : isPinned() ? "Pinned recordings" : selectedFolder() ? folder?.name || "Folder" : "Screen recordings";
   el("view-title").textContent = title;
   el("view-description").hidden = !recentView && !isArchived();
   el("view-description").textContent = isArchived() ? "Archived recordings are hidden from your other library views. Existing share links still work." : "Videos opened from this library on this browser.";
   el("meeting-description").hidden = !meetingsView;
   el("recordings").setAttribute("aria-label", meetingsView ? "Meetings" : "Screen recordings");
-  document.querySelector(".record-options").hidden = meetingsView;
-  el("record-meeting").hidden = !meetingsView;
-  el("library-footnote").hidden = meetingsView;
+  document.querySelector(".record-options").hidden = meetingsView || calendarView;
+  el("meeting-actions").hidden = !meetingsView;
+  el("library-footnote").hidden = meetingsView || calendarView;
+  el("meeting-calendar-panel").hidden = !calendarView || !validUser(currentUser);
+  el("loading-grid").hidden = !loading || calendarView;
+  el("recordings").hidden = calendarView;
+  document.querySelector(".toolbar").hidden = calendarView;
+  document.querySelector(".search").hidden = calendarView;
+  if (!calendarView && calendar) { calendar.dispose(); calendar = null; }
+  if (calendarView && validUser(currentUser) && !calendar) {
+    calendar = mountMeetingCalendar({ container: el("meeting-calendar-panel"), compact: notetaker, session: async () => {
+      const user = currentUser, generation = accountNumber, snapshot = sessionSnapshot(user);
+      return snapshot && { ...snapshot, isCurrent: () => currentUser?.uid === snapshot.uid && accountNumber === generation && auth.currentUser?.uid === snapshot.uid };
+    }});
+  }
   el("search").placeholder = meetingsView ? "Search meetings" : "Search recordings";
-  document.title = `${title} · Reel`;
-  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
+  document.title = `${title} · ${productName()}`;
+  for (const [id, selected] of [["nav-library", !recentView && !meetingsView && !calendarView && !isPinned() && !isArchived() && !selectedFolder()], ["nav-recent", recentView], ["nav-meetings", meetingsView && !isTasks() && !isConnect()], ["nav-tasks", isTasks()], ["nav-connect", isConnect()], ["nav-calendar", calendarView], ["nav-pinned", isPinned()], ["nav-archive", isArchived()]]) {
     const url = new URL(location.href); url.hash = id.slice(4) === "library" ? "library" : id.slice(4);
     el(id).href = url.href;
     el(id).classList.toggle("active", selected);
@@ -124,7 +216,7 @@ function updateView() {
   render();
   if (meetingsView && validUser(currentUser)) {
     if (selectedNote()) loadNote();
-    else { loadMeetings(); loadParticipantMeetings(); }
+    else { loadMeetings(); loadParticipantMeetings(); loadUpcoming(); }
   }
 }
 function relativeDate(millis) {
@@ -171,15 +263,28 @@ window.addEventListener("message", (event) => {
 
 function render() {
   organizationStatus();
+  if (isCalendar() && validUser(currentUser)) { message(""); return; }
+  if (!loading && !validUser(currentUser)) {
+    const subject = isMeetings() || isCalendar() ? "meeting notes" : "uploaded recordings";
+    const accessMessage = rejectedAccount
+      ? `Use ${googleAccountLabel} to see your ${subject}. Sign out to choose another account.`
+      : isMeetings() || isCalendar()
+        ? "Sign in to see your meeting notes. Meetings recorded while signed out stay on that device."
+        : "Sign in to see your uploaded recordings. Recordings saved on this device are available where you recorded them.";
+    message(loadError || accessMessage, !!loadError);
+    return;
+  }
   if (isMeetings()) return renderMeetings();
   const list = el("recordings");
+  list.classList.remove("nt-home");
+  document.documentElement.removeAttribute("data-note");
   list.replaceChildren();
   const term = el("search").value.trim().toLocaleLowerCase();
   const visits = new Map(recent.map((v) => [v.id, v.openedAt]));
   const folderID = selectedFolder();
   if (folderID) {
     const title = folders.find((f) => f.id === folderID)?.name || "Folder";
-    el("view-title").textContent = title; el("video-tab").textContent = title; document.title = `${title} · Reel`;
+    el("view-title").textContent = title; el("video-tab").textContent = title; document.title = `${title} · ${productName()}`;
   }
   const screenEntries = organizationReady ? entries.map((r) => ({ ...r, title: displayedSharedTitle(preferenceFor(r.id).titleOverride, r.title) })).filter((r) => !meetingShareIDs.has(r.id) && preferenceFor(r.id).archived === isArchived()) : [];
   const available = screenEntries.filter((r) => (!isRecent() || visits.has(r.id)) && (!isPinned() || preferenceFor(r.id).pinned) && (!folderID || preferenceFor(r.id).folderId === folderID));
@@ -287,73 +392,793 @@ function render() {
   else if (validUser(currentUser) && !organizationReady) message(organizationError ? "Library organization is unavailable. Click Refresh to try again." : "Loading library organization…", !!organizationError);
   else if (validUser(currentUser) && !loading) message(!entries.length ? "No uploaded recordings yet. Choose New video to start recording." : !available.length && isRecent() ? "Videos you open from this library appear here, most recent first. Recent is saved in this browser for your account." : !available.length && isArchived() ? "No archived recordings. Archiving organizes your library and does not revoke share links." : !available.length && isPinned() ? "Pin a recording to find it here." : !available.length && folderID ? "No recordings in this folder. Move a recording here from its folder menu." : !filtered.length ? "No recordings match your search." : "");
 }
+// ---- Reel Notetaker: coming up, past meetings by day, and the note reader ----
+const node = (tag, className, text) => { const n = document.createElement(tag); if (className) n.className = className; if (text !== undefined) n.textContent = text; return n; };
+const timeOf = (date) => date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+function dayLabel(date) {
+  const today = new Date(), other = new Date(today);
+  if (sameDay(date, today)) return "Today";
+  other.setDate(today.getDate() - 1); if (sameDay(date, other)) return "Yesterday";
+  other.setDate(today.getDate() + 1); if (sameDay(date, other)) return "Tomorrow";
+  return date.toLocaleDateString([], { weekday: "long", day: "numeric", month: "short", ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }) });
+}
+function lengthLabel(seconds) {
+  const minutes = Math.round((Number(seconds) || 0) / 60);
+  return minutes < 1 ? "under a minute" : minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+const personName = (value) => String(value || "").split("@")[0].split(/[._-]+/).filter(Boolean).map((part) => part[0].toLocaleUpperCase() + part.slice(1)).join(" ") || "Guest";
+function peopleChips(list, limit = 4) {
+  const people = [...new Set((Array.isArray(list) ? list : []).filter((value) => typeof value === "string" && value))];
+  const group = node("div", "nt-people");
+  for (const person of people.slice(0, limit)) { const chip = node("span", "nt-avatar", ownerInitials(personName(person))); chip.title = person; group.append(chip); }
+  if (people.length > limit) group.append(node("span", "nt-avatar nt-more", `+${people.length - limit}`));
+  return group;
+}
+// Summaries are plain text in two shapes: section headings on their own line
+// ("Outcome", "Key points", "Action items") with "•" bullets, or "Topic: what
+// was said" paragraphs followed by an "Action items" list.
+function summaryBlocks(text) {
+  const blocks = []; let todo = false;
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim(); if (!line) continue;
+    const bullet = /^[-•*]\s+(.*)$/.exec(line);
+    if (!bullet && line.length <= 48 && !/[.!?:]$/.test(line.replace(/:$/, "")) && !/:\s/.test(line)) {
+      const heading = line.replace(/:$/, ""); todo = /^(action items|next steps|follow[- ]ups?)$/i.test(heading);
+      blocks.push({ type: "heading", text: heading }); continue;
+    }
+    const body = bullet ? bullet[1] : line;
+    const labelled = /^([^:.]{2,60}):\s+(.+)$/.exec(body);
+    if (bullet || todo) blocks.push({ type: todo ? "todo" : "bullet", label: labelled && !todo ? labelled[1] : "", text: labelled && !todo ? labelled[2] : body });
+    else if (labelled) blocks.push({ type: "heading", text: labelled[1] }, { type: "para", text: labelled[2] });
+    else blocks.push({ type: "para", text: body });
+  }
+  return blocks;
+}
+function summaryPreview(text) {
+  const first = summaryBlocks(text).find((block) => block.type !== "heading");
+  return first ? (first.label ? `${first.label}: ${first.text}` : first.text) : "";
+}
+const captureStates = {
+  scheduled: ["Notetaker will join", "nt-chip-on"], joined: ["Recording now", "nt-chip-live"], recording: ["Recording now", "nt-chip-live"],
+  requesting_entry: ["Asking to join", "nt-chip-live"], awaiting_admission: ["Waiting to be let in", "nt-chip-live"],
+  cancelled: ["Not recording", "nt-chip-off"], declined: ["Not recording", "nt-chip-off"], failed: ["Not recorded", "nt-chip-off"],
+};
+async function joinMeeting(event, button) {
+  // Open the tab inside the click so it is not treated as a popup, then point it at the meeting.
+  const tab = window.open("", "_blank");
+  const label = button.textContent; button.disabled = true; button.textContent = "Opening…";
+  try {
+    const token = await currentUser.getIdToken();
+    const response = await fetch(`${organization.meetingServiceURL}/calendar/meetings/${encodeURIComponent(event.id)}/join`, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+    const data = await response.json().catch(() => null);
+    const url = data && typeof data.url === "string" && /^https:\/\//.test(data.url) ? data.url : null;
+    if (!response.ok || !url) throw new Error(data?.error || "This meeting has no link to join.");
+    if (tab) { tab.opener = null; tab.location.href = url; } else location.href = url;
+  } catch (error) { tab?.close(); message(error.message || "Couldn't open the meeting.", true); }
+  finally { button.disabled = false; button.textContent = label; }
+}
+function eventRow(event, now, conflicts = new Set()) {
+  const start = new Date(event.start), end = new Date(event.end);
+  const live = start <= now && end > now, minutes = Math.round((start - now) / 60000);
+  const row = node("div", "nt-row nt-upcoming" + (live ? " nt-live" : ""));
+  row.append(node("span", "nt-time", `${timeOf(start)} – ${timeOf(end)}`));
+  const main = node("span", "nt-main"); const title = node("strong", "", event.title);
+  if (live) title.prepend(node("span", "nt-now", "Now"));
+  else if (minutes > 0 && minutes <= 60) title.append(node("span", "nt-soon", `In ${minutes} min`));
+  if (conflicts.has(event.id)) title.append(node("span", "nt-soon nt-conflict", "Conflict"));
+  if (event.response === "tentative") title.append(node("span", "nt-soon nt-maybe", "Maybe"));
+  main.append(title);
+  const [label, tone] = captureStates[event.status] || [event.status, "nt-chip-off"];
+  const side = node("span", "nt-row-actions");
+  side.append(node("span", `nt-chip ${tone}`, label));
+  if (/^[0-9a-f]{64}$/.test(String(event.id)) && end > now && minutes <= 15 && !["cancelled", "declined", "failed"].includes(event.status)) {
+    const join = node("button", "nt-join", "Join"); join.type = "button"; join.title = "Open the meeting in a new tab";
+    join.addEventListener("click", () => joinMeeting(event, join)); side.append(join);
+  }
+  row.append(main, peopleChips(event.attendees), side);
+  return row;
+}
+function filterControl(label, value, options, change) {
+  const select = node("select", "nt-filter"); select.setAttribute("aria-label", label);
+  for (const [key, text] of options) { const option = node("option", "", text); option.value = key; select.append(option); }
+  select.value = value; select.addEventListener("change", () => change(select.value));
+  return select;
+}
 function renderMeetings() {
   const list = el("recordings"); list.replaceChildren();
+  document.documentElement.toggleAttribute("data-note", !!selectedNote());
   if (selectedNote()) return renderNote();
+  list.classList.add("nt-home");
+  if (isTasks()) return renderTasks();
+  if (isConnect()) return renderConnect();
+  list.append(askPanel(null));
   const ownIDs = new Set(participantMeetings.flatMap((m) => Array.isArray(m.local_recording_ids) ? m.local_recording_ids : []));
   const combined = [...participantMeetings, ...meetings.filter((m) => !ownIDs.has(m.id))];
   const term = el("search").value.trim().toLocaleLowerCase();
-  const filtered = combined.filter((m) => m.title.toLocaleLowerCase().includes(term));
-  const sort = el("sort").value;
-  const ordered = [...filtered].sort((a, b) => {
-    if (sort === "title") return a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
-    return sort === "oldest" ? Date.parse(a.started_at) - Date.parse(b.started_at) : Date.parse(b.started_at) - Date.parse(a.started_at);
-  });
-  el("result-count").textContent = (meetingLoading || participantLoading) ? "Loading…" : term ? `${ordered.length} of ${combined.length} meetings` : `${combined.length} meetings`;
-  for (const m of ordered) {
-    const row = document.createElement("article"); row.className = "recording meeting-card";
-    const visual = document.createElement("div"); visual.className = "meeting-visual"; visual.setAttribute("aria-hidden", "true"); visual.textContent = "◷";
-    const info = document.createElement("div"); info.className = "recording-info meeting-info";
-    const heading = document.createElement("h2"); heading.textContent = m.title;
-    const date = document.createElement("p"); date.className = "meeting-date";
-    const started = new Date(m.started_at);
-    date.textContent = Number.isNaN(started.getTime()) ? "Date unavailable" : started.toLocaleString();
-    const durationLine = document.createElement("p"); durationLine.textContent = `Duration ${duration(m.duration_seconds)}`;
-    const transcript = document.createElement("p"); transcript.className = "meeting-transcript"; transcript.textContent = `Transcript: ${m.transcript_status || "unknown"}`;
-    const local = document.createElement("p"); local.className = "meeting-local-note"; local.textContent = "The original video stays on the recording device. It may also have been explicitly shared.";
-    info.append(heading, date, durationLine, transcript, local);
-    const actions = document.createElement("div"); actions.className = "recording-actions meeting-actions";
-    if (m.participantNote) {
-      const read = document.createElement("a"); read.className = "button"; read.href = libraryURL(`meetings/${m.id}`); read.textContent = "Read notes";
-      actions.append(read); row.append(visual, info, actions); list.append(row); continue;
+  if (term.length >= 3 && term !== transcriptQuery) queueTranscriptSearch(term);
+  if (term.length < 3) { transcriptQuery = ""; transcriptHits = new Map(); }
+  const matches = (m) => !term || transcriptHits.has(m.id) || [m.title, m.summary, ...(Array.isArray(m.attendees) ? m.attendees : [])].some((value) => typeof value === "string" && value.toLocaleLowerCase().includes(term));
+  const since = pastRange === "today" ? new Date().setHours(0, 0, 0, 0) : pastRange === "7" ? Date.now() - 7 * 864e5 : pastRange === "30" ? Date.now() - 30 * 864e5 : 0;
+  const withPerson = (m) => (!pastPerson || (Array.isArray(m.attendees) && m.attendees.includes(pastPerson)))
+    && (pastSource === "all" || (pastSource === "shared") === !!m.shared_with_me)
+    && (!pastFolder || (pastFolder.startsWith("s:") ? (sharedFolders.find((f) => "s:" + f.id === pastFolder)?.meeting_ids || []).includes(m.id) : m.folder_id === pastFolder));
+  const filtered = combined.filter((m) => matches(m) && withPerson(m) && Date.parse(m.started_at) >= since).sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
+  const busy = meetingLoading || participantLoading;
+  el("result-count").textContent = busy ? "Loading…" : term ? `${filtered.length} of ${combined.length} meetings` : `${combined.length} meetings`;
+
+  const now = new Date();
+  const horizon = new Date(now); horizon.setDate(now.getDate() + 2); horizon.setHours(0, 0, 0, 0);
+  const future = upcomingEvents.filter((e) => new Date(e.end) > now && e.status !== "completed" && matches(e)).sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+  const soon = future.filter((e) => new Date(e.start) < horizon);
+  const upcoming = term ? future : soon.length ? soon : future.slice(0, 3);
+  {
+    const section = node("section", "nt-section"); section.setAttribute("aria-label", "Coming up");
+    const heading = node("div", "nt-section-head"); heading.append(node("h2", "", "Coming up"));
+    const manage = node("a", "nt-link", "Calendar and joining"); manage.href = libraryURL("calendar"); heading.append(manage);
+    section.append(heading);
+    if (!upcoming.length) section.append(node("p", "nt-empty", upcomingLoading || !upcomingLoaded ? "Loading your calendar…"
+      : term ? "No upcoming meetings match your search." : future.length ? "No more meetings today or tomorrow." : "No upcoming meetings. Check that your calendar is connected under Calendar and joining."));
+    const shown = showAllUpcoming || term ? upcoming : upcoming.slice(0, 3);
+    const conflicts = new Set();
+    upcoming.forEach((a, index) => { for (const b of upcoming.slice(index + 1)) if (Date.parse(b.start) < Date.parse(a.end) && Date.parse(a.start) < Date.parse(b.end)) { conflicts.add(a.id); conflicts.add(b.id); } });
+    let day = "";
+    for (const event of shown) {
+      const label = dayLabel(new Date(event.start));
+      if (label !== day) { day = label; section.append(node("h3", "nt-day", label)); }
+      section.append(eventRow(event, now, conflicts));
     }
-    const open = document.createElement("a"); open.className = "button"; open.href = m.recording_source === "mac" ? "reel://local-library" : organization.webBase + "/record?mode=meeting"; open.textContent = "Open Reel";
-    actions.append(open);
-    const notionURL = validNotionURL(m.notion_url);
-    if (m.notion_verified === true && notionURL) {
-      const notion = document.createElement("a"); notion.className = "button secondary"; notion.href = notionURL.href; notion.target = "_blank"; notion.rel = "noopener noreferrer"; notion.textContent = "Open Notion"; actions.append(notion);
+    if (upcoming.length > 3 && !term) {
+      const more = node("button", "nt-more-button secondary", showAllUpcoming ? "Show less" : `Show ${upcoming.length - 3} more`); more.type = "button";
+      more.addEventListener("click", () => { showAllUpcoming = !showAllUpcoming; render(); }); section.append(more);
     }
-    row.append(visual, info, actions); list.append(row);
+    list.append(section);
   }
+
+  const past = node("section", "nt-section"); past.setAttribute("aria-label", "Past meetings");
+  const pastHead = node("div", "nt-section-head"); pastHead.append(node("h2", "", "Past meetings"));
+  const counts = new Map();
+  for (const m of combined) for (const person of new Set(Array.isArray(m.attendees) ? m.attendees : [])) if (typeof person === "string" && person) counts.set(person, (counts.get(person) || 0) + 1);
+  const people = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([person]) => [person, personName(person)]);
+  if (pastPerson && !counts.has(pastPerson)) pastPerson = "";
+  const filters = node("div", "nt-filters");
+  filters.append(
+    filterControl("Filter by date", pastRange, [["any", "Any time"], ["today", "Today"], ["7", "Last 7 days"], ["30", "Last 30 days"]], (value) => { pastRange = value; render(); }),
+    filterControl("Filter by attendee", pastPerson, [["", "Everyone"], ...people], (value) => { pastPerson = value; render(); }),
+    filterControl("Filter by source", pastSource, [["all", "All notes"], ["mine", "My meetings"], ["shared", "Shared with me"]], (value) => { pastSource = value; render(); }),
+    filterControl("Filter by folder", pastFolder, [["", "All folders"], ...noteFolders.map((folder) => [folder.id, folder.name]),
+      ...sharedFolders.map((folder) => ["s:" + folder.id, `Shared: ${folder.name}`]), ["+", "New folder…"], ["s+", "New shared folder…"]], (value) => {
+      if (value === "+") namingFolder = true; else if (value === "s+") namingShared = true; else pastFolder = value;
+      render();
+    }));
+  if (pastFolder && !noteFolders.some((folder) => folder.id === pastFolder) && !sharedFolders.some((folder) => "s:" + folder.id === pastFolder)) pastFolder = "";
+  pastHead.append(filters); past.append(pastHead);
+  const openFolder = noteFolders.find((folder) => folder.id === pastFolder);
+  const openShared = sharedFolders.find((folder) => "s:" + folder.id === pastFolder);
+  if (openShared && !namingShared) past.append(sharedFolderPanel(openShared));
+  if (namingShared) {
+    const form = node("form", "nt-inline-form"), input = node("input"), save = node("button", "", "Create shared folder"), cancel = node("button", "secondary", "Cancel");
+    input.id = "new-shared-folder"; input.maxLength = 80; input.required = true; input.placeholder = "Shared folder name, e.g. Peak account"; input.setAttribute("aria-label", "Shared folder name");
+    save.type = "submit"; cancel.type = "button";
+    cancel.addEventListener("click", () => { namingShared = false; render(); });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = await deliveryPost("/delivery/shared-folders", { create: input.value });
+      if (data?.folders) { sharedFolders = data.folders; pastFolder = data.created ? "s:" + data.created : ""; }
+      namingShared = false; render();
+    });
+    form.append(input, save, cancel); past.append(form);
+  }
+  if (openFolder && !namingFolder) {
+    const manage = node("p", "nt-read", `Folder: ${openFolder.name} · `);
+    const rename = node("button", "nt-text-button", "Rename"), remove = node("button", "nt-text-button", "Delete folder");
+    rename.type = remove.type = "button";
+    rename.addEventListener("click", () => { renamingFolder = true; namingFolder = true; render(); });
+    remove.addEventListener("click", async () => {
+      // Deleting a folder never deletes notes; they return to "No folder".
+      const data = await deliveryPost("/delivery/folders", { delete: openFolder.id });
+      if (data?.folders) { noteFolders = data.folders; pastFolder = ""; loadParticipantMeetings(); }
+    });
+    manage.append(rename, " · ", remove, " (notes are kept)"); past.append(manage);
+  }
+  if (namingFolder) {
+    const form = node("form", "nt-inline-form"), input = node("input"), save = node("button", "", "Create folder"), cancel = node("button", "secondary", "Cancel");
+    input.id = "new-note-folder"; input.maxLength = 80; input.required = true; input.placeholder = "Folder name"; input.setAttribute("aria-label", "Folder name");
+    const renaming = renamingFolder && openFolder;
+    if (renaming) { input.value = openFolder.name; save.textContent = "Rename folder"; }
+    save.type = "submit"; cancel.type = "button";
+    cancel.addEventListener("click", () => { namingFolder = renamingFolder = false; render(); });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = await deliveryPost("/delivery/folders", renaming ? { rename: { id: openFolder.id, name: input.value } } : { create: input.value });
+      if (data?.folders) { noteFolders = data.folders; if (!renaming) pastFolder = data.folders.at(-1)?.id || ""; }
+      namingFolder = renamingFolder = false; render();
+    });
+    form.append(input, save, cancel); past.append(form);
+  }
+  let pastDay = "";
+  for (const m of filtered) {
+    const started = new Date(m.started_at);
+    const label = Number.isNaN(started.getTime()) ? "Earlier" : dayLabel(started);
+    if (label !== pastDay) { pastDay = label; past.append(node("h3", "nt-day", label)); }
+    const row = node("a", "nt-row nt-past");
+    row.href = m.participantNote ? libraryURL(`meetings/${m.id}`) : m.recording_source === "mac" ? "reel-notetaker://home" : organization.webBase + "/record?mode=meeting";
+    row.append(node("span", "nt-time", Number.isNaN(started.getTime()) ? "" : timeOf(started)));
+    const main = node("span", "nt-main"); main.append(node("strong", "", m.title));
+    const hit = term && transcriptHits.get(m.id);
+    const preview = hit ? `Transcript: ${hit}` : m.participantNote ? summaryPreview(m.summary) : "Recorded on this Mac. Open Reel Notetaker to read it.";
+    if (preview) main.append(node("span", "nt-preview", preview));
+    const ready = m.participantNote && String(m.summary || "").trim();
+    if (m.participantNote && !ready) main.append(node("span", "nt-preview", "No summary yet"));
+    if (m.shared_with_me) main.querySelector("strong").append(node("span", "nt-soon nt-maybe", "Shared with you"));
+    if (m.tasks_done) main.querySelector("strong").append(node("span", "nt-soon nt-done", `${m.tasks_done} done`));
+    row.append(main, peopleChips(m.attendees), node("span", "nt-length", lengthLabel(m.duration_seconds)));
+    if (!ready) row.append(node("span", "nt-chip nt-chip-off", m.participantNote ? "No notes" : "On this Mac"));
+    past.append(row);
+  }
+  if (!filtered.length && !busy) past.append(node("p", "nt-empty", term || pastPerson || pastRange !== "any" ? "No meetings match. Try a different search or filter." : "No meeting notes yet. Notes appear here after Reel Notetaker records a call you were invited to."));
+  list.append(past);
   if (meetingError || participantError) message([meetingError, participantError].filter(Boolean).join(" "), true);
-  else if ((meetingLoading || participantLoading) && validUser(currentUser)) message("Loading meetings…");
-  else if (validUser(currentUser)) message(!combined.length ? "No meetings yet. Record a meeting in Reel while signed in to see its private details here. Meetings recorded while signed out stay on that device and won't sync to this portal." : !filtered.length ? "No meetings match your search." : "");
+  else message(busy && !combined.length ? "Loading meetings…" : "");
+}
+// speaker_attribution on a segment says how well speakers were identified, not who
+// spoke. Names, when the service has them, come as "Name: text" lines in transcript_text.
+function transcriptBlocks() {
+  const wrap = node("div", "nt-transcript");
+  let lines = typeof note.transcript_text === "string" ? note.transcript_text.split("\n").map((line) => line.trim()).filter(Boolean) : [];
+  // The service opens with a note on how speakers were identified; show it as a note, not as speech.
+  if (/^Speaker identification /.test(lines[0] || "")) { wrap.append(node("p", "nt-read", lines[0])); lines = lines.slice(1); }
+  const named = lines.map((line) => /^([A-Z][^:]{1,40}):\s+(.+)$/.exec(line));
+  if (lines.length > 1 && named.filter(Boolean).length >= lines.length * 0.6) {
+    let last = null, block = null;
+    lines.forEach((line, index) => {
+      const speaker = named[index]?.[1] || last || "Speaker", text = named[index]?.[2] || line;
+      if (speaker !== last) { last = speaker; block = node("div", "nt-turn"); const head = node("div", "nt-turn-head"); head.append(node("strong", "", speaker)); block.append(head); wrap.append(block); }
+      block.append(node("p", "", text));
+    });
+    return wrap;
+  }
+  if (!Array.isArray(note.segments) || !note.segments.length) return null;
+  for (const segment of note.segments) {
+    const block = node("div", "nt-turn nt-timed");
+    block.append(node("span", "nt-stamp", Number.isFinite(segment.start) ? duration(segment.start) : ""), node("p", "", segment.text || ""));
+    wrap.append(block);
+  }
+  return wrap;
+}
+async function copyText(button, text) {
+  const label = button.textContent;
+  try { await navigator.clipboard.writeText(text); button.textContent = "Copied"; }
+  catch { button.textContent = "Couldn't copy"; }
+  setTimeout(() => { button.textContent = label; }, 1600);
+}
+const taskKey = (id) => organizationStorageKey(`reel-tasks:${currentUser?.uid}:${id}`);
+// Action items read "Owner: task" or "Owner unconfirmed: task". Show the owner as a label.
+function taskParts(text) {
+  const match = /^([^:]{2,40}):\s+(.+)$/.exec(String(text));
+  if (!match) return { owner: "", task: String(text) };
+  return { owner: /^owner unconfirmed$/i.test(match[1].trim()) ? "" : match[1].trim(), task: match[2] };
+}
+function taskLabel(text) {
+  const { owner, task } = taskParts(text);
+  const label = node("label", "", task);
+  if (owner) label.prepend(node("span", "nt-owner", owner));
+  return label;
+}
+function doneTasks(id) { try { const value = JSON.parse(localStorage.getItem(taskKey(id)) || "[]"); return new Set(Array.isArray(value) ? value : []); } catch { return new Set(); } }
+function saveTasks(id, done) { try { localStorage.setItem(taskKey(id), JSON.stringify([...done])); } catch { /* ticks then last only for this visit */ } }
+function noteMarkdown(blocks, people, meta, transcriptText) {
+  const lines = [`# ${note.title}`, "", meta];
+  if (people.length) lines.push("", `Attendees: ${people.map(personName).join(", ")}`);
+  for (const block of blocks) {
+    if (block.type === "heading") lines.push("", `## ${block.text}`, "");
+    else if (block.type === "para") lines.push(block.text, "");
+    else lines.push(`${block.type === "todo" ? "- [ ]" : "-"} ${block.label ? `**${block.label}:** ` : ""}${block.text}`);
+  }
+  if (transcriptText) lines.push("", "## Transcript", "", transcriptText);
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+// One list of action items across every meeting, open ones first by meeting date.
+const TEMPLATE_NAMES = { standard: "Standard", client: "Client call", internal: "Team sync", one_on_one: "1:1", sales: "Sales call", brief: "Short" };
+const LANGUAGE_NAMES = { "": "Meeting language", en: "English", es: "Spanish", fr: "French", de: "German", pt: "Portuguese", it: "Italian", nl: "Dutch",
+  hi: "Hindi", ja: "Japanese", zh: "Chinese", ko: "Korean", ru: "Russian", tr: "Turkish", ar: "Arabic", id: "Indonesian" };
+function renderTasks() {
+  const list = el("recordings");
+  el("result-count").textContent = participantLoading ? "Loading…" : "";
+  const section = node("section", "nt-section"); section.setAttribute("aria-label", "Tasks");
+  const head = node("div", "nt-section-head"); head.append(node("h2", "", "Action items across your meetings"));
+  const filters = node("div", "nt-filters");
+  filters.append(filterControl("Show", taskFilter, [["open", "Open"], ["done", "Done"], ["all", "All"]], (value) => { taskFilter = value; render(); }));
+  head.append(filters); section.append(head);
+  const term = el("search").value.trim().toLocaleLowerCase(); let shown = 0, open = 0;
+  for (const m of [...participantMeetings].sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))) {
+    const items = [
+      ...summaryBlocks(m.summary).filter((block) => block.type === "todo").map((block) => ({ key: block.text, text: block.text, done: m.task_state?.[block.text] === true })),
+      ...(Array.isArray(m.added_tasks) ? m.added_tasks.map((task) => ({ key: task.id, text: task.text, done: task.done === true })) : []),
+    ];
+    open += items.filter((item) => !item.done).length;
+    const visible = items.filter((item) => (taskFilter === "all" || (taskFilter === "done") === item.done) && (!term || item.text.toLocaleLowerCase().includes(term) || m.title.toLocaleLowerCase().includes(term)));
+    if (!visible.length) continue;
+    const started = new Date(m.started_at);
+    const title = node("h3", "nt-day"); const link = node("a", "nt-link", m.title); link.href = libraryURL(`meetings/${m.id}`);
+    title.append(link, ` · ${Number.isNaN(started.getTime()) ? "" : dayLabel(started)}`); section.append(title);
+    const checklist = node("ul", "nt-checklist nt-tasklist");
+    for (const item of visible) {
+      const row = node("li"), box = node("input"), label = taskLabel(item.text);
+      box.type = "checkbox"; box.checked = item.done; box.id = `task-${shown++}`; label.htmlFor = box.id; row.classList.toggle("done", item.done);
+      box.addEventListener("change", async () => {
+        const data = await deliveryPost(`/delivery/meetings/${m.id}/tasks`, { task: item.key, done: box.checked });
+        if (data?.meeting) {
+          const state = data.meeting.workspace || {};
+          m.task_state = Object.fromEntries(Object.entries(state.tasks || {}).map(([text, value]) => [text, value?.done === true]));
+          m.added_tasks = (state.added_tasks || []).map((task) => ({ id: task.id, text: task.text, done: task.done === true }));
+        }
+        render();
+      });
+      row.append(box, label); checklist.append(row);
+    }
+    section.append(checklist);
+  }
+  if (!shown && !participantLoading) section.append(node("p", "nt-empty", term ? "No action items match your search." : taskFilter === "open" ? "Nothing open. Every action item from your meetings is ticked off." : "No action items yet."));
+  head.querySelector("h2").textContent = `Action items across your meetings${open ? ` (${open} open)` : ""}`;
+  list.append(section); message(participantError || "", !!participantError);
+}
+function queueTranscriptSearch(term) {
+  clearTimeout(transcriptTimer);
+  transcriptTimer = setTimeout(async () => {
+    if (!validUser(currentUser)) return;
+    try {
+      const token = await currentUser.getIdToken();
+      const response = await fetch(`${organization.deliveryServiceURL}/delivery/search?q=${encodeURIComponent(term)}`, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      const data = response.ok ? await response.json() : null;
+      if (el("search").value.trim().toLocaleLowerCase() !== term) return;
+      transcriptQuery = term;
+      transcriptHits = new Map((data?.results || []).filter((r) => r && typeof r.id === "string").map((r) => [r.id, String(r.snippet || "")]));
+      render();
+    } catch { /* title and summary matching still works */ }
+  }, 350);
+}
+const ASK_PROMPTS = {
+  home: ["What are my open action items from this week?", "What did we decide about budgets recently?", "Summarise this week's client calls"],
+  note: ["Write a follow-up email to the attendees", "What were the main disagreements?", "Suggest questions for the next meeting"],
+};
+function sharedFolderPanel(folder) {
+  const panel = node("section", "nt-share"); panel.setAttribute("aria-label", `Shared folder ${folder.name}`);
+  const editor = folder.role === "editor";
+  panel.append(node("h3", "", `Shared folder: ${folder.name}`),
+    node("p", "nt-read", `${folder.meeting_ids.length} ${folder.meeting_ids.length === 1 ? "meeting" : "meetings"}. Everyone below can open them. Add a meeting from its own page with "Add to shared folder".`));
+  const update = async (body) => { const data = await deliveryPost("/delivery/shared-folders", { id: folder.id, ...body }); if (data?.folders) { sharedFolders = data.folders;
+    if (data.invitations) invitationNote = data.invitations.emailed.length ? `Added and emailed ${data.invitations.emailed.join(", ")}.` : `Added ${data.invitations.failed.join(", ")}, but the email didn't send.`;
+    loadParticipantMeetings(); } return data; };
+  const list = node("ul", "nt-share-list");
+  for (const member of folder.members) {
+    const item = node("li"); item.append(node("span", "", member.email));
+    if (member.email === folder.owner) item.append(node("span", "nt-role", "Owner"));
+    else if (editor) {
+      // Only the folder's owner decides who is in it and what they can do.
+      if (folder.is_owner) item.append(filterControl(`Access for ${member.email}`, member.role, [["editor", "Can edit"], ["viewer", "Can view"]], (value) => update({ add_member: member.email, role: value })));
+      else item.append(node("span", "nt-role", member.role === "editor" ? "Can edit" : "Can view"));
+      const remove = node("button", "secondary", "Remove"); remove.type = "button"; remove.addEventListener("click", () => update({ remove_member: member.email })); item.append(remove);
+    } else item.append(node("span", "nt-role", member.role === "editor" ? "Can edit" : "Can view"));
+    list.append(item);
+  }
+  panel.append(list);
+  if (folder.is_owner) {
+    const form = node("form", "nt-inline-form"), input = node("input"), role = filterControl("Access for the person added", "viewer", [["editor", "Can edit"], ["viewer", "Can view"]], () => {}), add = node("button", "", "Add person");
+    input.type = "email"; input.id = "folder-member"; input.required = true; input.placeholder = `name@${organization.allowedEmailDomain || "company.com"}`; input.setAttribute("aria-label", "Email to add"); add.type = "submit";
+    form.addEventListener("submit", (event) => { event.preventDefault(); update({ add_member: input.value.trim(), role: role.value }); });
+    form.append(input, role, add); panel.append(form);
+  }
+  if (invitationNote) panel.append(node("p", "nt-banner", invitationNote));
+  const footer = node("p", "nt-read");
+  if (folder.is_owner) {
+    const remove = node("button", "nt-text-button", "Delete shared folder"); remove.type = "button";
+    remove.addEventListener("click", async () => { const data = await update({ delete: true }); if (data) pastFolder = ""; render(); });
+    footer.append(remove, " (meetings stay with the people who were in them)");
+  } else {
+    const leave = node("button", "nt-text-button", "Leave this folder"); leave.type = "button";
+    leave.addEventListener("click", async () => { await update({ remove_member: currentUser.email }); pastFolder = ""; render(); });
+    footer.append(leave);
+  }
+  panel.append(footer);
+  return panel;
+}
+function promptChips(meetingId, ask) {
+  const scope = meetingId ? "note" : "all";
+  const saved = [...savedPrompts.mine.map((p) => ({ ...p, mine: true, team: false })), ...savedPrompts.team.map((p) => ({ ...p, team: true }))]
+    .filter((p) => p.scope === scope || p.scope === "all");
+  const prompts = node("div", "nt-prompts");
+  for (const prompt of saved) {
+    const chip = node("span", "nt-saved-prompt");
+    const run = node("button", "nt-prompt nt-prompt-saved", prompt.title); run.type = "button"; run.title = prompt.text + (prompt.team ? " (shared with the team)" : "");
+    run.addEventListener("click", () => ask(prompt.text)); chip.append(run);
+    if (prompt.mine) {
+      const remove = node("button", "nt-prompt-remove", "×"); remove.type = "button"; remove.setAttribute("aria-label", `Delete saved prompt ${prompt.title}`);
+      remove.addEventListener("click", async () => { const data = await deliveryPost("/delivery/prompts", { delete: prompt.id }); if (data?.mine) { savedPrompts = data; render(); } });
+      chip.append(remove);
+    }
+    prompts.append(chip);
+  }
+  for (const text of ASK_PROMPTS[meetingId ? "note" : "home"]) {
+    const chip = node("button", "nt-prompt", text); chip.type = "button"; chip.addEventListener("click", () => ask(text)); prompts.append(chip);
+  }
+  return prompts;
+}
+function savePromptForm(meetingId) {
+  if (!savingPrompt) {
+    const open = node("button", "nt-text-button", "Save this question"); open.type = "button";
+    open.addEventListener("click", () => { savingPrompt = true; render(); });
+    return open;
+  }
+  const form = node("form", "nt-inline-form"), title = node("input"), team = node("input"), teamLabel = node("label", "nt-check"), save = node("button", "", "Save"), cancel = node("button", "secondary", "Cancel");
+  title.id = "prompt-title"; title.maxLength = 60; title.required = true; title.placeholder = "Short name, e.g. Weekly wins"; title.setAttribute("aria-label", "Prompt name");
+  team.type = "checkbox"; team.id = "prompt-team"; teamLabel.htmlFor = team.id; teamLabel.append(team, " Share with the team");
+  save.type = "submit"; cancel.type = "button"; cancel.addEventListener("click", () => { savingPrompt = false; render(); });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = await deliveryPost("/delivery/prompts", { save: { title: title.value, text: askState.question, scope: meetingId ? "note" : "all", team: team.checked } });
+    if (data?.mine) savedPrompts = data;
+    savingPrompt = false; render();
+  });
+  form.append(title, teamLabel, save, cancel);
+  return form;
+}
+async function loadConnect() {
+  try {
+    const token = await currentUser.getIdToken();
+    const response = await fetch(organization.deliveryServiceURL + "/delivery/mcp-tokens", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+    const data = response.ok ? await response.json() : null;
+    connectState = { ...connectState, tokens: data?.tokens || [], endpoint: data?.endpoint || "", loaded: true };
+  } catch { connectState = { ...connectState, loaded: true }; }
+  if (isConnect()) render();
+}
+function codeBlock(text, label) {
+  const wrap = node("div", "nt-code"), pre = node("pre"), copy = node("button", "secondary", "Copy");
+  pre.textContent = text; copy.type = "button"; copy.setAttribute("aria-label", `Copy ${label}`); copy.addEventListener("click", () => copyText(copy, text));
+  wrap.append(pre, copy); return wrap;
+}
+function renderConnect() {
+  const list = el("recordings"); el("result-count").textContent = ""; message("");
+  if (!connectState.loaded) { loadConnect(); list.append(node("p", "nt-empty", "Loading your connections…")); return; }
+  const page = node("section", "nt-connect");
+  page.append(node("p", "nt-lede", "Let Claude, ChatGPT or another assistant read your meeting notes. It sees only the meetings you can open here, and it can't change anything."));
+  const endpoint = connectState.endpoint || organization.deliveryServiceURL + "/mcp";
+  if (connectState.created) {
+    const token = connectState.created.token;
+    const box = node("div", "nt-share");
+    box.append(node("h3", "", "Your new connection key"), node("p", "nt-banner", "Copy it now. For your security it won't be shown again."), codeBlock(token, "connection key"),
+      node("h3", "", "Claude Code"), codeBlock(`claude mcp add --transport http reel-notetaker ${endpoint} --header "Authorization: Bearer ${token}"`, "Claude Code command"),
+      node("h3", "", "Claude Desktop, Cursor and others (config file)"),
+      codeBlock(JSON.stringify({ mcpServers: { "reel-notetaker": { command: "npx", args: ["-y", "mcp-remote@0.16.6", endpoint, "--header", `Authorization: Bearer ${token}`] } } }, null, 2), "config"),
+      node("p", "nt-read", "ChatGPT and claude.ai web connectors need a sign-in flow this connection doesn't offer yet; use Claude Code or a desktop app."));
+    const done = node("button", "", "I've copied it"); done.type = "button"; done.addEventListener("click", () => { connectState = { ...connectState, created: null }; render(); });
+    box.append(done); page.append(box);
+  }
+  page.append(node("h3", "", "What the assistant can do"));
+  const tools = node("ul", "nt-points");
+  for (const line of ["List your meetings and their summaries", "Open one meeting: summary, action items, your private notes and the transcript", "Search every transcript for exact words", "List action items across meetings and whether they're done"]) tools.append(node("li", "", line));
+  page.append(tools, node("h3", "", "Your connections"));
+  const rows = node("ul", "nt-share-list");
+  if (!connectState.tokens.length) rows.append(node("li", "nt-empty", "No connections yet."));
+  for (const item of connectState.tokens) {
+    const row = node("li"), revoke = node("button", "secondary", "Revoke"); revoke.type = "button";
+    revoke.addEventListener("click", async () => { const data = await deliveryPost("/delivery/mcp-tokens", { revoke: item.id }); if (data) { connectState = { ...connectState, tokens: data.tokens }; render(); } });
+    row.append(node("span", "", item.label), node("span", "nt-role", `Added ${new Date(item.created * 1000).toLocaleDateString()}`), revoke); rows.append(row);
+  }
+  const form = node("form", "nt-inline-form"), label = node("input"), create = node("button", "", "Create connection key");
+  label.id = "connect-label"; label.maxLength = 60; label.required = true; label.placeholder = "Name it, e.g. Claude on my laptop"; label.setAttribute("aria-label", "Connection name"); create.type = "submit";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = await deliveryPost("/delivery/mcp-tokens", { create: label.value });
+    if (data?.created) { connectState = { ...connectState, tokens: data.tokens, endpoint: data.endpoint, created: data.created }; render(); }
+  });
+  form.append(label, create);
+  page.append(rows, form, node("p", "nt-read", `Server address: ${endpoint}`));
+  list.append(page);
+}
+function askPanel(meetingId) {
+  const panel = node("section", "nt-ask"); panel.setAttribute("aria-label", "Ask about your meetings");
+  const form = node("form", "nt-ask-form"), input = node("input"), go = node("button", "", askState.busy ? "Thinking…" : "Ask");
+  input.id = meetingId ? "ask-note" : "ask-home"; input.type = "text"; input.maxLength = 1000;
+  input.placeholder = meetingId ? "Ask about this meeting" : "Ask about your meetings, e.g. what did Peak decide on budgets?";
+  input.setAttribute("aria-label", input.placeholder); go.type = "submit"; go.disabled = askState.busy;
+  if (askState.scope === meetingId) input.value = askState.question;
+  const ask = async (question) => {
+    question = question.trim(); if (!question || askState.busy) return;
+    askState = { question, answer: null, citations: [], busy: true, error: "", scope: meetingId }; savingPrompt = false; render();
+    const data = await deliveryPost("/delivery/ask", meetingId ? { question, meeting_id: meetingId } : { question });
+    askState = { ...askState, busy: false, answer: data?.answer || null, citations: Array.isArray(data?.citations) ? data.citations : [],
+      error: data ? "" : "Couldn't get an answer. Try again." };
+    render();
+  };
+  form.addEventListener("submit", (event) => { event.preventDefault(); ask(input.value); });
+  form.append(input, go); panel.append(form);
+  if (askState.scope === meetingId && (askState.answer || askState.error || askState.busy)) {
+    const answer = node("div", "nt-answer");
+    if (askState.busy) answer.append(node("p", "nt-read", "Reading your meetings…"));
+    else if (askState.error) answer.append(node("p", "nt-empty", askState.error));
+    else {
+      for (const line of askState.answer.split("\n")) if (line.trim()) answer.append(node(/^\s*[-•]\s/.test(line) ? "li" : "p", "", line.replace(/^\s*[-•]\s/, "")));
+      if (askState.citations.length) {
+        const sources = node("p", "nt-read", "From: ");
+        askState.citations.forEach((cite, index) => {
+          const link = node("a", "nt-link", cite.title || "a meeting"); link.href = libraryURL(`meetings/${cite.id}`);
+          if (index) sources.append(", "); sources.append(link);
+        });
+        answer.append(sources);
+      }
+      const copy = node("button", "nt-text-button", "Copy answer"); copy.type = "button";
+      copy.addEventListener("click", () => copyText(copy, askState.answer));
+      const actionsRow = node("div", "nt-answer-actions"); actionsRow.append(copy, savePromptForm(meetingId)); answer.append(actionsRow);
+    }
+    panel.append(answer);
+  } else {
+    const prompts = promptChips(meetingId, ask);
+    panel.append(prompts);
+  }
+  return panel;
+}
+async function deliveryPost(path, body) {
+  if (!validUser(currentUser) || workspaceBusy) return null;
+  workspaceBusy = true;
+  try {
+    const token = await currentUser.getIdToken();
+    const response = await fetch(organization.deliveryServiceURL + path, { method: "POST", cache: "no-store",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) { message(data?.error || "Couldn't save that change. Try again.", true); return null; }
+    return data;
+  } catch { message("Couldn't save that change. Check your connection and try again.", true); return null; }
+  finally { workspaceBusy = false; }
+}
+// Every change to a note returns the note as it now stands for this reader.
+async function noteChange(path, body) {
+  const id = note?.id; if (!id) return;
+  const data = await deliveryPost(`/delivery/meetings/${id}/${path}`, body);
+  if (data?.meeting?.id === id && selectedNote() === id) { note = data.meeting; render(); }
 }
 function renderNote() {
-  const list = el("recordings");
+  const list = el("recordings"); list.classList.add("nt-home");
   el("result-count").textContent = "";
-  if (!validUser(currentUser)) { message(currentUser ? `Use a verified ${DOMAIN} Google account to view meeting notes.` : `Sign in with your ${DOMAIN} Google account to see meeting notes.`); return; }
+  if (!validUser(currentUser)) return;
   if (noteLoading) { message("Loading meeting notes…"); return; }
   if (noteError) { message(noteError, true); return; }
   if (!note) return;
   message("");
-  const article = document.createElement("article"); article.className = "meeting-note";
-  const back = document.createElement("a"); back.href = libraryURL("meetings"); back.textContent = "← All meetings";
-  const title = document.createElement("h2"); title.textContent = note.title;
-  const date = document.createElement("p"); date.className = "meeting-date";
-  const started = new Date(note.started_at); date.textContent = Number.isNaN(started.getTime()) ? "Date unavailable" : started.toLocaleString();
-  const summaryHeading = document.createElement("h3"); summaryHeading.textContent = "Summary and action items";
-  const summary = document.createElement("div"); summary.className = "meeting-note-text";
-  summary.textContent = typeof note.summary === "string" ? note.summary : JSON.stringify(note.summary ?? "", null, 2);
-  const transcriptHeading = document.createElement("h3"); transcriptHeading.textContent = "Transcript";
-  const transcript = document.createElement("div"); transcript.className = "meeting-note-text";
-  transcript.textContent = typeof note.transcript_text === "string" && note.transcript_text ? note.transcript_text : (Array.isArray(note.segments) ? note.segments.map((s) => s.text || "").join("\n") : "Transcript unavailable.");
-  article.append(back, title, date, summaryHeading, summary, transcriptHeading, transcript); list.append(article);
+  const ws = note.workspace && typeof note.workspace === "object" ? note.workspace : null;
+  const canEdit = !!ws?.can_edit;
+  const article = node("article", "nt-note");
+  const back = node("a", "nt-link", "← All meetings"); back.href = libraryURL("meetings");
+  const started = new Date(note.started_at);
+  const meta = Number.isNaN(started.getTime()) ? "Date unavailable" : `${dayLabel(started)}, ${started.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })} · ${timeOf(started)} · ${lengthLabel(note.duration_seconds)}`;
+  const head = node("header", "nt-note-head"); head.append(node("h2", "", note.title), node("p", "nt-meta", meta));
+  const unique = (value) => [...new Set((Array.isArray(value) ? value : []).filter((item) => typeof item === "string" && item))];
+  const people = unique(note.attendees), recipients = unique(note.recipients), invited = unique(ws?.shared_with);
+  if (people.length) {
+    const chips = node("div", "nt-attendees");
+    for (const person of people) { const chip = node("span", "nt-person", personName(person)); chip.title = person; chips.append(chip); }
+    head.append(chips);
+  }
+  const reach = recipients.length + invited.length;
+  if (reach) {
+    const shared = node("p", "nt-shared", `Notes shared with ${reach === 1 ? "1 person" : `${reach} people`}${ws?.link_access === "organization" ? ", and anyone at your company who has the link" : ""}`);
+    shared.title = [...recipients, ...invited].join(", "); head.append(shared);
+  }
+  if (ws?.access === "organization") head.append(node("p", "nt-banner", "You opened this note from a link. You can read the summary. Ask someone who was in the meeting to invite you for the transcript."));
+  if (ws?.access === "shared") head.append(node("p", "nt-banner", "This note was shared with you."));
+
+  const transcriptText = typeof note.transcript_text === "string" && note.transcript_text ? note.transcript_text
+    : Array.isArray(note.segments) ? note.segments.map((s) => s.text || "").join("\n") : "";
+  const original = typeof note.summary === "string" ? note.summary : "";
+  const edited = ws?.summary && typeof ws.summary.text === "string" ? ws.summary : null;
+  const summaryText = edited ? edited.text : original;
+  const blocks = summaryBlocks(summaryText);
+  const tasks = blocks.filter((block) => block.type === "todo").map((block) => block.text);
+
+  const actions = node("div", "nt-actions");
+  const action = (label, run, className = "secondary") => { const button = node("button", className, label); button.type = "button"; button.addEventListener("click", () => run(button)); actions.append(button); return button; };
+  if (ws?.can_share) action(sharingOpen ? "Close sharing" : "Share", () => { sharingOpen = !sharingOpen; render(); }, "");
+  if (summaryText) action("Copy summary", (button) => copyText(button, `${note.title}\n\n${summaryText}`));
+  if (transcriptText) action("Copy transcript", (button) => copyText(button, transcriptText));
+  action("Copy as Markdown", (button) => copyText(button, noteMarkdown(blocks, people, meta, transcriptText)));
+  action("Copy link", (button) => copyText(button, location.href));
+  const notion = validNotionURL(note.notes_url) || validNotionURL(note.notion_url);
+  if (notion) { const link = node("a", "button secondary", "Open in Notion"); link.href = notion.href; link.target = "_blank"; link.rel = "noopener noreferrer"; actions.append(link); }
+  if (ws && ws.access !== "organization") {
+    actions.append(filterControl("Folder for this note", ws.folder_id || "", [["", "No folder"], ...noteFolders.map((folder) => [folder.id, folder.name])],
+      (value) => noteChange("folder", { folder_id: value || null })));
+    const inShared = sharedFolders.filter((folder) => folder.meeting_ids.includes(note.id));
+    const addable = ws.can_share ? sharedFolders.filter((folder) => folder.role === "editor" && !folder.meeting_ids.includes(note.id)) : [];
+    if (addable.length) {
+      actions.append(filterControl("Add to a shared folder", "", [["", "Add to shared folder…"], ...addable.map((folder) => [folder.id, folder.name])], async (value) => {
+        if (!value) return;
+        const data = await deliveryPost("/delivery/shared-folders", { id: value, add_meeting: note.id });
+        if (data?.folders) { sharedFolders = data.folders; loadNote(); }
+      }));
+    }
+    if (inShared.length) head.append(node("p", "nt-shared", `In shared ${inShared.length === 1 ? "folder" : "folders"}: ${inShared.map((folder) => folder.name).join(", ")}`));
+  }
+
+  let sharing = null;
+  if (ws?.can_share && sharingOpen) {
+    sharing = node("section", "nt-share"); sharing.setAttribute("aria-label", "Share notes");
+    sharing.append(node("h3", "", "Share notes"));
+    const peopleList = node("ul", "nt-share-list");
+    for (const person of recipients) { const item = node("li"); item.append(node("span", "", person), node("span", "nt-role", "In the meeting")); peopleList.append(item); }
+    for (const person of invited) {
+      const item = node("li"), remove = node("button", "secondary", "Remove"); remove.type = "button";
+      remove.addEventListener("click", () => noteChange("share", { remove: [person] }));
+      const role = filterControl(`Access for ${person}`, ws.roles?.[person] === "viewer" ? "viewer" : "editor",
+        [["editor", "Can edit"], ["viewer", "Can view"]], (value) => noteChange("share", { roles: { [person]: value } }));
+      item.append(node("span", "", person), role, remove); peopleList.append(item);
+    }
+    const form = node("form", "nt-inline-form"), input = node("input"), invite = node("button", "", "Invite");
+    input.type = "email"; input.id = "share-email"; input.required = true; input.placeholder = `name@${organization.allowedEmailDomain || "company.com"}`; input.setAttribute("aria-label", "Email to invite");
+    invite.type = "submit";
+    const newRole = filterControl("Access for the person invited", "editor", [["editor", "Can edit"], ["viewer", "Can view"]], () => {});
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = await deliveryPost(`/delivery/meetings/${note.id}/share`, { add: [input.value.trim()], role: newRole.value });
+      if (data?.meeting) {
+        const sent = data.invitations?.emailed || [], failed = data.invitations?.failed || [];
+        invitationNote = sent.length ? `Invited and emailed ${sent.join(", ")}.` : failed.length ? `Invited ${failed.join(", ")}, but the email didn't send. Share the link with them directly.` : "Already has access.";
+        note = data.meeting; render();
+      }
+    });
+    form.append(input, newRole, invite);
+    const visibility = node("label", "nt-visibility", "Who can open the link ");
+    visibility.append(filterControl("Who can open the link", ws.link_access === "organization" ? "organization" : "invited",
+      [["invited", "Only people invited"], ["organization", `Anyone at ${organization.allowedEmailDomain || "your company"} with the link`]],
+      (value) => noteChange("share", { link_access: value })));
+    sharing.append(peopleList, form, visibility,
+      ...(invitationNote ? [node("p", "nt-banner", invitationNote)] : []),
+      node("p", "nt-read", "People you invite get an email with a link. Can edit: tick action items and edit the summary. Can view: read only. Link viewers see the summary only. Notes are never shared outside your company."));
+  }
+
+  const bar = node("div", "nt-tabbar");
+  const tabs = node("div", "nt-tabs"); tabs.setAttribute("role", "tablist");
+  const find = node("input", "nt-find"); find.type = "search"; find.id = "note-search"; find.placeholder = "Search this note…"; find.setAttribute("aria-label", "Search this note"); find.value = noteSearch;
+  bar.append(tabs, find);
+  const panels = {};
+
+  const summary = node("section", "nt-panel"); panels.Summary = summary;
+  if (editingSummary && canEdit) {
+    const area = node("textarea", "nt-editor"); area.id = "summary-editor"; area.value = summaryText; area.setAttribute("aria-label", "Summary");
+    const buttons = node("div", "nt-actions"), save = node("button", "", "Save summary"), cancel = node("button", "secondary", "Cancel");
+    save.type = cancel.type = "button";
+    save.addEventListener("click", async () => { editingSummary = false; await noteChange("summary", { text: area.value }); });
+    cancel.addEventListener("click", () => { editingSummary = false; render(); });
+    buttons.append(save, cancel);
+    summary.append(node("p", "nt-read", "Put a section name on its own line, start points with \"-\", and list tasks under \"Action items\". Everyone on this note sees your edit."), area, buttons);
+  } else {
+    const words = summaryText.split(/\s+/).filter(Boolean).length;
+    const info = node("p", "nt-read", words ? `${Math.max(1, Math.round(words / 200))} min read` : "");
+    if (edited && !edited.generated) info.append(` · Edited by ${personName(edited.by)}`);
+    if (canEdit) {
+      const edit = node("button", "nt-text-button", "Edit summary"); edit.type = "button"; edit.addEventListener("click", () => { editingSummary = true; noteTab = "Summary"; render(); });
+      info.append(" · ", edit);
+      if (edited) { const restore = node("button", "nt-text-button", "Restore original"); restore.type = "button"; restore.addEventListener("click", () => noteChange("summary", { restore: true })); info.append(" · ", restore); }
+    }
+    if (edited?.generated) info.append(` · Rewritten (${TEMPLATE_NAMES[edited.generated.template] || "Standard"}${edited.generated.language ? `, ${LANGUAGE_NAMES[edited.generated.language] || edited.generated.language}` : ""}${edited.generated.with_my_notes ? ", with my notes" : ""})`);
+    summary.append(info);
+    if (canEdit && transcriptText) {
+      const rewrite = node("div", "nt-rewrite");
+      const template = filterControl("Summary style", "standard", Object.entries(TEMPLATE_NAMES), () => {});
+      const language = filterControl("Summary language", "", Object.entries(LANGUAGE_NAMES), () => {});
+      const mineLabel = node("label", "nt-check"), mine = node("input"); mine.type = "checkbox"; mine.id = "rewrite-with-notes";
+      mine.disabled = !(ws?.my_notes || "").trim(); mineLabel.htmlFor = mine.id; mineLabel.append(mine, " Use my notes");
+      const go = node("button", "secondary", rewriteBusy ? "Rewriting…" : "Rewrite summary"); go.type = "button"; go.disabled = rewriteBusy;
+      go.addEventListener("click", async () => {
+        rewriteBusy = true; render();
+        await noteChange("regenerate", { template: template.value, language: language.value, include_my_notes: mine.checked });
+        rewriteBusy = false; render();
+      });
+      rewrite.append(template, language, mineLabel, go);
+      summary.append(rewrite);
+    }
+    if (!blocks.length) summary.append(node("p", "nt-empty", "No summary for this meeting. There may have been no speech to summarise."));
+    let listNode = null;
+    for (const block of blocks) {
+      if (block.type === "bullet" || block.type === "todo") {
+        const kind = block.type === "todo" ? "nt-todo" : "nt-points";
+        if (!listNode || listNode.className !== kind) { listNode = node("ul", kind); summary.append(listNode); }
+        const item = node("li");
+        if (block.type === "todo") { const { owner, task } = taskParts(block.text); if (owner) item.append(node("span", "nt-owner", owner)); item.append(task); }
+        else { if (block.label) item.append(node("strong", "", block.label + ": ")); item.append(block.text); }
+        listNode.append(item);
+        continue;
+      }
+      listNode = null;
+      summary.append(node(block.type === "heading" ? "h3" : "p", "", block.text));
+    }
+  }
+
+  const added = Array.isArray(ws?.added_tasks) ? ws.added_tasks.filter((task) => task && typeof task.text === "string" && typeof task.id === "string") : [];
+  const local = ws ? null : doneTasks(note.id);
+  const isDone = (text) => ws ? ws.tasks?.[text]?.done === true : local.has(text);
+  const total = tasks.length + added.length;
+  const taskName = `Action items${total ? ` (${total})` : ""}`;
+  const taskPanel = node("section", "nt-panel"); panels[taskName] = taskPanel;
+  if (!total) taskPanel.append(node("p", "nt-empty", "No action items were recorded for this meeting."));
+  else {
+    const doneCount = tasks.filter(isDone).length + added.filter((task) => task.done).length;
+    taskPanel.append(node("p", "nt-read", `${doneCount} of ${total} done. ${ws ? "Everyone on this note sees what is ticked." : "Ticks are saved in this browser only."}`));
+    const checklist = node("ul", "nt-checklist");
+    const line = (key, text, done, who, removable) => {
+      const item = node("li"), box = node("input"), label = taskLabel(text);
+      box.type = "checkbox"; box.id = `note-task-${checklist.children.length}`; box.checked = done; box.disabled = !!ws && !canEdit; label.htmlFor = box.id;
+      box.addEventListener("change", () => {
+        if (ws) noteChange("tasks", { task: key, done: box.checked });
+        else { if (box.checked) local.add(key); else local.delete(key); saveTasks(note.id, local); render(); }
+      });
+      item.classList.toggle("done", done); item.append(box, label);
+      if (done && who) item.append(node("span", "nt-role", personName(who)));
+      if (removable && canEdit) { const remove = node("button", "nt-text-button", "Remove"); remove.type = "button"; remove.addEventListener("click", () => noteChange("tasks", { remove: key })); item.append(remove); }
+      checklist.append(item);
+    };
+    for (const task of tasks) line(task, task, isDone(task), ws?.tasks?.[task]?.by, false);
+    for (const task of added) line(task.id, task.text, task.done === true, task.by, true);
+    taskPanel.append(checklist);
+  }
+  if (canEdit) {
+    const form = node("form", "nt-inline-form"), input = node("input"), add = node("button", "secondary", "Add action item");
+    input.id = "new-task"; input.maxLength = 500; input.required = true; input.placeholder = "Add an action item"; input.setAttribute("aria-label", "New action item"); add.type = "submit";
+    form.addEventListener("submit", (event) => { event.preventDefault(); noteChange("tasks", { add: input.value }); });
+    form.append(input, add); taskPanel.append(form);
+  }
+
+  if (ws) {
+    const mine = node("section", "nt-panel"); panels["My notes"] = mine;
+    const area = node("textarea", "nt-editor"); area.id = "my-notes"; area.value = typeof ws.my_notes === "string" ? ws.my_notes : ""; area.placeholder = "Write your own notes on this meeting."; area.setAttribute("aria-label", "My notes");
+    const save = node("button", "", "Save my notes"); save.type = "button"; save.addEventListener("click", () => noteChange("notes", { text: area.value }));
+    mine.append(node("p", "nt-read", "Only you can see these. They are not included when the note is shared."), area, save);
+  }
+
+  if (ws && ws.access !== "organization") { const askTab = node("section", "nt-panel"); panels.Ask = askTab; askTab.append(askPanel(note.id)); }
+  const transcript = node("section", "nt-panel"); panels.Transcript = transcript;
+  transcript.append(transcriptBlocks() || node("p", transcriptText ? "nt-plain" : "nt-empty",
+    transcriptText || (ws?.access === "organization" ? "The transcript is available to people invited to this note." : "Transcript unavailable.")));
+  const names = Object.keys(panels);
+  const applySearch = () => {
+    const needle = noteSearch.trim().toLocaleLowerCase(); let hits = 0;
+    for (const panel of Object.values(panels)) for (const block of panel.querySelectorAll("p:not(.nt-read):not(.nt-empty), li, h3")) {
+      const hit = !needle || block.textContent.toLocaleLowerCase().includes(needle);
+      block.hidden = !hit && block.tagName !== "H3"; if (hit && needle && !panel.hidden) hits++;
+    }
+    find.title = needle ? `${hits} matching passages in this tab` : "";
+  };
+  const show = (name) => {
+    noteTab = name.startsWith("Action items") ? "Action items" : name;
+    for (const [key, panel] of Object.entries(panels)) panel.hidden = key !== name;
+    for (const tab of tabs.children) { const on = tab.textContent === name; tab.classList.toggle("active", on); tab.setAttribute("aria-selected", String(on)); }
+    applySearch();
+  };
+  for (const name of names) { const tab = node("button", "nt-tab", name); tab.type = "button"; tab.setAttribute("role", "tab"); tab.addEventListener("click", () => show(name)); tabs.append(tab); }
+  find.addEventListener("input", () => { noteSearch = find.value; applySearch(); });
+  article.append(back, head, actions, ...(sharing ? [sharing] : []), bar, ...Object.values(panels)); list.append(article);
+  show(names.find((name) => name === noteTab || (noteTab === "Action items" && name.startsWith("Action items"))) || "Summary");
+}
+async function loadUpcoming() {
+  if (publicSignup || !validUser(currentUser) || !organization?.meetingServiceURL) return;
+  const user = currentUser, uid = user.uid, number = ++upcomingLoadNumber;
+  upcomingLoading = !upcomingEvents.length;
+  try {
+    const token = await user.getIdToken();
+    const response = await fetch(organization.meetingServiceURL + "/calendar/meetings", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+    if (!response.ok) throw new Error();
+    const data = await response.json();
+    if (number !== upcomingLoadNumber || currentUser?.uid !== uid) return;
+    upcomingEvents = (Array.isArray(data.meetings) ? data.meetings : []).filter((e) => e && typeof e.title === "string"
+      && !Number.isNaN(Date.parse(e.start)) && !Number.isNaN(Date.parse(e.end)) && typeof e.status === "string");
+  } catch { if (number === upcomingLoadNumber && currentUser?.uid === uid) upcomingEvents = []; }
+  if (number === upcomingLoadNumber && currentUser?.uid === uid) { upcomingLoading = false; upcomingLoaded = true; if (isMeetings() && !selectedNote()) render(); }
 }
 async function loadNote() {
-  const id = selectedNote(); if (!id || !validUser(currentUser)) return;
+  const id = selectedNote(); if (publicSignup || !id || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++noteLoadNumber;
-  note = null; noteError = ""; noteLoading = true; render();
+  note = null; noteError = ""; noteLoading = true; noteSearch = ""; editingSummary = false; sharingOpen = false; invitationNote = ""; rewriteBusy = false;
+  if (askState.scope) askState = { question: "", answer: null, citations: [], busy: false, error: "", scope: null };
+  render();
   const current = () => number === noteLoadNumber && currentUser?.uid === uid && auth.currentUser?.uid === uid && selectedNote() === id;
   try {
     const token = await user.getIdToken(); if (!current()) return;
@@ -366,7 +1191,7 @@ async function loadNote() {
   } catch { if (current()) { noteLoading = false; noteError = "Couldn't load meeting notes. Check your connection and click Refresh."; render(); } }
 }
 async function loadParticipantMeetings() {
-  if (!validUser(currentUser)) return;
+  if (publicSignup || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++participantLoadNumber;
   participantLoading = true; participantError = ""; participantMeetings = []; render();
   const current = () => number === participantLoadNumber && currentUser?.uid === uid && auth.currentUser?.uid === uid;
@@ -385,6 +1210,18 @@ async function loadParticipantMeetings() {
       if (cursor !== null) seen.add(cursor);
     } while (cursor !== null);
     participantMeetings = [...results.values()]; participantLoading = false; render();
+    try {
+      const response = await fetch(organization.deliveryServiceURL + "/delivery/folders", { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+      const data = response.ok ? await response.json() : null;
+      if (current() && Array.isArray(data?.folders)) { noteFolders = data.folders.filter((folder) => folder && typeof folder.id === "string" && typeof folder.name === "string"); render(); }
+      const [shared, prompts] = await Promise.all(["/delivery/shared-folders", "/delivery/prompts"].map((path) =>
+        fetch(organization.deliveryServiceURL + path, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)));
+      if (current()) {
+        if (Array.isArray(shared?.folders)) sharedFolders = shared.folders;
+        if (prompts && Array.isArray(prompts.mine) && Array.isArray(prompts.team)) savedPrompts = prompts;
+        render();
+      }
+    } catch { /* folders are optional; the list works without them */ }
   } catch { if (current()) { participantLoading = false; participantError = "Couldn't load participant notes. Check your connection and click Refresh."; render(); } }
 }
 function validNotionURL(value) {
@@ -395,7 +1232,7 @@ function validNotionURL(value) {
   } catch { return null; }
 }
 async function loadMeetings() {
-  if (!validUser(currentUser)) return;
+  if (publicSignup || !validUser(currentUser)) return;
   const user = currentUser, uid = user.uid, number = ++meetingLoadNumber;
   meetingError = ""; meetingLoading = true;
   if (isMeetings()) renderMeetings();
@@ -489,14 +1326,13 @@ el("folder-form").addEventListener("submit", async (event) => {
 });
 el("refresh").addEventListener("click", () => {
   if (selectedNote()) loadNote();
-  else if (isMeetings()) { loadMeetings(); loadParticipantMeetings(); }
+  else if (isMeetings()) { loadMeetings(); loadParticipantMeetings(); loadUpcoming(); }
   else refresh();
 });
 el("sign-in").addEventListener("click", async () => {
   el("sign-in").disabled = true;
   try {
-    const provider = new am.GoogleAuthProvider(); provider.setCustomParameters({ hd: DOMAIN.slice(1), prompt: "select_account" });
-    await am.signInWithPopup(auth, provider);
+    await am.signInWithPopup(auth, googleSignInProvider(am));
   } catch (e) { message("Sign-in didn't finish. " + e.message, true); }
   finally { el("sign-in").disabled = false; }
 });
@@ -507,22 +1343,31 @@ try {
   ({ auth, am } = session); fs = firestore;
   db = fs.getFirestore(auth.app, CLOUD_CONFIG.firestoreDatabase);
   if (EMU) fs.connectFirestoreEmulator(db, "127.0.0.1", 8080);
-  am.onAuthStateChanged(auth, (user) => {
+  observeReelAccount(am, auth, (user, candidate) => {
     ++accountNumber;
+    if (calendar) { calendar.dispose(); calendar = null; }
+    el("meeting-calendar-panel").hidden = true;
     closeSharedTitleEditor();
     openManagement.clear();
     stopListening();
     closePlayer();
-    currentUser = user; ++loadNumber; ++meetingLoadNumber; ++participantLoadNumber; ++noteLoadNumber; participantMeetings = []; participantLoading = false; participantError = ""; note = null; noteLoading = false; noteError = ""; loadError = ""; meetingError = ""; entries = []; meetings = []; meetingShareIDs = new Set(); meetingLoading = false; recent = validUser(user) ? readRecent(user.uid) : []; el("recordings").replaceChildren();
+    currentUser = user; ++loadNumber; ++meetingLoadNumber; ++upcomingLoadNumber; upcomingEvents = []; upcomingLoading = false; upcomingLoaded = false; showAllUpcoming = false; pastPerson = ""; pastRange = "any"; ++participantLoadNumber; ++noteLoadNumber; participantMeetings = []; participantLoading = false; participantError = ""; note = null; noteLoading = false; noteError = ""; loadError = ""; meetingError = ""; entries = []; meetings = []; meetingShareIDs = new Set(); meetingLoading = false; recent = validUser(user) ? readRecent(user.uid) : []; el("recordings").replaceChildren();
     preferences = new Map(); folders = []; organizationReady = false; organizationError = ""; organizationMessage = ""; pendingOrganization.clear(); creatingFolder = false;
     el("folder-form").hidden = true; el("folder-name").value = ""; el("folder-form").querySelector('button[type="submit"]').disabled = false; renderFolders(); organizationStatus();
-    if (selectedFolder()) { el("view-title").textContent = "Folder"; el("video-tab").textContent = "Folder"; document.title = "Folder · Reel"; }
-    setLoading(validUser(user));
-    el("result-count").textContent = isMeetings() ? "0 meetings" : "0 videos"; el("search").value = "";
+    if (selectedFolder()) { el("view-title").textContent = "Folder"; el("video-tab").textContent = "Folder"; document.title = `Folder · ${productName()}`; }
     const allowed = validUser(user);
-    el("sign-in").hidden = !!user; el("sign-out").hidden = !user; el("refresh").hidden = !allowed; el("refresh").disabled = false;
+    rejectedAccount = !!candidate && !allowed;
+    setLoading(allowed);
+    el("result-count").parentElement.hidden = !allowed;
+    el("result-count").textContent = allowed ? "Loading…" : ""; el("search").value = "";
+    el("sign-in").hidden = !!candidate; el("sign-out").hidden = !candidate; el("refresh").hidden = !allowed; el("refresh").disabled = false;
     el("search").disabled = !allowed; el("sort").disabled = !allowed; el("account").textContent = user?.email || "";
-    if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else loadParticipantMeetings(); }
-    else message(user ? `Use a verified ${DOMAIN} Google account to view your library. Sign out to choose another account.` : isMeetings() ? `Sign in with your ${DOMAIN} Google account to see meeting details. Meetings recorded while signed out stay on that device and won't sync to this portal.` : `Sign in with your ${DOMAIN} Google account to see your recordings.`);
+    if (allowed) { refresh(); loadMeetings(); if (selectedNote()) loadNote(); else { loadParticipantMeetings(); if (isMeetings()) loadUpcoming(); } if (isCalendar()) updateView(); }
+    else render();
   });
-} catch (e) { setLoading(false); el("result-count").textContent = "Unavailable"; message("Couldn't connect to Reel. Reload this page to try again. " + e.message, true); }
+} catch (e) {
+  setLoading(false);
+  el("result-count").parentElement.hidden = true;
+  loadError = "Couldn't connect to Reel. Reload this page to try again. " + e.message;
+  render();
+}

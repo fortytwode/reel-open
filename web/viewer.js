@@ -98,7 +98,32 @@ $("copy-link").addEventListener("click", function () {
     $("share-message").hidden = false;
   });
 });
-$("speed").addEventListener("change", function () { player.playbackRate = parseFloat(this.value); });
+const speed = $("speed"), speedToggle = $("speed-toggle");
+const speedOptions = Array.from(speed.querySelectorAll("button"));
+for (const option of speedOptions) {
+  option.addEventListener("click", () => {
+    player.playbackRate = Number(option.value);
+    speed.open = false;
+    speedToggle.focus({ preventScroll: true });
+  });
+}
+player.addEventListener("ratechange", () => {
+  const label = player.playbackRate + "×";
+  $("speed-rate").textContent = label;
+  speedToggle.setAttribute("aria-label", "Playback speed: " + label);
+  for (const option of speedOptions) {
+    option.setAttribute("aria-pressed", String(Number(option.value) === player.playbackRate));
+  }
+});
+speed.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !speed.open) return;
+  event.preventDefault();
+  speed.open = false;
+  speedToggle.focus({ preventScroll: true });
+});
+document.addEventListener("click", (event) => {
+  if (!speed.contains(event.target)) speed.open = false;
+});
 $("captions-toggle").addEventListener("click", function () {
   const track = $("captions-track").track;
   if (!track || !S.captionCueCount) return;
@@ -549,8 +574,10 @@ async function refresh() {
   schedule(5000);
 }
 function applyMeta(meta) {
+  const firstMeta = !S.meta;
   S.meta = meta;
   renderHead(meta); renderSummary(meta);
+  if (firstMeta && !$("summary-card").hidden) setTab("overview");
   const st = meta.status === "uploading" ? "processing" : meta.status;
   if (st === "recording") { showStatus("This recording is still in progress. It will play here as soon as it ends."); setSegmentsMessage("No transcript yet."); return schedule(3000); }
   if (st === "processing") { showStatus("Finishing upload…"); setSegmentsMessage("No transcript yet."); return schedule(3000); }
@@ -766,7 +793,12 @@ function initComments() {
       return { id: d.id, text: x.text, t: x.t, uid: x.uid, name: x.name, createdAt: x.createdAt };
     });
     renderComments();
-  }, function (err) { console.warn("reel: comments unavailable", err && err.code); $("tab-comments").hidden = true; $("comment-shortcut").hidden = true; setTab("transcript"); });
+  }, function (err) {
+    console.warn("reel: comments unavailable", err && err.code);
+    const tab = $("tab-comments");
+    tab.hidden = true; $("comment-shortcut").hidden = true;
+    if (tab.getAttribute("aria-selected") === "true") setTab("transcript");
+  });
   setInterval(renderComments, 60000);
   $("comment-form").addEventListener("submit", async function (e) {
     e.preventDefault();

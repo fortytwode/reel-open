@@ -207,3 +207,163 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { 
 .meeting-note h2 { margin: 24px 0 8px; }
 .meeting-note h3 { margin: 28px 0 10px; }
 .meeting-note-text { white-space: pre-wrap; line-height: 1.6; }
+
+/* Two products, one shell: each page shows only its own navigation. */
+html[data-product="notetaker"] :is(#nav-library,#nav-recent,#nav-pinned,#nav-archive,#folder-section,.record-options,#library-footnote) { display: none !important; }
+html:not([data-product="notetaker"]) :is(#nav-meetings,#nav-calendar,#nav-tasks,#nav-connect) { display: none !important; }
+html[data-product="notetaker"] .brand-mark { color: #1f8a70; text-shadow: 0 0 0 #1f8a70; }
+html[data-product="notetaker"] #nav-calendar { margin-left: 0; min-height: 0; color: inherit; font-size: inherit; }
+.other-product { display: block; margin: 0 0 8px; padding: 0 9px; color: #7b818a; font-size: 11px; text-decoration: none; }
+.other-product:hover { color: #252a31; text-decoration: underline; }
+.other-product small { display: none; }
+/* Meetings are not a library: Notetaker drops the library framing. */
+html[data-product="notetaker"] :is(.workspace,.personal-library) { display: none !important; }
+html[data-product="notetaker"] .library-label { margin-top: 18px; }
+@media(max-width:620px) { .other-product { display: none; } }
+
+/* ---- Reel Notetaker: a reading surface, not a media grid ---- */
+html[data-product="notetaker"] :is(.toolbar .tabs,.sort-label,#meeting-description,.breadcrumb) { display: none !important; }
+html[data-product="notetaker"] .toolbar { justify-content: flex-end; border-bottom: 0; min-height: 0; margin: 6px 0 4px; }
+html[data-product="notetaker"] #meeting-actions .button { font-size: 12px; }
+html[data-product="notetaker"] .page-content { max-width: 980px; }
+.recordings.nt-home { display: block; }
+.nt-section { margin: 0 0 30px; }
+.nt-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 6px; }
+.nt-section-head h2 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.01em; color: #20242b; }
+.nt-link { color: #1f7a66; font-size: 12px; text-decoration: none; }
+.nt-link:hover { text-decoration: underline; }
+.nt-day { margin: 16px 0 4px; padding: 0 10px; color: #8a9099; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.nt-row { display: grid; grid-template-columns: 118px minmax(0,1fr) auto auto auto; align-items: center; gap: 14px; padding: 10px; border-radius: 9px; color: #252a31; text-decoration: none; }
+.nt-row.nt-past { grid-template-columns: 70px minmax(0,1fr) auto auto auto; }
+.nt-row:hover { background: #f4f6f5; }
+.nt-row + .nt-row { box-shadow: 0 -1px 0 #f0f1f3; }
+.nt-row:hover, .nt-row:hover + .nt-row { box-shadow: none; }
+.nt-time { color: #6f7680; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.nt-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.nt-main strong { overflow: hidden; font-size: 13.5px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.nt-preview { overflow: hidden; color: #7b818a; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.nt-length { color: #8a9099; font-size: 11.5px; white-space: nowrap; }
+.nt-people { display: flex; }
+.nt-avatar { display: grid; place-items: center; width: 24px; height: 24px; margin-left: -6px; border: 2px solid #fff; border-radius: 50%; background: #e3efeb; color: #1f6b5a; font-size: 9.5px; font-weight: 700; }
+.nt-avatar:first-child { margin-left: 0; }
+.nt-avatar.nt-more { background: #eef0f2; color: #6f7680; }
+.nt-chip { padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.nt-chip-on { background: #e3f3ee; color: #17705c; }
+.nt-chip-live { background: #fde8e6; color: #b3362d; }
+.nt-chip-off { background: #f0f1f3; color: #6f7680; }
+.nt-live { background: #fff8f7; }
+.nt-more-button { margin: 8px 10px 0; font-size: 12px; }
+.nt-empty { margin: 10px; color: #7b818a; font-size: 13px; }
+.nt-note { max-width: 760px; }
+.nt-note-head h2 { margin: 14px 0 6px; font-size: 26px; font-weight: 720; letter-spacing: -.02em; line-height: 1.2; overflow-wrap: anywhere; }
+.nt-meta { margin: 0 0 12px; color: #6f7680; font-size: 13px; }
+.nt-attendees { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; }
+.nt-person { padding: 3px 10px; border: 1px solid #e3e6e9; border-radius: 999px; color: #485059; font-size: 12px; }
+.nt-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+.nt-actions :is(button,.button) { font-size: 12px; }
+.nt-tabbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 20px; border-bottom: 1px solid #e8eaed; }
+.nt-tabs { display: flex; gap: 22px; }
+.nt-find { width: 190px; max-width: 45%; padding: 5px 9px; border: 1px solid #e3e6e9; border-radius: 7px; font: inherit; font-size: 12px; }
+.nt-tab { padding: 9px 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: #6f7680; font-size: 13px; font-weight: 600; cursor: pointer; }
+.nt-tab.active { border-color: #1f8a70; color: #20242b; }
+.nt-panel { font-size: 15px; line-height: 1.65; color: #2b3038; }
+.nt-panel h3 { margin: 24px 0 6px; font-size: 15px; font-weight: 700; }
+.nt-panel h3:first-child { margin-top: 0; }
+.nt-panel p { margin: 0 0 10px; }
+.nt-points { margin: 0 0 10px; padding-left: 20px; }
+.nt-points li { margin: 0 0 8px; }
+.nt-todo { margin: 0; padding: 0; list-style: none; }
+.nt-todo li { position: relative; margin: 0 0 8px; padding-left: 26px; }
+.nt-todo li::before { content: ""; position: absolute; left: 2px; top: .32em; width: 14px; height: 14px; border: 1.5px solid #b7bec6; border-radius: 4px; }
+.nt-turn { margin: 0 0 18px; }
+.nt-turn-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 3px; font-size: 13px; }
+.nt-stamp { color: #9aa0a8; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.nt-turn p { margin: 0 0 6px; }
+.nt-plain { white-space: pre-wrap; }
+@media(max-width:720px) {
+  .nt-row, .nt-row.nt-past { grid-template-columns: minmax(0,1fr) auto; row-gap: 4px; }
+  .nt-time { grid-column: 1 / -1; }
+  .nt-people, .nt-length { display: none; }
+}
+html[data-product="notetaker"][data-note] :is(.heading-row,.toolbar) { display: none !important; }
+.nt-timed { display: grid; grid-template-columns: 52px minmax(0,1fr); gap: 10px; margin: 0 0 12px; }
+.nt-timed .nt-stamp { padding-top: .35em; }
+.nt-now, .nt-soon { margin: 0 8px 0 0; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; }
+.nt-now { background: #d8382c; color: #fff; }
+.nt-soon { margin: 0 0 0 8px; background: #fff3d6; color: #8a5a00; }
+.nt-filters { display: flex; gap: 8px; }
+.nt-filter { max-width: 150px; padding: 4px 6px; border: 1px solid #e3e6e9; border-radius: 7px; background: #fff; color: #485059; font: inherit; font-size: 12px; }
+.nt-shared { margin: -8px 0 16px; color: #7b818a; font-size: 12px; }
+.nt-read { margin: 0 0 14px !important; color: #8a9099; font-size: 12px; }
+.nt-checklist { margin: 0; padding: 0; list-style: none; }
+.nt-checklist li { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 10px; }
+.nt-checklist input { width: 16px; height: 16px; margin-top: .3em; accent-color: #1f8a70; }
+.nt-checklist li.done label { color: #9aa0a8; text-decoration: line-through; }
+.nt-conflict { background: #fde6e3; color: #a8322a; }
+.nt-maybe { background: #e8ecf5; color: #3d4f7a; }
+.nt-done { background: #e3f3ee; color: #17705c; }
+.nt-filters { flex-wrap: wrap; justify-content: flex-end; }
+.nt-inline-form { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.nt-inline-form input { flex: 1 1 220px; min-width: 0; padding: 6px 9px; border: 1px solid #dfe3e6; border-radius: 7px; font: inherit; font-size: 13px; }
+.nt-banner { margin: 0 0 14px; padding: 8px 12px; border-radius: 8px; background: #eef3f1; color: #2f4a42; font-size: 12.5px; }
+.nt-share { margin: 0 0 18px; padding: 14px 16px; border: 1px solid #e3e6e9; border-radius: 10px; background: #fafbfa; }
+.nt-share h3 { margin: 0 0 10px; font-size: 14px; }
+.nt-share-list { margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.nt-share-list li { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid #eef0f2; }
+.nt-share-list li span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nt-role { color: #8a9099; font-size: 11.5px; white-space: nowrap; }
+.nt-visibility { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 12.5px; color: #485059; }
+.nt-visibility .nt-filter { max-width: none; }
+.nt-editor { display: block; width: 100%; min-height: 260px; margin: 0 0 10px; padding: 10px 12px; border: 1px solid #dfe3e6; border-radius: 8px; font: inherit; font-size: 14px; line-height: 1.55; resize: vertical; box-sizing: border-box; }
+.nt-text-button { padding: 0; border: 0; background: none; color: #1f7a66; font: inherit; font-size: 12px; cursor: pointer; }
+.nt-text-button:hover { text-decoration: underline; }
+.nt-checklist li .nt-text-button, .nt-checklist li .nt-role { margin-left: auto; }
+.nt-checklist label { flex: 1; min-width: 0; }
+.nt-actions .nt-filter { max-width: 170px; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-events { max-height: 520px; overflow-y: auto; border-top: 1px solid #eef0f2; }
+.nt-tasklist { margin: 4px 10px 6px; }
+.nt-day .nt-link { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 650; }
+.nt-row.nt-upcoming { grid-template-columns: 118px minmax(0,1fr) auto auto; }
+.nt-row-actions { display: flex; align-items: center; gap: 8px; }
+.nt-join { padding: 4px 12px; border: 0; border-radius: 999px; background: #1f8a70; color: #fff; font-size: 12px; font-weight: 650; cursor: pointer; }
+.nt-join:hover { background: #17705c; }
+.nt-join:disabled { opacity: .6; cursor: default; }
+.nt-ask { margin: 0 0 26px; padding: 14px 16px; border: 1px solid #e3e6e9; border-radius: 12px; background: #fbfcfb; }
+.nt-panel .nt-ask { margin: 0; }
+.nt-ask-form { display: flex; gap: 8px; }
+.nt-ask-form input { flex: 1; min-width: 0; padding: 8px 11px; border: 1px solid #dfe3e6; border-radius: 8px; font: inherit; font-size: 13.5px; }
+.nt-prompts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.nt-prompt { padding: 4px 10px; border: 1px solid #e3e6e9; border-radius: 999px; background: #fff; color: #485059; font-size: 12px; cursor: pointer; }
+.nt-prompt:hover { border-color: #1f8a70; color: #17705c; }
+.nt-answer { margin-top: 12px; font-size: 14px; line-height: 1.6; color: #2b3038; }
+.nt-answer p { margin: 0 0 8px; }
+.nt-answer li { margin: 0 0 6px 18px; }
+.nt-rewrite { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 16px; padding: 10px 12px; border-radius: 8px; background: #f6f8f7; }
+.nt-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: #485059; }
+.nt-share-list .nt-filter { max-width: 110px; }
+@media(max-width:720px) { .nt-row.nt-upcoming { grid-template-columns: minmax(0,1fr) auto; } .nt-ask-form { flex-wrap: wrap; } }
+.mc-recent { margin-top: 14px; }
+.mc-recent > summary { cursor: pointer; color: #485059; font-size: 13px; font-weight: 600; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-events { max-height: none; overflow: visible; border-top: 0; }
+.nt-saved-prompt { display: inline-flex; align-items: center; }
+.nt-prompt-saved { border-color: #b9dccf; background: #eef7f3; color: #17705c; }
+.nt-saved-prompt .nt-prompt-saved { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.nt-prompt-remove { padding: 4px 8px; border: 1px solid #b9dccf; border-left: 0; border-radius: 0 999px 999px 0; background: #eef7f3; color: #5c7a70; font-size: 12px; cursor: pointer; }
+.nt-saved-prompt .nt-prompt-saved:last-child { border-radius: 999px; }
+.nt-answer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 6px; }
+.nt-answer-actions .nt-inline-form { margin: 0; }
+.nt-connect { max-width: 760px; }
+.nt-lede { margin: 0 0 18px; font-size: 15px; line-height: 1.55; color: #2b3038; }
+.nt-connect h3 { margin: 20px 0 8px; font-size: 14px; }
+.nt-code { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 8px; }
+.nt-code pre { flex: 1; min-width: 0; margin: 0; padding: 10px 12px; overflow-x: auto; border-radius: 8px; background: #16201c; color: #d8efe6; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.nt-owner { display: inline-block; margin-right: 8px; padding: 1px 8px; border-radius: 999px; background: #e3f3ee; color: #17705c; font-size: 11.5px; font-weight: 650; vertical-align: 1px; }
+.nt-check { white-space: nowrap; }
+.nt-transcript > .nt-read { margin: 0 0 16px; }
+/* Calendar settings: one setting per row, so the consent sentence stays next to its box. */
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; margin: 12px 0; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls select { min-width: 260px; padding: 5px 8px; border: 1px solid #dfe3e6; border-radius: 7px; font: inherit; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls .mc-check { flex: 1 1 100%; display: flex; align-items: flex-start; gap: 8px; white-space: normal; color: #485059; font-size: 13px; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls button { flex: 0 0 auto; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-card { max-width: 760px; }
+html[data-product="notetaker"] #meeting-calendar-panel .mc-consent-controls .mc-check input { width: auto; min-width: 0; margin: 3px 0 0; flex: 0 0 auto; }
