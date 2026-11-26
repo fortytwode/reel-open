@@ -83,8 +83,10 @@ namespace ReelNative
         {
             using (File.Create(path)) { }
             var file = StorageFile.GetFileFromPathAsync(path).AsTask().GetAwaiter().GetResult();
+            // Auto has no source profile to copy for the generated color clip;
+            // give the encoder an explicit profile for a stable test fixture.
             var result = composition.RenderToFileAsync(file, MediaTrimmingPreference.Precise,
-                MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto)).AsTask().GetAwaiter().GetResult();
+                MediaEncodingProfile.CreateMp4(VideoEncodingQuality.HD720p)).AsTask().GetAwaiter().GetResult();
             Assert(result == TranscodeFailureReason.None && new FileInfo(path).Length > 0, "Could not render the synthetic MP4.");
         }
 
