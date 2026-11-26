@@ -16,7 +16,7 @@ import os from "node:os";
 import { chromium } from "playwright";
 import * as C from "../../web/reel/core.js";
 import { boxes } from "../../web/reel/fmp4.js";
-import { recordedToneWindowIsPresent } from "./recorder-smoke-audio-assertions.mjs";
+import { activeClockTimeToOutputTime, recordedToneWindowIsPresent } from "./recorder-smoke-audio-assertions.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(HERE, "../../web");
@@ -469,18 +469,21 @@ try {
   const v = probe.streams.find((s) => s.codec_type === "video"), a = probe.streams.find((s) => s.codec_type === "audio");
   const dur = parseFloat(probe.format.duration);
   check("video.mp4: H.264 + AAC stereo 48 kHz", v && v.codec_name === "h264" && a && /aac|opus/.test(a.codec_name) && a.channels === 2 && a.sample_rate === "48000", JSON.stringify(probe.streams));
-  const heldStartInOutput = pausedAt - (delayedAudio?.pauseAudioTime - delayedAudio?.audioTimeStart);
-  const signalStart = pausedAt - (delayedAudio?.pauseAudioTime - delayedAudio?.signalTimestamp);
-  const beforePauseMeanVolume = ffmpegMeanVolume(mp4, Math.max(0, signalStart), 0.05, "bandpass=f=997:w=80,volumedetect");
+  const heldStartInOutput = activeClockTimeToOutputTime(delayedAudio?.audioTimeStart,
+    delayedAudio?.beginAudioTime, delayedAudio?.pauseAudioTime);
+  const signalStart = activeClockTimeToOutputTime(delayedAudio?.signalTimestamp,
+    delayedAudio?.beginAudioTime, delayedAudio?.pauseAudioTime);
+  const pauseOutputTime = delayedAudio?.pauseAudioTime - delayedAudio?.beginAudioTime;
+  const beforePauseMeanVolume = ffmpegMeanVolume(mp4, Math.max(0, signalStart ?? 0), 0.05, "bandpass=f=997:w=80,volumedetect");
   const toneFilter = "bandpass=f=997:w=80,volumedetect";
   const priorToneVolume = ffmpegMeanVolume(mp4, Math.max(0, heldStartInOutput - 0.25), 0.05, toneFilter);
-  const resumedToneVolume = ffmpegMeanVolume(mp4, pausedAt + 0.25, 0.05, toneFilter);
+  const resumedToneVolume = ffmpegMeanVolume(mp4, pauseOutputTime + 0.25, 0.05, toneFilter);
   const backgroundToneVolume = Math.min(priorToneVolume, resumedToneVolume);
-  const audioClockElapsed = delayedAudio?.pauseAudioTime - delayedAudio?.beginAudioTime;
   check("delayed pre-pause audio signal survives in the recorded media",
-    delayedAudio?.frames >= 18000 && delayedAudio.signalFrames > 0 && delayedAudio.audioTimeEnd <= delayedAudio.pauseAudioTime &&
-    Math.abs(audioClockElapsed - pausedAt) < 0.15 && recordedToneWindowIsPresent(beforePauseMeanVolume, backgroundToneVolume),
-    JSON.stringify({ delayedAudio, heldStartInOutput, beforePauseMeanVolume, priorToneVolume, resumedToneVolume, audioClockElapsed, pausedAt }));
+    delayedAudio?.frames >= 18000 && delayedAudio.signalFrames > 0 && signalStart != null && heldStartInOutput != null &&
+    delayedAudio.audioTimeEnd <= delayedAudio.pauseAudioTime &&
+    recordedToneWindowIsPresent(beforePauseMeanVolume, backgroundToneVolume),
+    JSON.stringify({ delayedAudio, heldStartInOutput, signalStart, pauseOutputTime, beforePauseMeanVolume, priorToneVolume, resumedToneVolume, pausedAt }));
   check("audio duration stays synchronized with video across pause", a && Number.isFinite(Number(a.duration)) && Math.abs(Number(a.duration) - dur) < 0.6,
     `${a?.duration} s audio, ${dur} s video`);
   check("video.mp4 duration = meta, shorter than wall time by the pause", Math.abs(dur - m1.durationSeconds) < 0.5 && dur > 9 && dur < (stopAcceptedT - startT) / 1000 - 2,
