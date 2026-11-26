@@ -104,21 +104,26 @@ test("meeting share copies only after the complete upload succeeds", async () =>
   assert.equal(copies[0].status, "uploaded");
 });
 
-function meetingRows() {
+function publicationStore() {
   // Queue IndexedDB requests as tasks so read/conditional-put uses one active transaction.
   const rows = new Map();
-  const db = { transaction() {
+  const files = new Map();
+  const db = { transaction(storeName) {
+    const values = storeName === "files" ? files : rows;
     const tx = { objectStore: () => ({
       get(id) {
         const request = {};
         setImmediate(() => {
-          request.result = structuredClone(rows.get(id));
+          request.result = structuredClone(values.get(id));
           request.onsuccess();
           setImmediate(() => tx.oncomplete?.());
         });
         return request;
       },
-      put(row) { rows.set(row.id, structuredClone(row)); },
+      put(value, id = value.id) {
+        values.set(id, structuredClone(value));
+        if (storeName === "files") setImmediate(() => tx.oncomplete?.());
+      },
     }) };
     return tx;
   } };
@@ -130,8 +135,88 @@ function meetingRows() {
 }
 
 const originalIndexedDB = globalThis.indexedDB;
-test.before(() => { globalThis.indexedDB = meetingRows(); });
+test.before(() => { globalThis.indexedDB = publicationStore(); });
 test.after(() => { globalThis.indexedDB = originalIndexedDB; });
+
+test("ordinary publication attributes a new copy and leaves the legacy local recording intact", async (t) => {
+  const uid = "synthetic-owner";
+  const nonce = "53".repeat(16);
+  const ownerShare = "r2fbd5074190d44167d5d02e71662a28cbd16b3e";
+  const legacy = C.newRecording({ id: "legacy-local", shareID: "legacyfixture00000001", title: "Synthetic clip",
+    createdAt: now, upload: "uploaded" });
+  const bytes = new Uint8Array([10, 20, 30]);
+  const library = new Library();
+  await library.update(legacy);
+  await store.putFile(legacy.id, C.File.video, bytes);
+  const original = await store.getRow(legacy.id);
+
+  // A new local copy is supplied explicitly. Publishing the copy never claims the legacy share.
+  const copy = C.newRecording({ id: "copy-local", shareID: "copyplaceholder00001", title: legacy.title, createdAt: now });
+  copy.recordingNonce = nonce;
+  await library.update(copy);
+  await store.putFile(copy.id, C.File.video, await store.getFile(legacy.id, C.File.video));
+
+  const cfg = { ...C.CLOUD, storageOrigin: "https://storage.invalid", firestoreOrigin: "https://firestore.invalid",
+    bucket: "fixture-bucket", projectID: "fixture", firestoreDatabase: "(default)" };
+  const requests = [];
+  const fetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = fetch; });
+  globalThis.fetch = async (input, request) => {
+    const url = new URL(input);
+    requests.push({ url, ...request });
+    if (request.headers["X-Goog-Upload-Command"] === "start") {
+      return new Response(null, { headers: { "X-Goog-Upload-URL": "https://storage.invalid/resume-copy" } });
+    }
+    return new Response("{}");
+  };
+  const publisher = new Publisher({ library, cfg, auth: { session: async () => ({
+    uid, displayName: "Synthetic publisher", getIdToken: async () => "synthetic-token",
+  }) }, settings: () => ({}), ui: { toast() {} } });
+  await publisher.publish(copy);
+
+  const published = C.recordingFromJSON((await store.getRow(copy.id)).json);
+  assert.equal(published.upload, "uploaded");
+  assert.equal(published.shareID, ownerShare);
+  assert.equal(published.recordingOwnerUID, uid);
+  assert.deepEqual(await store.getRow(legacy.id), original);
+  assert.deepEqual(new Uint8Array(await (await store.getFile(legacy.id, C.File.video)).arrayBuffer()), bytes);
+  assert.ok(requests.every(({ url, method }) => !decodeURIComponent(url.href).includes(legacy.shareID) && method !== "DELETE"));
+
+  const manifestWrites = requests.filter(({ url }) => url.searchParams.get("name") === `reel/v/${ownerShare}/meta.json`);
+  assert.equal(manifestWrites.length, 2);
+  const manifests = manifestWrites.map(({ headers, body }) => {
+    assert.equal(headers.Authorization, "Firebase synthetic-token");
+    const boundary = headers["Content-Type"].split("boundary=")[1];
+    const [, metadata, manifest] = new TextDecoder().decode(body).split(`--${boundary}`);
+    assert.deepEqual(JSON.parse(metadata.split("\r\n\r\n")[1]).metadata, { ownerUid: uid, recordingNonce: nonce });
+    return JSON.parse(manifest.split("\r\n\r\n")[1]);
+  });
+  assert.deepEqual(manifests.map(({ id, status, title }) => [id, status, title]),
+    [[ownerShare, "processing", legacy.title], [ownerShare, "ready", legacy.title]]);
+  for (const manifest of manifests) {
+    assert.ok(!JSON.stringify(manifest).includes(uid));
+    assert.ok(!JSON.stringify(manifest).includes(nonce));
+  }
+  assert.deepEqual(manifests[1].playback, { hls: false, mp4: true });
+
+  const video = requests.find(({ url }) => url.searchParams.get("name") === `reel/v/${ownerShare}/video.mp4`);
+  assert.ok(video);
+  assert.deepEqual(JSON.parse(video.body).metadata, { ownerUid: uid, recordingNonce: nonce });
+  const chunk = requests.find(({ url }) => url.pathname === "/resume-copy");
+  assert.ok(chunk);
+  assert.deepEqual(chunk.body, bytes);
+  assert.equal(chunk.headers["X-Goog-Upload-Command"], "upload, finalize");
+  assert.ok(requests.indexOf(chunk) < requests.indexOf(manifestWrites[1]));
+
+  const room = requests.find(({ url }) => url.searchParams.get("documentId") === ownerShare);
+  assert.ok(room);
+  const roomFields = JSON.parse(room.body).fields;
+  assert.equal(roomFields.ownerUid.stringValue, uid);
+  assert.equal(roomFields.recordingNonce.stringValue, nonce);
+  const entry = requests.find(({ url }) => url.pathname.endsWith(`/users/${uid}/recordings/${ownerShare}`));
+  assert.ok(entry);
+  assert.equal(JSON.parse(entry.body).fields.id.stringValue, ownerShare);
+});
 
 test("meeting share uses the confirmed account and checks ownership in the persisted row", async () => {
   const original = meetingRecording("localOnly");
