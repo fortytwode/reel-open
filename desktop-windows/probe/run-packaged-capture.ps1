@@ -20,7 +20,9 @@ foreach ($path in @($packageJsonPath, $exe, $buildInfoPath)) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Extracted package is missing $path" }
 }
 $buildInfo = Get-Content -LiteralPath $buildInfoPath -Raw | ConvertFrom-Json
-if ($buildInfo.architecture -ne $ExpectedArchitecture -or $buildInfo.electron -ne '45.2.3') {
+$buildArchitecture = $buildInfo.PSObject.Properties['architecture'].Value
+$buildElectron = $buildInfo.PSObject.Properties['electron'].Value
+if ($buildArchitecture -ne $ExpectedArchitecture -or $buildElectron -ne '45.2.3') {
   throw "Extracted runtime mismatch: expected Electron 45.2.3 $ExpectedArchitecture."
 }
 $workerRelative = 'web/reel/encoder-worker.js'
@@ -109,7 +111,8 @@ if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
   throw "Packaged runtime exited $exitCode without writing a synthetic capture result."
 }
 $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-if ($result.electron -ne '45.2.3') { throw "Expected packaged Electron 45.2.3; got $($result.electron)." }
+$resultElectron = $result.PSObject.Properties['electron']?.Value
+if ($resultElectron -and $resultElectron -ne '45.2.3') { throw "Expected packaged Electron 45.2.3; got $resultElectron." }
 $endpointAvailable = $result.qaDiagnostics.defaultRenderEndpointAvailable
 if ($result.ok -eq $true) {
   if ($exitCode -ne 0) { throw "Packaged recorder returned success with exit code $exitCode." }
