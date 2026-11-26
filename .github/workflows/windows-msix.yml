@@ -14,7 +14,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: windows-2022, arch: x64 }
+          # Windows 11 provides App Installer / AppX deployment on hosted CI.
+          # The x64 package runs under Windows 11 ARM64's supported x64 emulation.
+          - { runner: windows-11-arm, arch: x64 }
           - { runner: windows-11-arm, arch: arm64 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45

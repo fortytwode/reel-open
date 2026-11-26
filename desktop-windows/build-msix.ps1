@@ -137,11 +137,11 @@ try {
     }
     $buildInfoPath = Join-Path $packageRoot 'build-info.json'
     $buildInfo = Get-Content -LiteralPath $buildInfoPath -Raw | ConvertFrom-Json
-    $buildInfo.distribution = 'MSIX App Installer package (requires trusted release signing)'
-    $buildInfo.msixVersion = $Version
-    $buildInfo.msixPublisher = $Publisher
-    $buildInfo.msixEntryPoints = $entryPoints
-    $buildInfo.msixManifestSha256 = (Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    $buildInfo | Add-Member -NotePropertyName distribution -NotePropertyValue 'MSIX App Installer package (requires trusted release signing)' -Force
+    $buildInfo | Add-Member -NotePropertyName msixVersion -NotePropertyValue $Version
+    $buildInfo | Add-Member -NotePropertyName msixPublisher -NotePropertyValue $Publisher
+    $buildInfo | Add-Member -NotePropertyName msixEntryPoints -NotePropertyValue $entryPoints
+    $buildInfo | Add-Member -NotePropertyName msixManifestSha256 -NotePropertyValue (Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText($buildInfoPath, ($buildInfo | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
 
     $makeAppx = Find-WindowsKitTool 'makeappx.exe'
