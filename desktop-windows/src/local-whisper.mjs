@@ -16,6 +16,8 @@ const MODEL_CDN_PATHS=new Set([
 ]);
 const MODEL_CDN_QUERY_KEYS=['Expires','Hash-Algorithm','Key-Pair-Id','Policy','Signature','X-Xet-Cas-Uid',
   'response-content-disposition','user_id','xip'].sort();
+const SAFE_PROGRESS_PHASES=new Set(['worker_message_sent','worker_started','model_loading','model_downloading',
+  'model_ready','inference','inference_complete','worker_failed','worker_dispatch_failed']);
 
 function isModelFileURLPath(pathname,prefix=MODEL_PATH){
   return pathname.startsWith(prefix)&&MODEL_FILES.has(pathname.slice(prefix.length));
@@ -60,14 +62,17 @@ export function localAIRequestAllowed(requestURL,method,localOrigin,allowedHubRe
 }
 
 /** Isolated renderer for local inference. It has no auth preload or access to meeting services. */
-export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRemoteModelRequest=()=>true}={}){
+export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRemoteModelRequest=()=>true,onDiagnostic=()=>{}}={}){
   check(typeof BrowserWindow==='function'&&ipcMain&&typeof origin==='string'&&typeof ownerID==='function'
-    &&typeof allowRemoteModelRequest==='function','Invalid local Whisper dependencies.');
+    &&typeof allowRemoteModelRequest==='function'&&typeof onDiagnostic==='function','Invalid local Whisper dependencies.');
   const parsedOrigin=new URL(origin);
   check(parsedOrigin.protocol==='http:'&&parsedOrigin.hostname==='127.0.0.1'&&parsedOrigin.pathname==='/'&&!parsedOrigin.username&&!parsedOrigin.password,
     'Local transcription must use its private loopback origin.');
   let window=null,loading=null,active=null,disposed=false;
   const pageURL=origin+'/local-ai/';
+  const diagnostic=(phase,progress)=>{
+    try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{})});}catch{}
+  };
   function currentWindow(event){return window&&!window.isDestroyed()&&event.sender===window.webContents&&event.senderFrame===window.webContents.mainFrame&&event.senderFrame?.url===pageURL;}
   function cancelActive(message='Local transcription was cancelled.'){
     const job=active;if(!job)return;
@@ -82,6 +87,10 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     else if(value.ok===true)job.reject(Error('Local transcription returned an invalid response.'));
     else job.reject(Error(typeof value.error==='string'?value.error.slice(0,500):'Local transcription failed.'));
   });
+  ipcMain.on('reel-local-ai:progress',(event,value)=>{
+    if(!currentWindow(event)||!active||value?.requestID!==active.requestID||!SAFE_PROGRESS_PHASES.has(value?.phase))return;
+    diagnostic(value.phase,value.progress);
+  });
   function createWindow(){
     if(window&&!window.isDestroyed())return Promise.resolve(window);
     if(loading)return loading;
@@ -89,6 +98,9 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       webPreferences:{preload:fileURLToPath(new URL('../local-ai/preload.cjs',import.meta.url)),sandbox:true,contextIsolation:true,nodeIntegration:false,
         partition:'persist:reel-local-ai',backgroundThrottling:false}});
     const contents=window.webContents;
+    contents.on('dom-ready',()=>diagnostic('renderer_dom_ready'));
+    contents.on('did-finish-load',()=>diagnostic('renderer_load_complete'));
+    contents.on('did-fail-load',()=>diagnostic('renderer_load_failed'));
     const session=contents.session,allowedHubRedirects=new Set();
     session.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
     session.setPermissionCheckHandler(()=>false);
@@ -112,9 +124,14 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     });
     session.webRequest.onBeforeRequest({urls:['<all_urls>']},(details,callback)=>{
       let allowed=false;
+      let remote=false;
       try{
+        remote=new URL(details.url).origin!==parsedOrigin.origin;
         allowed=localAIRequestAllowed(details.url,details.method,origin,allowedHubRedirects);
-        if(allowed&&new URL(details.url).origin!==parsedOrigin.origin)allowed=allowRemoteModelRequest()===true;
+        if(allowed&&remote){
+          allowed=allowRemoteModelRequest()===true;
+        }
+        if(remote)diagnostic(allowed?'model_network_allowed':'model_network_blocked');
       }catch{}
       callback({cancel:!allowed});
     });
@@ -122,7 +139,8 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     contents.on('will-navigate',event=>{if(contents.getURL()!==pageURL)event.preventDefault();});
     contents.on('will-redirect',event=>event.preventDefault());
     window.on('closed',()=>{window=null;cancelActive();});
-    loading=contents.loadURL(pageURL).then(()=>window).catch(cause=>{window?.destroy();window=null;throw Error(`Local transcription window could not start: ${cause.message}`);}).finally(()=>{loading=null;});
+    diagnostic('renderer_load_started');
+    loading=contents.loadURL(pageURL).then(()=>{diagnostic('renderer_ready');return window;}).catch(cause=>{diagnostic('renderer_load_failed');window?.destroy();window=null;throw Error(`Local transcription window could not start: ${cause.message}`);}).finally(()=>{loading=null;});
     return loading;
   }
   async function transcribe({ownerUserID,id,samples,language='en',signal}={}){
@@ -130,6 +148,7 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     check(samples instanceof Float32Array&&samples.length>0&&samples.length<=180*16_000,'Meeting audio has an invalid local inference format.');
     check(!active,'Local transcription is already running.');
     if(signal?.aborted)throw Object.assign(Error('Local transcription was cancelled.'),{name:'AbortError'});
+    diagnostic(window&&!window.isDestroyed()?'window_reused':'window_create_requested');
     const view=await createWindow();
     check(ownerUserID===ownerID()&&!disposed,'The meeting owner changed.');
     view.show();view.focus();
@@ -140,6 +159,7 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       active={requestID,ownerUserID,id,signal,abort,resolve:result=>{hide();resolve(result);},reject:error=>{hide();reject(error);}};
       signal?.addEventListener('abort',abort,{once:true});
       view.webContents.send('reel-local-ai:task',{type:'transcribe',requestID,samples,language});
+    diagnostic('task_sent');
     });
   }
   function dispose(){disposed=true;cancelActive('Local transcription stopped while Reel closed.');if(window&&!window.isDestroyed())window.destroy();window=null;}

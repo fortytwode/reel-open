@@ -18,7 +18,7 @@ class FakeWindow extends EventEmitter {
   hide(){}
   destroy(){this.destroyed=true;this.emit('closed');}
 }
-function setup({allowRemoteModelRequest}={}){const ipcMain=new EventEmitter();let owner='owner-a';const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin:'http://127.0.0.1:4321',ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
+function setup({allowRemoteModelRequest,onDiagnostic}={}){const ipcMain=new EventEmitter();let owner='owner-a';const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin:'http://127.0.0.1:4321',ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{}),...(onDiagnostic?{onDiagnostic}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
 const samples=new Float32Array([0,.1,-.1]);
 
 test('local inference network access is restricted to the pinned model and GET requests',()=>{
@@ -91,6 +91,23 @@ test('offline model denial is reinstalled after the isolated window is recreated
   const secondWindow=FakeWindow.last;
   f.complete({requestID:secondWindow.webContents.messages[0].value.requestID,ok:true,result:{text:'cached',chunks:[]}});
   await second;
+  f.bridge.dispose();
+});
+
+test('diagnostics accept only the current renderer request and bounded stage fields',async()=>{
+  const diagnostics=[];
+  const f=setup({onDiagnostic:value=>diagnostics.push(value)});
+  const operation=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  const window=FakeWindow.last,requestID=window.webContents.messages[0].value.requestID;
+  const event={sender:window.webContents,senderFrame:window.webContents.mainFrame};
+  f.ipcMain.emit('reel-local-ai:progress',event,{requestID,phase:'model_loading',progress:.4,transcript:'private'});
+  f.ipcMain.emit('reel-local-ai:progress',event,{requestID:'stale',phase:'model_loading',progress:.8});
+  f.ipcMain.emit('reel-local-ai:progress',event,{requestID,phase:'unknown_stage',progress:1});
+  assert.deepEqual(diagnostics.slice(-1),[{phase:'model_loading',progress:.4}]);
+  assert.ok(diagnostics.some(value=>value.phase==='renderer_load_started'));
+  f.complete({requestID,ok:true,result:{text:'ok',chunks:[]}});
+  await operation;
   f.bridge.dispose();
 });
 

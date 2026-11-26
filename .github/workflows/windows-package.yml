@@ -17,7 +17,7 @@ jobs:
           - { runner: windows-2022, arch: x64 }
           - { runner: windows-11-arm, arch: arm64 }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,6 +62,11 @@ jobs:
           $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
           ./desktop-windows/build-portable.ps1 -ElectronDist desktop-windows/probe/node_modules/electron/dist -ExpectedArchitecture $env:REEL_ARCH -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials -Version "$version-ci" -OutputZip $zip
           Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP/demo-package"
+      - name: Preflight extracted local Whisper assets
+        shell: pwsh
+        run: |
+          node desktop-windows/tests/local-ai-package-preflight.mjs "$env:RUNNER_TEMP/demo-package/resources/app"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify packaged local Whisper inference and offline cache
         shell: pwsh
         env:
@@ -71,6 +76,7 @@ jobs:
           if ($freeBytes -lt 4GB) { throw "Local Whisper smoke needs 4 GiB free for its pinned 1.1 GB model/cache; found $([math]::Round($freeBytes / 1GB, 2)) GiB." }
           Add-Type -AssemblyName System.Speech
           $audio = Join-Path $env:RUNNER_TEMP whisper-smoke.wav
+          $log = Join-Path $env:RUNNER_TEMP "whisper-smoke-$env:REEL_ARCH.log"
           $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
           $format = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
           $synth.SetOutputToWaveFile($audio, $format)
@@ -90,13 +96,34 @@ jobs:
             $env:REEL_WHISPER_SMOKE_AUDIO = $audio
             $env:REEL_WHISPER_SMOKE_ROOT = $appRoot
             $env:REEL_WHISPER_SMOKE_ARCH = $env:REEL_ARCH
-            $process = Start-Process -FilePath $electron -Wait -PassThru -NoNewWindow
+            $env:REEL_WHISPER_SMOKE_LOG = $log
+            $process = Start-Process -FilePath $electron -PassThru -NoNewWindow
+            if (-not $process.WaitForExit(65 * 60 * 1000)) {
+              if (-not $process.HasExited) { $process.Kill($true) }
+              throw 'Packaged local Whisper process exceeded its 65 minute outer bound.'
+            }
+            if (Test-Path $log) { Get-Content -LiteralPath $log }
+            $process.Refresh()
             if ($process.ExitCode) { throw "Packaged local Whisper inference/offline cache smoke exited with $($process.ExitCode)" }
           } finally {
             [IO.File]::WriteAllText($packagePath, $originalPackage, (New-Object Text.UTF8Encoding($false)))
             Remove-Item -LiteralPath $smoke -Force -ErrorAction SilentlyContinue
-            Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH -ErrorAction SilentlyContinue
+            Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_LOG -ErrorAction SilentlyContinue
           }
+      - name: Print packaged local Whisper diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "whisper-smoke-${{ matrix.arch }}.log"
+          if (Test-Path $log) { Get-Content -LiteralPath $log }
+      - name: Upload packaged local Whisper diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-whisper-${{ matrix.arch }}-diagnostics
+          path: ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: Launch the extracted app and verify first-run setup
         working-directory: firebase/tests
         shell: bash

@@ -17,7 +17,7 @@ function createRenderer({throwOnce=false}={}){
   const status={textContent:'',progressHidden:true,value:0};
   const progress={hidden:true,value:0};
   const workers=[];
-  const completions=[];
+  const completions=[],progressEvents=[];
   let taskHandler,resolveCompletion,shouldThrow=throwOnce;
   class BrowserWorker{
     constructor(){this.worker=new NodeWorker(workerSource,{eval:true});workers.push(this);this.worker.on('message',data=>this.onmessage?.({data}));this.worker.on('error',error=>this.onerror?.({message:error.message}));}
@@ -27,14 +27,14 @@ function createRenderer({throwOnce=false}={}){
     }
     terminate(){void this.worker.terminate();}
   }
-  const api={onTask(callback){taskHandler=callback;},complete(value){completions.push(value);resolveCompletion?.(value);}};
+  const api={onTask(callback){taskHandler=callback;},progress(value){progressEvents.push(value);},complete(value){completions.push(value);resolveCompletion?.(value);}};
   runInNewContext(source,{
     window:{reelLocalAI:api},
     document:{getElementById(id){return id==='status'?status:progress;}},
     Worker:BrowserWorker,Float32Array,ArrayBuffer,DOMException,
   });
   return{
-    status,progress,workers,completions,
+    status,progress,workers,completions,progressEvents,
     dispatch(task){const done=new Promise(resolve=>{resolveCompletion=resolve;});taskHandler(task);return done;},
     async close(){await Promise.all(workers.map(item=>item.worker.terminate()));},
   };
@@ -47,6 +47,7 @@ test('renderer transfers PCM ArrayBuffer to a real Worker and completes the job'
   assert.deepEqual(structuredClone(result),{requestID:'request-1',ok:true,result:{
     text:'worker received 3 PCM samples',chunks:[],language:'en',engine:'Whisper large-v3-turbo q8',
   }});
+  assert.ok(renderer.progressEvents.some(value=>value.phase==='worker_message_sent'));
   assert.equal(samples.buffer.byteLength,0,'Successful transfer detaches the renderer-side sample buffer.');
 });
 
