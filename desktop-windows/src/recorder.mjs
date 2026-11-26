@@ -165,15 +165,18 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     } catch (error) { capture.writer.failAudio?.(); throw error; }
   });
   async function initialize(capture, args) {
-    const writer = await store.begin({ ownerUserID: args.ownerUserID, title: args.meeting.title || 'Meeting',
-      createdAt: new Date().toISOString(), meeting: { attendees: args.meeting.attendeeEmails ?? [], calendar: args.meeting.calendar ?? null } });
+    const title = args.manual === true ? args.title : (args.meeting.title || 'Meeting');
+    const writer = await store.begin({ ownerUserID: args.ownerUserID, title,
+      createdAt: new Date().toISOString(), meeting: args.manual === true ? null
+        : { attendees: args.meeting.attendeeEmails ?? [], calendar: args.meeting.calendar ?? null } });
     capture.writer = writer;
     if (terminal(capture)) { await writer.abort(); return; }
     const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 } });
     if (terminal(capture)) return;
     const matches = sources.filter(source => {
       const match = /^window:(\d+):([01])$/.exec(source?.id ?? '');
-      return match && BigInt(match[1]) === BigInt(args.hwnd);
+      return match && BigInt(match[1]) === BigInt(args.hwnd)
+        && (args.manual !== true || String(source.name ?? '') === args.sourceName);
     });
     check(matches.length === 1, 'Expected one exact owned window capture source.');
     const window = capture.window = new BrowserWindow({ width: 400, height: 180, show: false,
@@ -215,8 +218,12 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
   function start(args = {}) {
     try {
       check(!current, 'A meeting recording is already active.');
-      check(typeof args.hwnd === 'string' && /^[1-9]\d{0,19}$/.test(args.hwnd) && Number.isSafeInteger(args.pid) && args.pid > 0
-        && typeof args.ownerUserID === 'string' && args.ownerUserID.length > 0 && args.meeting && typeof args.meeting === 'object'
+      check(typeof args.hwnd === 'string' && /^[1-9]\d{0,19}$/.test(args.hwnd)
+        && (args.manual === true ? args.pid === undefined && args.meeting === null && typeof args.title === 'string'
+          && args.title.trim().length > 0 && args.title.length <= 160 && typeof args.sourceName === 'string'
+          && args.sourceName.length <= 1024 : Number.isSafeInteger(args.pid) && args.pid > 0
+          && args.meeting && typeof args.meeting === 'object')
+        && typeof args.ownerUserID === 'string' && args.ownerUserID.length > 0
         && args.systemAudio === true && typeof args.microphone === 'boolean' && args.signal
         && typeof args.signal.addEventListener === 'function', 'Invalid meeting capture request');
       if (args.signal.aborted) throw abortError();

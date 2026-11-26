@@ -23,11 +23,15 @@ test('the dashboard can retry a saved recording through the restricted preload',
   await api.action('renameRecording', recording);
   await api.action('deleteRecording', recording);
   await api.action('exportTrimmedCopy', recording);
+  await api.action('listCaptureWindows', recording);
+  await api.action('startWindowRecording', recording);
+  await api.action('stopWindowRecording', recording);
   await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
   assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording],
     ['reel-desktop:action', 'updateMeetingShareAccess', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'revealRecording', recording], ['reel-desktop:action', 'copyTranscript', recording], ['reel-desktop:action', 'getTranscript', recording],
     ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording],
-    ['reel-desktop:action', 'exportTrimmedCopy', recording]]);
+    ['reel-desktop:action', 'exportTrimmedCopy', recording], ['reel-desktop:action', 'listCaptureWindows', recording],
+    ['reel-desktop:action', 'startWindowRecording', recording], ['reel-desktop:action', 'stopWindowRecording', recording]]);
 });
 
 test('transcript dialog labels the window without announcing the entire transcript as its description', async () => {

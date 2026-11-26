@@ -40,7 +40,9 @@ function fixture(options = {}) {
     origin: 'http://127.0.0.1:45123', defaultRenderEndpoint: options.defaultRenderEndpoint, onFailure: error => failures.push(error),
     onSourceEnded: () => { sourceEnds.push('ended'); return options.onSourceEnded?.(); } });
   const controller = new AbortController();
-  const start = recorder.start({ ...args(controller.signal), microphone: options.microphone === true }); start.catch(() => {});
+  const requestArgs = options.requestArgs ? options.requestArgs(controller.signal)
+    : { ...args(controller.signal), microphone: options.microphone === true };
+  const start = recorder.start(requestArgs); start.catch(() => {});
   const invoke = async (channel, message, event) => {
     const window = windows[0];
     return handlers.get(channel)(event ?? { sender: window.webContents, senderFrame: window.webContents.mainFrame },
@@ -54,6 +56,17 @@ function fixture(options = {}) {
   return { recorder, windows, calls, failures, sourceEnds, writer, start, controller, invoke, status, packet, ready, init, fragment };
 }
 async function running(f) { await settle(); await f.ready(); await f.init(); await f.fragment(1); return f.start; }
+
+test('manual window captures save locally without creating a transcript processing job',async()=>{
+  const f=fixture({sources:[{id:'window:123:0',name:'Chrome'}],requestArgs:signal=>({hwnd:'123',manual:true,title:'Chrome',sourceName:'Chrome',meeting:null,ownerUserID:'owner',
+    systemAudio:true,microphone:false,signal})});
+  await settle();
+  const begin=f.calls.find(call=>call[0]==='begin')[1];
+  assert.equal(begin.title,'Chrome');assert.equal(begin.meeting,null);
+  const handle=await running(f), stop=f.recorder.stop(handle);
+  await f.status({type:'done',duration:4,segments:1});
+  await stop;
+});
 
 test('selects exact HWND and starts only after AAC readiness and a durable first fragment', async () => {
   const fragmentGate = deferred(), f = fixture({ fragmentGate });

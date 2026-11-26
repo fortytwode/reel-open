@@ -12,6 +12,7 @@ import {createMeetingCoordinator} from './src/meeting-coordinator.mjs';
 import {createNativeBridge} from './src/native-bridge.mjs';
 import {createLocalRecordingStore} from './src/local-recordings.mjs';
 import {createWindowsRecorder} from './src/recorder.mjs';
+import {createManualWindowCapture} from './src/manual-window-capture.mjs';
 import {createCompanionStartup,createDesktopService,desktopBrowserAppArguments,desktopLaunchAction,desktopProductURL} from './src/desktop-service.mjs';
 import {createMeetingProcessor} from './src/meeting-processing.mjs';
 import {createLocalWhisper} from './src/local-whisper.mjs';
@@ -272,7 +273,14 @@ async function run({triggerOnly=false,triggerToken=null}={}) {
     onCompleted:({ownerUserID,recording})=>{ if (!shutdown && auth?.getProfile()?.userID===ownerUserID && store.getProcessing({ownerUserID,id:recording.id})?.phase==='pending') void processor.process({ownerUserID,id:recording.id}).catch(()=>{}); },
     onFailure:()=>{void service?.action('stopRecording').catch(()=>{});},
     onSourceEnded:()=>service?.action('stopRecording')});
-  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,reminderScheduler:reminders,discover:discoverGoogleMeetings,
+  const manualCapture=auth ? createManualWindowCapture({desktopCapturer,recorder,
+    getProfile:()=>auth.getProfile(),
+    getExcludedWindowHandles:()=>BrowserWindow.getAllWindows().flatMap(item=>{
+      try { const nativeHandle=item.getNativeWindowHandle();return nativeHandle.length>=8?[nativeHandle.readBigUInt64LE().toString()]:[]; }
+      catch { return []; }
+    }),
+    onState:()=>{if(window && !window.isDestroyed() && service) window.webContents.send('reel-desktop:state',service.state());}}) : null;
+  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,reminderScheduler:reminders,manualCapture,discover:discoverGoogleMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
     openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },

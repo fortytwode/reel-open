@@ -63,7 +63,7 @@ test('MSIX product launch arguments select the configured Recorder and Notetaker
   assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
 });
 
-function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler, exportTrimmedCopy } = {}) {
+function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler, exportTrimmedCopy, manualCapture } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
   const settings = new Map(), recordings = [], calls = [], writes = [], snapshots = [], listeners = new Set();
@@ -76,7 +76,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting, reminderSche
   store.rename=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');const item=recordings.find(recording=>recording.id===args.id);if(!item)throw Error('unavailable');item.title=args.title.trim();};
   store.deleteRecording=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');if(args.localOnlyConfirmed!==true)throw Error('confirm local only');const index=recordings.findIndex(recording=>recording.id===args.id);if(index<0)throw Error('unavailable');recordings.splice(index,1);};
   const service = createDesktopService({org, auth, store, fetch:async () => Response.json({events:[]}),
-    reminderScheduler,
+    reminderScheduler, manualCapture,
     discover: discover ?? (async ({auth}) => ({ ownerUserID: auth.getProfile().userID, calendars: [{id:'cal',title:'Work'}], meetings: [
       { id:'one', title:'QA', start:'2026-11-06T15:00:00Z',end:'2026-11-06T16:00:00Z',platform:'google_meet',joinURL:'https://meet.google.com/aaa-bbbb-ccc',attendeeEmails:['private@example.com'] } ] })),
     createCoordinator(options) { coordinatorOptions = options; coordinator = realCoordinator ? createMeetingCoordinator({ ...options,
@@ -122,6 +122,51 @@ test('transcript viewer returns only completed text for the active owner and opa
   await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a',path:'/tmp/private.txt'}),/transcript is unavailable/i);
   f.store.getProcessing=()=>({transcriptComplete:false,text:'Partial'});
   await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a'}),/transcript is unavailable/i);
+});
+
+test('manual capture service actions remain owner-bound and validate picker payloads', async()=>{
+  const calls=[];let value={phase:'idle',sources:[]},active=false;
+  const manualCapture={state:()=>value,isActive:()=>active,
+    list:async owner=>{calls.push(['list',owner]);value={phase:'idle',ownerUserID:owner,sources:[{id:'opaque',title:'Chrome'}]};},
+    start:async args=>{calls.push(['start',args]);active=true;value={phase:'capturing',ownerUserID:args.ownerUserID,title:'Chrome'};},
+    stop:async owner=>{calls.push(['stop',owner]);active=false;value={phase:'completed',ownerUserID:owner};},clearCatalog(){}};
+  const f=fixture({manualCapture});
+  await f.service.action('listCaptureWindows',{expectedOwnerUserID:'owner-a'});
+  f.status({phase:'capturing'});
+  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/current meeting recording/i);
+  f.status({phase:'idle'});
+  await f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true});
+  assert.equal(f.service.state().manualCapture.phase,'capturing');
+  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true,hwnd:'123'}),/invalid window recording/i);
+  f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
+  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/account changed/i);
+  assert.equal(f.service.state().manualCapture.phase,'idle','Another account must not see the previous owner capture state.');
+  assert.deepEqual(calls,[['list','owner-a'],['start',{ownerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}],['stop','owner-a']]);
+});
+
+test('manual capture cannot overlap auto-join or an explicit meeting join',async()=>{
+  let active=false,starts=0;
+  const manualCapture={state:()=>({phase:active?'capturing':'idle'}),isActive:()=>active,
+    list:async()=>{},start:async()=>{starts++;active=true;},stop:async()=>{active=false;},dispose:async()=>{active=false;},clearCatalog(){}};
+  const f=fixture({manualCapture});
+  const settings={ownerUserID:'owner-a',expectedOwnerUserID:'owner-a',autoJoin:true,participantConsent:true,systemAudioConsent:true,
+    meetingReminders:false,selection:{useAll:true,ids:[]}};
+  await f.service.action('saveSettings',settings);
+  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/turn off automatic joining/i);
+  assert.equal(starts,0);
+  await f.service.action('saveSettings',{...settings,autoJoin:false});
+  await f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true});
+  await assert.rejects(f.service.action('joinMeetingLink',{expectedOwnerUserID:'owner-a',url:'https://meet.google.com/aaa-bbbb-ccc',participantsConfirmed:true}),/stop the manual window recording/i);
+  await assert.rejects(f.service.action('saveSettings',settings),/stop the manual window recording/i);
+});
+
+test('shutdown awaits a manual capture save even after its active handle is cleared',async()=>{
+  const gate=deferred();let complete=false;
+  const manualCapture={state:()=>({phase:'saving'}),isActive:()=>false,dispose:()=>gate.promise,clearCatalog(){}};
+  const f=fixture({manualCapture});
+  const closing=f.service.dispose().then(()=>{complete=true;});
+  await settle();assert.equal(complete,false);
+  gate.resolve();await closing;assert.equal(complete,true);
 });
 
 test('trim export resolves only owner-bound local files and validates a non-destructive range', async () => {

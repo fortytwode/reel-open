@@ -66,7 +66,7 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,manualCapture,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
@@ -93,7 +93,9 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       meetingReminderError:reminderScheduler?.error ?? null,
       meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
         ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`),localOperation:activeRecordingOperations.get(`${profile.userID}:${recording.id}`)?.label ?? null})) : [],
-      status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},error};
+      status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},
+      manualCapture:(()=>{const value=manualCapture?.state();return value?.ownerUserID && value.ownerUserID!==profile?.userID
+        ? {phase:'idle'} : value ?? {phase:'idle'};})(),error};
   }
   function emit() { if (!closed) onState(state()); }
   function invalidate() {
@@ -128,13 +130,16 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     error=routingUnavailable ? routingMessage : null;
     return routed;
   }
-  const coordinator=configured ? createCoordinator({auth, calendar:{discover:calendarDiscover},getSettings:settings,
+  const coordinator=configured ? createCoordinator({auth, calendar:{discover:calendarDiscover},
+    getSettings:()=>manualCapture?.isActive?.() ? {...settings(),autoJoin:false} : settings(),
     hasCompleted:args=>store.hasCompleted(args),markCompleted:args=>store.markCompleted(args)}) : null;
   const unsubscribeStatus=coordinator?.onStateChange(emit);
   const unsubscribeProcessing=processor?.onStateChange(emit);
   const unsubscribeAuth=auth?.onStateChange(() => {
     const next=auth.getProfile()?.userID ?? null;
     if (owner !== next || ownerEmail !== auth.getProfile()?.email || !auth.getProfile()?.calendarConnected) {
+      if (owner !== next && manualCapture?.isActive()) void manualCapture.stop(owner).catch(()=>{});
+      if (owner !== next) manualCapture?.clearCatalog();
       owner=next;ownerEmail=auth.getProfile()?.email ?? null;invalidate();
     }
     // The coordinator independently invalidates on the same auth notification.
@@ -181,7 +186,29 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   async function action(name,payload) {
     if (closed || closing) throw Error('Reel is shutting down.');
     let transcriptResponse = null;
-    if (name==='openLibrary') {
+    if (['listCaptureWindows','startWindowRecording','stopWindowRecording'].includes(name)) {
+      if (!manualCapture) throw Error('Native window recording is unavailable in this build.');
+      if (name==='listCaptureWindows') {
+        if (Object.keys(payload ?? {}).some(key=>!['expectedOwnerUserID'].includes(key))) throw Error('Invalid window picker request.');
+        await manualCapture.list(requireOwner(payload?.expectedOwnerUserID));
+      } else if (name==='startWindowRecording') {
+        if (!payload || typeof payload!=='object' || Array.isArray(payload)
+          || Object.keys(payload).some(key=>!['expectedOwnerUserID','sourceID','consentConfirmed'].includes(key))
+          || typeof payload.sourceID!=='string' || typeof payload.consentConfirmed!=='boolean')
+          throw Error('Invalid window recording request.');
+        const meetingPhase=coordinator?.getState()?.phase ?? 'idle';
+        if (['joining','capturing','saving','close_required','retry_wait'].includes(meetingPhase))
+          throw Error('Finish the current meeting recording before starting a window recording.');
+        if (settings().autoJoin) throw Error('Turn off automatic joining before starting a manual window recording.');
+        await manualCapture.start({ownerUserID:requireOwner(payload.expectedOwnerUserID),sourceID:payload.sourceID,
+          consentConfirmed:payload.consentConfirmed});
+      } else {
+        if (Object.keys(payload ?? {}).some(key=>!['expectedOwnerUserID'].includes(key))) throw Error('Invalid window stop request.');
+        await manualCapture.stop(requireOwner(payload?.expectedOwnerUserID));
+      }
+      emit();
+    }
+    else if (name==='openLibrary') {
       if (!org) throw Error('The organization has not configured its web URLs.');
       await openExternal(org.notesBaseURL);
     }
@@ -198,7 +225,10 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         await auth.signIn({connectCalendar:name==='connectCalendar'});
         invalidate();owner=auth.getProfile()?.userID ?? null; await pulse();
       } else if(name==='cancelSignIn') auth.cancelSignIn();
-      else if(name==='signOut') { auth.signOut();await coordinator.cancel(); }
+      else if(name==='signOut') {
+        if(manualCapture?.isActive()) await manualCapture.stop(requireOwner());
+        auth.signOut();await coordinator.cancel();
+      }
       else if(name==='disconnectCalendar') {
         const id=requireOwner(); auth.disconnectCalendar();await coordinator.cancel();
         const write=settingsTail.catch(()=>{}).then(()=>{
@@ -219,6 +249,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const next={ownerUserID:id,autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
           participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,meetingReminders:payload.meetingReminders,localTranscription:payload.localTranscription,
           selection:{useAll:payload.selection.useAll,ids:[...new Set(payload.selection.ids)]}};
+        if (manualCapture?.isActive() && next.autoJoin) throw Error('Stop the manual window recording before enabling automatic joining.');
         if(next.autoJoin && !auth.getProfile().calendarConnected) throw Error('Connect Google Calendar first.');
         const revision=++settingsRevision, changed=JSON.stringify(settings())!==JSON.stringify(next);
         let cancellation=Promise.resolve();
@@ -246,6 +277,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         settingsCache=saved;error=null;emit();await pulse();
       } else if(name==='joinMeeting' || name==='joinMeetingLink') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (manualCapture?.isActive()) throw Error('Stop the manual window recording before starting a meeting recording.');
         const pasted = name==='joinMeetingLink';
         const allowed = ['expectedOwnerUserID', 'includeMicrophone', ...(pasted ? ['url', 'participantsConfirmed'] : ['id'])];
         if (Object.keys(payload).some(key => !allowed.includes(key))
@@ -259,6 +291,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         await settingsTail;
         if (version!==generation || revision!==settingsRevision || requireOwner()!==id || closing)
           throw Error('Your account or recording settings changed. Refresh and try again.');
+        if (manualCapture?.isActive()) throw Error('Stop the manual window recording before starting a meeting recording.');
         cache=null;
         await coordinator.joinMeeting({ ownerUserID:id, microphone:payload.includeMicrophone === true,
           ...(pasted ? { url:payload.url, participantsConfirmed:payload.participantsConfirmed } : { meetingId:payload.id }) });
@@ -356,7 +389,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           else await store.rename(args);
           if (version!==generation || requireOwner()!==id) throw Error('The account changed. Refresh your recordings.');
         } finally { if(activeRecordingOperations.get(key)===operation) activeRecordingOperations.delete(key);emit(); }
-      } else if(name==='stopRecording') { await coordinator.cancel();emit(); }
+      } else if(name==='stopRecording') { if(manualCapture?.isActive()) await manualCapture.stop(requireOwner(payload?.expectedOwnerUserID)); else await coordinator.cancel();emit(); }
       else if(name==='refresh') { cache=null;await pulse(); }
       else throw Error('Unknown Reel action.');
     }
@@ -368,7 +401,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     closing=true;calendarController?.abort();auth?.cancelSignIn();processor?.cancel();
     disposePromise=(async()=>{
       // Consent mutations are durable before the process may exit.
-      const cancellation=coordinator?.cancel();
+      const cancellation=Promise.allSettled([coordinator?.cancel(),manualCapture?.dispose?.()]);
       // Keep the app process alive until native exporters release their input
       // and temporary output files; Electron's before-quit handler awaits us.
       await Promise.allSettled([...activeExports.values()]);

@@ -136,6 +136,31 @@ function renderDashboard() {
   byId('stopButton').textContent = phase === 'saving' ? 'Saving recording…' : 'Stop and save recording';
   renderMeetings();
 }
+function renderManualWindowCapture(signedIn) {
+  const capture=snapshot?.manualCapture ?? {phase:'idle'}, select=byId('captureWindowSelect');
+  const choices=capture.sources ?? [], previous=select.value;
+  const autoJoinBlocked=snapshot?.settings?.autoJoin===true;
+  byId('manualWindowCapture').classList.toggle('hidden',!signedIn);
+  clear(select);
+  const placeholder=node('option','','Choose an open window'); placeholder.value=''; select.append(placeholder);
+  for(const source of choices) { const option=node('option','',source.title); option.value=source.id; select.append(option); }
+  if(choices.some(source=>source.id===previous)) select.value=previous;
+  const busy=['starting','capturing','saving'].includes(capture.phase);
+  byId('refreshCaptureWindows').disabled=!signedIn || busy;
+  select.disabled=!signedIn || busy || !choices.length;
+  byId('captureWindowConsent').disabled=!signedIn || busy;
+  byId('startWindowRecording').classList.toggle('hidden',['capturing','saving'].includes(capture.phase));
+  byId('startWindowRecording').disabled=!signedIn || busy || autoJoinBlocked || !select.value || !byId('captureWindowConsent').checked;
+  byId('stopWindowRecording').classList.toggle('hidden',!['starting','capturing','saving'].includes(capture.phase));
+  byId('stopWindowRecording').disabled=!['starting','capturing'].includes(capture.phase);
+  byId('manualCaptureStatus').textContent=capture.phase==='capturing' ? `Recording “${capture.title}” locally.`
+    : capture.phase==='starting' ? 'Starting the selected window capture…'
+    : capture.phase==='saving' ? 'Saving the recording…'
+    : capture.phase==='completed' ? 'Window recording saved locally.'
+    : capture.phase==='cancelled' ? 'Window recording cancelled.'
+    : autoJoinBlocked ? 'Turn off automatic joining before starting a manual window recording.'
+    : capture.message ?? (choices.length ? `${choices.length} open windows available.` : 'Refresh windows to choose a source.');
+}
 function phaseLabel(phase) { return ({capturing:'Recording your meeting',cancelled:'Meeting join cancelled',saving:'Saving your recording',close_required:'Close the meeting window manually to continue',completed:'Recording saved',joining:'Joining a meeting',scheduled:'Ready for your next meeting',calendar_unavailable:'Calendar needs attention',save_failed:'Could not save recording',failed:'Meeting could not start',retry_wait:'Retrying meeting connection',idle:'Waiting for your next meeting'})[phase] ?? 'Reel status'; }
 function formatDate(value) { const d=new Date(value); return Number.isNaN(d.getTime())?escText(value):new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(d); }
 function joinBusy() {
@@ -303,6 +328,7 @@ function render() {
   byId('manualMeetingMessage').textContent = snapshot?.status?.message ?? '';
   byId('manualCancel').classList.toggle('hidden', phase !== 'joining');
   byId('manualStop').classList.toggle('hidden', phase !== 'capturing');
+  renderManualWindowCapture(signedIn);
   if (dashboard) renderDashboard(); else onboarding();
   const showRecordings = signedIn && (dashboard || snapshot.recordings?.length > 0);
   byId('recordingsCard').classList.toggle('hidden', !showRecordings);
@@ -432,6 +458,12 @@ document.addEventListener('click', event=>{
   if(action==='openTranscript') { void openTranscript(target.dataset.recordingId,snapshot?.profile?.userID); return; }
   if(action==='closeTranscript') { byId('transcriptDialog').close(); return; }
   if(action==='setCompanionStartup') { perform(action,{enabled:target.dataset.enabled==='true'}); return; }
+  if(action==='listCaptureWindows') { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if(action==='startWindowRecording') {
+    void perform(action,{expectedOwnerUserID:snapshot?.profile?.userID,sourceID:byId('captureWindowSelect').value,
+      consentConfirmed:byId('captureWindowConsent').checked}); return;
+  }
+  if(action==='stopWindowRecording') { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if (action === 'joinMeeting') {
     const id = target.dataset.meetingId;
     void startMeeting(action, { id, includeMicrophone: microphoneMeetingId === id });
@@ -495,6 +527,8 @@ async function startMeeting(action, payload) {
   }
 }
 document.addEventListener('change', event => {
+  if (event.target.id==='captureWindowSelect' || event.target.id==='captureWindowConsent')
+    renderManualWindowCapture(Boolean(snapshot?.profile?.userID));
   if (event.target.matches('[data-microphone-meeting-id]')) {
     microphoneMeetingId = event.target.checked ? event.target.dataset.microphoneMeetingId : null;
     for (const option of document.querySelectorAll('[data-microphone-meeting-id]')) {

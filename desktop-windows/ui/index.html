@@ -57,6 +57,19 @@
       </div>
       <section class="card meetings-card"><div class="card-heading"><div><p class="eyebrow">UP NEXT</p><h2>Upcoming meetings</h2></div></div><div id="meetingsList" class="meeting-list"></div></section>
     </section>
+    <section id="manualWindowCapture" class="card manual-window-card hidden" aria-labelledby="manualWindowTitle">
+      <div class="card-heading"><div><p class="eyebrow">LOCAL CAPTURE</p><h2 id="manualWindowTitle">Record a window</h2></div></div>
+      <p class="meeting-meta">Choose an open app window. Reel saves its video and computer audio on this device; it does not create or upload meeting notes.</p>
+      <div class="manual-window-controls">
+        <label for="captureWindowSelect">Window</label>
+        <select id="captureWindowSelect"><option value="">Refresh windows to choose</option></select>
+        <button id="refreshCaptureWindows" class="outline" type="button" data-action="listCaptureWindows">Refresh windows</button>
+      </div>
+      <label class="setting"><input id="captureWindowConsent" type="checkbox"> <span>I have permission to record content shown in this window.</span></label>
+      <p id="manualCaptureStatus" class="meeting-meta" role="status" aria-live="polite"></p>
+      <button id="startWindowRecording" class="primary" type="button" data-action="startWindowRecording">Start recording</button>
+      <button id="stopWindowRecording" class="danger hidden" type="button" data-action="stopWindowRecording">Stop and save recording</button>
+    </section>
       <section id="recordingsCard" class="card recordings-card hidden"><div class="card-heading"><div><p class="eyebrow">RECENT</p><h2>Latest recordings</h2></div><button class="text-button" type="button" data-action="openRecordings">Open recordings folder ↗</button></div><p class="share-disclosure">Anyone with the link can watch the shared video. Choose “Share video and transcript” to include the finished transcript. The attendee list and meeting notes stay private.</p><div id="recordingsList" class="recording-list"></div></section>
       <div id="accountRow" class="account-row hidden"><span id="accountLabel"></span><button class="text-button" type="button" data-action="signOut">Sign out</button><button class="text-button" id="disconnectCalendarButton" type="button" data-action="disconnectCalendar">Disconnect calendar</button></div>
   </main>
