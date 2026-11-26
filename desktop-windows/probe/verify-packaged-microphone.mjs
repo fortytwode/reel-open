@@ -28,9 +28,11 @@ for (const file of [video, audio]) {
     const samples = decoded.stdout;
     assert.equal(samples.length, 128_000);
     const system = frequencyLevel(samples, 440), microphone = frequencyLevel(samples, 880);
-    assert.ok(system > 0.02, 'Missing 440 Hz synthetic system tone');
-    if (mode === 'on') assert.ok(microphone > 0.02, 'Missing 880 Hz microphone tone with opt-in');
-    else assert.ok(microphone < 0.003, 'Unexpected microphone tone without opt-in');
     console.log(JSON.stringify({ mode, file: path.extname(file), at, system, microphone }));
+    assert.ok(system > 0.02, 'Missing 440 Hz synthetic system tone');
+    // The PCM sidecar mixes the AAC stereo fixture down to one channel.
+    // Use an amplitude floor and tone ratio that remain distinct from silence.
+    if (mode === 'on') assert.ok(microphone > 0.014 && microphone / system > 0.12, 'Missing 880 Hz microphone tone with opt-in');
+    else assert.ok(microphone < 0.003, 'Unexpected microphone tone without opt-in');
   }
 }

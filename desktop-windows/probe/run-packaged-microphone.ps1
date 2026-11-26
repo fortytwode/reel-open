@@ -97,6 +97,8 @@ async function acquireWindow(id) {
     if ($process.ExitCode -ne 0 -or $result.ok -ne $true) { throw "Capture $mode failed: $($result | ConvertTo-Json -Depth 8 -Compress)" }
     node (Join-Path $SourceRoot 'desktop-windows/probe/adapter-verify.mjs') "--out=$out"
     if ($LASTEXITCODE) { throw "The exact-window video and 440 Hz fixture did not survive $mode." }
+    ffmpeg -v error -xerror -i $result.recording.path -f null -
+    if ($LASTEXITCODE) { throw "FFmpeg could not decode the complete $mode recording." }
     node (Join-Path $QaRoot 'desktop-windows/probe/verify-packaged-microphone.mjs') $out $mode
     if ($LASTEXITCODE) { throw "The recording did not match the microphone choice $mode." }
   }
