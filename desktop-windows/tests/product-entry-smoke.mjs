@@ -79,7 +79,7 @@ $signature = [System.Security.Cryptography.X509Certificates.X509Certificate]::Cr
 $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
 $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
 $valid = $chain.Build($signature)
-[pscustomobject]@{ valid=$valid; signer=$signature.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false) } | ConvertTo-Json -Compress
+[pscustomobject]@{ valid=$valid; signer=$signature.Subject } | ConvertTo-Json -Compress
 `, { ...process.env, REEL_SMOKE_EDGE_PATH: edgePath }));
 assert.equal(signature.valid, true, 'Edge has a valid Authenticode certificate chain.');
 assert.match(signature.signer, /Microsoft Corporation/i, 'The signer is Microsoft.');
