@@ -63,21 +63,26 @@ try {
     $assets = Join-Path $packageRoot 'Assets'
     New-Item -ItemType Directory -Path $assets | Out-Null
     Add-Type -AssemblyName System.Drawing
-    $sourceLogo = [Drawing.Image]::FromFile((Join-Path $repo 'web/icons/reel-512.png'))
-    try {
-        foreach ($size in @(44, 150)) {
-            $bitmap = [Drawing.Bitmap]::new($size, $size)
-            try {
-                $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    foreach ($logo in @(
+        @{ Name = 'Logo'; Source = 'web/icons/reel-512.png' },
+        @{ Name = 'NotetakerLogo'; Source = 'web/icons/notetaker-512.png' }
+    )) {
+        $sourceLogo = [Drawing.Image]::FromFile((Join-Path $repo $logo.Source))
+        try {
+            foreach ($size in @(44, 150)) {
+                $bitmap = [Drawing.Bitmap]::new($size, $size)
                 try {
-                    $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-                    $graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
-                    $graphics.DrawImage($sourceLogo, 0, 0, $size, $size)
-                } finally { $graphics.Dispose() }
-                $bitmap.Save((Join-Path $assets "Square${size}x${size}Logo.png"), [Drawing.Imaging.ImageFormat]::Png)
-            } finally { $bitmap.Dispose() }
-        }
-    } finally { $sourceLogo.Dispose() }
+                    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+                    try {
+                        $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                        $graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
+                        $graphics.DrawImage($sourceLogo, 0, 0, $size, $size)
+                    } finally { $graphics.Dispose() }
+                    $bitmap.Save((Join-Path $assets "Square${size}x${size}$($logo.Name).png"), [Drawing.Imaging.ImageFormat]::Png)
+                } finally { $bitmap.Dispose() }
+            }
+        } finally { $sourceLogo.Dispose() }
+    }
 
     if ($Publisher -notmatch '^(CN|O|OU|L|S|ST|C|E|DC|SERIALNUMBER)=[^<>"\r\n]+(?:,\s*(CN|O|OU|L|S|ST|C|E|DC|SERIALNUMBER)=[^<>"\r\n]+)*$') {
         throw 'Publisher must be the signing certificate subject as a distinguished name.'
@@ -103,13 +108,13 @@ try {
   </Dependencies>
   <Applications>
     <Application Id="Recorder" Executable="ReelRecorderLauncher.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="Reel Recorder" Description="Record and share meetings with Reel."
+      <uap:VisualElements DisplayName="Reel Recorder" Description="Record your screen and share meetings with Reel."
           Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png"
           BackgroundColor="#FFFFFF" />
     </Application>
     <Application Id="Notetaker" Executable="ReelNotetakerLauncher.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements DisplayName="Reel Notetaker" Description="Open Reel meeting notes."
-          Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png"
+          Square150x150Logo="Assets\Square150x150NotetakerLogo.png" Square44x44Logo="Assets\Square44x44NotetakerLogo.png"
           BackgroundColor="#FFFFFF" />
     </Application>
     <Application Id="Companion" Executable="Reel.exe" EntryPoint="Windows.FullTrustApplication">
