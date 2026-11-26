@@ -54,14 +54,15 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
   const copied=[];
   const share=createMeetingShare({auth:{getProfile:()=>({userID:ownerID,email:ownerApp.user.email,displayName:'Synthetic meeting owner'}),getIdToken:()=>ownerApp.user.getIdToken()},
     store,org,cfg,copy:url=>copied.push(url)});
-  const result=await share.share({ownerUserID:ownerID,id,includeTranscript:true,password:'birdhouse',expiry:'week'});
+  const protectedPassword='birdhouse123'; // Windows shares now require at least 12 characters.
+  const result=await share.share({ownerUserID:ownerID,id,includeTranscript:true,password:protectedPassword,expiry:'week'});
   assert.equal(result.uploaded,true); assert.equal(copied[0],result.url);
   const local=await store.getShareRecord({ownerUserID:ownerID,id});
   const shareID=local.share.shareID;
   const key=local.share.access.key, salt=local.share.access.passwordSalt;
-  assert.equal(await C.deriveKey('birdhouse',salt),key);
-  assert.ok(!JSON.stringify(local.share).includes('birdhouse'),'The local share binding must contain only the derived access proof.');
-  assert.ok(!(await readFile(path.join(recordingPath,'library.json'),'utf8')).includes('birdhouse'),
+  assert.equal(await C.deriveKey(protectedPassword,salt),key);
+  assert.ok(!JSON.stringify(local.share).includes(protectedPassword),'The local share binding must contain only the derived access proof.');
+  assert.ok(!(await readFile(path.join(recordingPath,'library.json'),'utf8')).includes(protectedPassword),
     'The local recording store must never persist the plaintext password.');
   assert.equal(shareID,await C.ownerShareID(ownerID,local.share.recordingNonce));
   const publicMetaResponse=await fetch(C.downloadURL(shareID,C.File.meta,null,cfg));
@@ -125,7 +126,7 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
   await page.locator('#gate-password').fill('wrong-password'); await page.locator('#gate-submit').click();
   await page.locator('#gate-error').getByText('Wrong password').waitFor();
   assert.equal(await page.locator('#player').isVisible(),false,'A wrong password must not reveal playback.');
-  await page.locator('#gate-password').fill('birdhouse'); await page.locator('#gate-submit').click();
+  await page.locator('#gate-password').fill(protectedPassword); await page.locator('#gate-submit').click();
   const played=await page.waitForFunction(async()=>{
     const video=document.querySelector('#player');
     if(!video||video.hidden) return false;
