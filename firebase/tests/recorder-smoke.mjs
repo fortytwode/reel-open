@@ -120,7 +120,7 @@ if (!PROD) {
 }
 // Keep this capture/publishing suite deterministic and fast. The dedicated
 // recording-transcription-smoke.mjs exercises the real Whisper model with known speech.
-await ctx.route("**/reel/meeting-transcription-worker.js", (route) => route.fulfill({ contentType: "text/javascript", body:
+await ctx.route(/\/reel\/meeting-transcription-worker\.js(?:\?.*)?$/, (route) => route.fulfill({ contentType: "text/javascript", body:
   'self.onmessage = () => self.postMessage({type:"result",text:"The recorder integration fixture verifies transcript publishing.",chunks:[{timestamp:[0,2],text:"The recorder integration fixture verifies transcript publishing."}]});' }));
 const target = await ctx.newPage();
 await target.goto(ORIGIN + "/target");
