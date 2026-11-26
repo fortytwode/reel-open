@@ -1,4 +1,4 @@
-import {app,BrowserWindow,desktopCapturer,dialog,ipcMain,Menu,safeStorage,shell} from 'electron';
+import {app,BrowserWindow,clipboard,desktopCapturer,dialog,ipcMain,Menu,safeStorage,shell} from 'electron';
 import {createHash} from 'node:crypto';
 import {existsSync,mkdirSync,readFileSync} from 'node:fs';
 import {mkdir} from 'node:fs/promises';
@@ -13,6 +13,7 @@ import {createLocalRecordingStore} from './src/local-recordings.mjs';
 import {createWindowsRecorder} from './src/recorder.mjs';
 import {createDesktopService} from './src/desktop-service.mjs';
 import {createMeetingProcessor} from './src/meeting-processing.mjs';
+import {createMeetingShare} from './src/meeting-share.mjs';
 import {startAssetServer} from './src/asset-server.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
@@ -89,12 +90,13 @@ async function run() {
     auth.load();
   }
   const processor=auth ? createMeetingProcessor({auth,store,speechURL:org.speechServiceURL,deliveryURL:org.deliveryServiceURL,allowedEmailDomain:org.allowedEmailDomain}) : null;
+  const meetingShare=auth && org ? createMeetingShare({auth,store,org,copy:value=>clipboard.writeText(value)}) : null;
   const recorder=createWindowsRecorder({BrowserWindow,desktopCapturer,ipcMain,store,origin,
     defaultRenderEndpoint: bridge?.defaultRenderEndpoint,
     onCompleted:({ownerUserID,recording})=>{ if (!shutdown && auth?.getProfile()?.userID===ownerUserID && store.getProcessing({ownerUserID,id:recording.id})?.phase==='pending') void processor.process({ownerUserID,id:recording.id}).catch(()=>{}); },
     onFailure:()=>{void service?.action('stopRecording').catch(()=>{});},
     onSourceEnded:()=>service?.action('stopRecording')});
-  service=createDesktopService({auth,org,store,processor,discover:discoverGoogleMeetings,
+  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,discover:discoverGoogleMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),
     openRecordings:async owner=>{

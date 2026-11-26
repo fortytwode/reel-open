@@ -20,10 +20,11 @@ const selectionKey = value => JSON.stringify({useAll:value.useAll,ids:[...new Se
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openRecordings,processor,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openRecordings,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
+  const activeShares=new Set();
   let settingsTail=Promise.resolve(),disposePromise=null;
   let calendars=[],meetings=[],calendarOwner=null,routingUnavailable=false;
   const routingMessage='Cloud routing could not be checked. Automatic Meet and Teams joins are paused; Zoom can continue.';
@@ -39,7 +40,8 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     const phase=status.ownerUserID && status.ownerUserID !== profile?.userID ? 'idle' : status.phase;
     const currentCalendar=calendarOwner===profile?.userID;
     return {configured,profile,settings:structuredClone(settings()),calendars:structuredClone(currentCalendar?calendars:[]),
-      meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID) : [],
+      meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
+        ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`)})) : [],
       status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[phase] ?? messages.idle},error};
   }
   function emit() { if (!closed) onState(state()); }
@@ -117,9 +119,11 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   }
   async function action(name,payload) {
     if (closed || closing) throw Error('Reel is shutting down.');
-    if (name==='openLibrary' || name==='openRecorder') {
+    if (name==='openLibrary' || name==='openRecorder' || name==='openNotetaker') {
       if (!org) throw Error('The organization has not configured its web URLs.');
-      await openExternal(name==='openLibrary' ? org.notesBaseURL : org.webBase + '/record');
+      const destinations = { openLibrary: org.notesBaseURL, openRecorder: org.webBase + '/record',
+        openNotetaker: org.webBase + '/notetaker' };
+      await openExternal(destinations[name]);
     }
     else if (name==='openRecordings') await openRecordings(requireOwner());
     else {
@@ -177,6 +181,12 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(payload?.expectedOwnerUserID);
         if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');
         void processor?.process({ownerUserID:id,id:payload.id}).catch(()=>{});
+      } else if(name==='shareRecording') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (typeof payload?.id !== 'string' || !shareMeeting) throw Error('Meeting sharing is unavailable.');
+        const key=`${id}:${payload.id}`;activeShares.add(key);emit();
+        try { await shareMeeting.share({ownerUserID:id,id:payload.id}); }
+        finally { activeShares.delete(key);emit(); }
       } else if(name==='stopRecording') { await coordinator.cancel();emit(); }
       else if(name==='refresh') { cache=null;await pulse(); }
       else throw Error('Unknown Reel action.');

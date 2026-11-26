@@ -69,6 +69,13 @@ jobs:
         run: |
           export PATH="/c/ProgramData/chocolatey/bin:$PATH"
           npm run recorder-smoke
+      - name: Share a saved Windows meeting and play the link
+        working-directory: firebase/tests
+        env:
+          REEL_BROWSER: ${{ matrix.browser }}
+        run: |
+          export PATH="/c/ProgramData/chocolatey/bin:$PATH"
+          npm run meeting-share-emulator
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4

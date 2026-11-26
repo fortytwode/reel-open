@@ -1,0 +1,81 @@
+name: Windows companion package
+
+on:
+  pull_request:
+    paths: ['desktop-windows/**', '.github/workflows/windows-package.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, arch: x64 }
+          - { runner: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.arch }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: npm --prefix desktop-windows test
+      - name: Install pinned Electron and test driver
+        run: |
+          npm ci --prefix desktop-windows/probe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node desktop-windows/probe/node_modules/electron/install.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm ci --prefix firebase/tests
+      - name: Verify AAC encoding, decoding and PCM samples
+        shell: pwsh
+        run: |
+          $electron = Resolve-Path desktop-windows/probe/node_modules/electron/dist/electron.exe
+          $probe = Resolve-Path desktop-windows/probe/processing-runtime.mjs
+          $process = Start-Process -FilePath $electron -ArgumentList ('"' + $probe + '"') -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode) { throw "Audio codec test exited with $($process.ExitCode)" }
+      - name: Build and extract demo package
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          python scripts/configure-organization.py organization.example.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $org = Get-Content desktop-windows/organization.json -Raw | ConvertFrom-Json
+          if ($org.projectID -ne 'demo-reel') { throw 'Expected the demo organization.' }
+          $credentials = Join-Path $env:RUNNER_TEMP demo-installed.json
+          @{ installed = @{ client_id = $org.googleDesktopClientId; client_secret = 'demo-installed-client' } } |
+            ConvertTo-Json | Set-Content -Encoding utf8NoBOM $credentials
+          $zip = Join-Path $env:RUNNER_TEMP demo.zip
+          $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
+          ./desktop-windows/build-portable.ps1 -ElectronDist desktop-windows/probe/node_modules/electron/dist -ExpectedArchitecture $env:REEL_ARCH -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials -Version "$version-ci" -OutputZip $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP/demo-package"
+      - name: Launch the extracted app and verify first-run setup
+        working-directory: firebase/tests
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import path from 'node:path';
+          import { _electron as electron } from 'playwright';
+          const app = await electron.launch({executablePath: path.join(process.env.RUNNER_TEMP, 'demo-package', 'Reel.exe')});
+          try {
+            const window = await app.firstWindow();
+            await window.getByRole('button', {name: 'Sign in with Google'}).waitFor();
+            const state = await window.evaluate(() => window.reelDesktop.state());
+            assert.equal(state.configured, true);
+            assert.equal(state.profile, null);
+          } finally {
+            await app.close();
+          }
+          JS

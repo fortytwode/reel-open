@@ -10,7 +10,8 @@ const check = (condition, message) => { if (!condition) throw new Error(message)
 const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
   systemAudioConsent: false, selection: { useAll: true, ids: [] } });
 const metadata = recording => ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
-  durationSeconds: recording.durationSeconds, ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
+  durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload) } : {}),
+  ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
 
 // Only the boxes and sample tables produced by Reel's pinned fragmented muxer are accepted.
 // This detects damaged/out-of-order appends; playback still requires the real media probe.
@@ -57,6 +58,9 @@ function initTracks(bytes) {
   const movie = children(bytes, top[1]);
   for (const trak of movie.filter(box => box.type === 'trak')) {
     const list = children(bytes, trak), tkhd = one(list, 'tkhd');
+    check(tkhd.end - tkhd.data >= 8, 'Truncated track dimensions');
+    const width = bytes.readUInt32BE(tkhd.end - 8) >>> 16;
+    const height = bytes.readUInt32BE(tkhd.end - 4) >>> 16;
     const version = bytes[tkhd.data];
     check(version === 0 || version === 1, 'Unsupported track header');
     const id = uint(bytes, tkhd.data + 4 + (version ? 16 : 8), tkhd.end);
@@ -87,7 +91,8 @@ function initTracks(bytes) {
         && (bytes[config.data + 35] >>> 3) === 2, 'Missing AAC-LC decoder configuration');
     }
     check(id > 0 && timescale > 0 && !tracks.has(id), 'Invalid or duplicate track');
-    tracks.set(id, { handler, timescale, end: 0, samples: 0 });
+    tracks.set(id, { handler, timescale, width: handler === 'vide' ? width : 0,
+      height: handler === 'vide' ? height : 0, end: 0, samples: 0 });
   }
   check(tracks.size === 2 && [...tracks.values()].filter(track => track.handler === 'vide').length === 1
     && [...tracks.values()].filter(track => track.handler === 'soun').length === 1, 'Expected one video and one audio track');
@@ -95,6 +100,37 @@ function initTracks(bytes) {
   check(extensions.length === tracks.size && new Set(extensions.map(box => uint(bytes, box.data + 4, box.end))).size === tracks.size
     && extensions.every(box => tracks.has(uint(bytes, box.data + 4, box.end))), 'Missing fragmented track defaults');
   return tracks;
+}
+async function videoDimensions(filePath) {
+  const file = await fileIO.open(filePath, 'r');
+  try {
+    const stat = await file.stat(), length = Math.min(stat.size, MAX_PACKET), bytes = Buffer.alloc(length);
+    for (let offset = 0; offset < length;) {
+      const { bytesRead } = await file.read(bytes, offset, length - offset, offset);
+      check(bytesRead > 0, 'The saved video init segment is incomplete.'); offset += bytesRead;
+    }
+    const endOfBox = offset => {
+      check(offset + 8 <= bytes.length, 'The saved video init segment is incomplete.');
+      const type = bytes.toString('ascii', offset + 4, offset + 8);
+      let size = bytes.readUInt32BE(offset), header = 8;
+      if (size === 1) {
+        check(offset + 16 <= bytes.length, 'The saved video init segment is incomplete.');
+        const large = bytes.readBigUInt64BE(offset + 8);
+        check(large <= BigInt(MAX_PACKET), 'The saved video init segment is too large.');
+        size = Number(large); header = 16;
+      }
+      check(size >= header && offset + size <= bytes.length, 'The saved video init segment is incomplete.');
+      return { type, end: offset + size };
+    };
+    const ftyp = endOfBox(0);
+    check(ftyp.type === 'ftyp', 'The saved video is missing its file type box.');
+    const moov = endOfBox(ftyp.end);
+    check(moov.type === 'moov', 'The saved video is missing its movie header.');
+    const video = [...initTracks(bytes.subarray(0, moov.end)).values()].find(track => track.handler === 'vide');
+    check(Number.isInteger(video?.width) && video.width > 0 && Number.isInteger(video?.height) && video.height > 0,
+      'The saved video dimensions are invalid.');
+    return { width: video.width, height: video.height };
+  } finally { await file.close(); }
 }
 function fragmentTracks(bytes, index, tracks) {
   const top = boxes(bytes);
@@ -274,7 +310,9 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
             } catch (error) { audioFailure ??= error; }
             if (audioFile) { await audioFile.close().catch(() => {}); audioFile = null; }
           }
-          const recording = { id, title, createdAt, durationSeconds, ...(meeting ? { processing: { title, createdAt, meeting, phase: audioFailure ? 'failed' : 'pending', ...(audioFailure ? { error: 'Meeting audio could not be saved.' } : {}), audioFrames } } : {}) };
+          const videoTrack = [...tracks.values()].find(track => track.handler === 'vide');
+          const recording = { id, title, createdAt, durationSeconds, width: videoTrack.width, height: videoTrack.height,
+            ...(meeting ? { processing: { title, createdAt, meeting, phase: audioFailure ? 'failed' : 'pending', ...(audioFailure ? { error: 'Meeting audio could not be saved.' } : {}), audioFrames } } : {}) };
           await mutate(value, state => { state.recordings.push(recording); return state; });
           return { ...recording, path: finalPath, playable: true };
         } catch (error) { failure ??= error; await close().catch(() => {}); throw error; }
@@ -323,6 +361,44 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     const item = owner(ownerUserID).state.recordings.find(recording => recording.id === id);
     return item?.processing && existsSync(path.join(owner(ownerUserID).dir, `${id}.mp4`)) ? structuredClone(item.processing) : null;
   }
+  async function getShareRecord({ ownerUserID, id }) {
+    check(/^[0-9a-f]{32}$/.test(id ?? ''), 'Invalid recording.');
+    const value = owner(ownerUserID), item = value.state.recordings.find(recording => recording.id === id);
+    const file = path.join(value.dir, `${id}.mp4`);
+    if (!item?.processing?.meeting || !existsSync(file)) return null;
+    const dimensions = Number.isInteger(item.width) && item.width > 0 && Number.isInteger(item.height) && item.height > 0
+      ? { width: item.width, height: item.height } : await videoDimensions(file);
+    return { id, title: item.title, createdAt: item.createdAt, durationSeconds: item.durationSeconds,
+      ...dimensions, path: file, meeting: true, share: item.share ? structuredClone(item.share) : null };
+  }
+  async function bindShare({ ownerUserID, expectedOwnerUserID, id, recordingNonce, shareID } = {}) {
+    check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The meeting owner changed.');
+    check(/^[0-9a-f]{32}$/.test(id ?? '') && /^[0-9a-f]{32}$/.test(recordingNonce ?? '')
+      && /^r2[0-9a-f]{38}$/.test(shareID ?? ''), 'Invalid meeting share binding.');
+    const value = owner(ownerUserID), file = path.join(value.dir, `${id}.mp4`);
+    const state = await mutate(value, state => {
+      const item = state.recordings.find(recording => recording.id === id);
+      check(item?.processing?.meeting && existsSync(file), 'This saved meeting recording is unavailable.');
+      if (item.share) {
+        check(item.share.ownerUserID === ownerUserID && item.share.recordingNonce === recordingNonce
+          && item.share.shareID === shareID, 'This recording is already bound to its original owner.');
+      } else item.share = { ownerUserID, recordingNonce, shareID, upload: 'pending' };
+      return state;
+    });
+    return structuredClone(state.recordings.find(recording => recording.id === id).share);
+  }
+  async function saveShareState({ ownerUserID, expectedOwnerUserID, id, shareID, upload } = {}) {
+    check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The meeting owner changed.');
+    check(/^[0-9a-f]{32}$/.test(id ?? '') && /^r2[0-9a-f]{38}$/.test(shareID ?? '')
+      && (['pending', 'uploading', 'uploaded'].includes(upload) || (upload && typeof upload.failed === 'string' && upload.failed.length <= 240)),
+    'Invalid meeting share state.');
+    await mutate(owner(ownerUserID), state => {
+      const item = state.recordings.find(recording => recording.id === id);
+      check(item?.share?.ownerUserID === ownerUserID && item.share.shareID === shareID,
+        'This recording is no longer bound to this account.');
+      item.share.upload = structuredClone(upload); return state;
+    });
+  }
   function listProcessing(ownerUserID) { return owner(ownerUserID).state.recordings.filter(item => item.processing && existsSync(path.join(owner(ownerUserID).dir, `${item.id}.mp4`))).map(item => ({ id: item.id, processing: structuredClone(item.processing) })); }
   async function saveProcessing({ ownerUserID, id, processing }) {
     await mutate(owner(ownerUserID), state => { const item = state.recordings.find(recording => recording.id === id);
@@ -333,5 +409,5 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     check(item?.processing?.audioFrames > 0, 'Meeting audio is unavailable');
     return { path: path.join(value.dir, `${id}.pcm`), sampleRate: 16000, channels: 1, frameCount: item.processing.audioFrames };
   }
-  return { begin, list, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, listProcessing, saveProcessing, getAudioInfo };
+  return { begin, list, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, getShareRecord, bindShare, saveShareState, listProcessing, saveProcessing, getAudioInfo };
 }

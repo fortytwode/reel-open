@@ -1,6 +1,8 @@
 # Windows meeting companion
 
-The experimental Windows companion uses Electron for account setup, calendar discovery and recording. A native Windows helper identifies the exact meeting window in Chrome. Recordings are stored locally for their signed-in owner. The web recorder also runs in Chrome and Edge on Windows.
+The experimental Windows companion uses Electron for account setup, calendar discovery and recording. A native Windows helper identifies the exact meeting window in Chrome. Recordings stay on the signed-in owner’s computer until they choose **Share recording**. Sharing uploads the video and copies a link that anyone with the link can open.
+
+The companion opens **Reel Recorder** and **Reel Notetaker** from your organization’s deployment. You can install them separately from Chrome or Edge. Use Recorder for a walkthrough and a share link. Use Notetaker to choose calendars and review meeting notes.
 
 ## Build a portable package
 
@@ -15,6 +17,16 @@ From the repository root:
 ```sh
 npm --prefix desktop-windows test
 ```
+
+With Java 21 on `PATH`, verify the explicit share path against local Auth,
+Firestore and Storage emulators with:
+
+```sh
+npm --prefix firebase/tests run meeting-share-emulator
+```
+
+The check uses synthetic identities and generated video; it verifies owner
+binding, private library access and playback in the local viewer.
 
 For interactive capture checks, install the pinned dependencies with `npm --prefix desktop-windows/probe ci`. On a logged-in Windows desktop with Node, ffmpeg and ffprobe on `PATH`, run:
 
