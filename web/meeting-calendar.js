@@ -93,7 +93,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       <div class="mc-connect" data-connect></div>
       <div class="mc-settings" data-settings></div>
       <div class="mc-events" data-events></div>
-      <details class="mc-note" data-extension-note><summary>Detect meetings in Chrome or Edge</summary><p><a href="${esc(WEB_BASE)}/downloads/reel-meeting-prompt-0.1.1.zip" download>Download the meeting prompt extension</a>. Unzip it, open chrome://extensions or edge://extensions, turn on Developer mode, choose Load unpacked, and select the unzipped folder. On a meeting preview page, choose Allow, then confirm participant consent in Reel.</p></details>
+      <details class="mc-note" data-extension-note><summary>Detect meetings in Chrome or Edge</summary><p><a href="${esc(WEB_BASE)}/downloads/reel-meeting-prompt-0.1.2.zip" download>Download the meeting prompt extension</a>. Unzip it, open chrome://extensions or edge://extensions, turn on Developer mode, choose Load unpacked, and select the unzipped folder. On a meeting preview page, choose Allow, then confirm participant consent in Reel.</p></details>
       <p class="mc-note" data-cloud-note>The cloud note taker can work while this computer is closed after you grant standing consent. Google Calendar is the only server calendar supported here. Outlook and Apple Calendar are available through the existing native connection; automatic server connection is not available.</p>
     </section>`;
 

@@ -154,7 +154,45 @@
     };
   }
 
-  if (typeof module !== 'undefined' && module.exports) module.exports = { createMeetingAlertManager, sanitizeSchedule };
+  async function runRecorderShortcut(chromeApi, command, recordURL) {
+    const actions = {
+      'recorder-start-stop': 'stop',
+      'recorder-pause-resume': 'pause',
+      'recorder-cancel': 'cancel',
+    };
+    if (!recordURL || !Object.hasOwn(actions, command)) return;
+    const action = actions[command];
+    const urlPattern = `${recordURL.protocol}//${recordURL.hostname}/record*`;
+    const tabs = (await chromeApi.tabs.query({ url: urlPattern }))
+      .filter(tab => !tab.discarded && typeof tab.id === 'number' && extension.isRecorderPage(tab.url, recordURL));
+    const send = (tab, action) => chromeApi.tabs.sendMessage(
+      tab.id, { type: 'REEL_RECORDER_SHORTCUT', action }, { frameId: 0 },
+    ).catch(() => false);
+    const states = await Promise.all(tabs.map(tab => send(tab, 'active')));
+    const recordingTabs = tabs.filter((_, index) => states[index] === true);
+    // In the event of multiple captures, use a window's own controls to choose which one to change.
+    if (recordingTabs.length > 1) return;
+    const [recording] = recordingTabs;
+    if (recording) {
+      if (action === 'cancel') await activateRecorder(chromeApi, recording);
+      await send(recording, action);
+    } else if (action === 'stop') {
+      const recent = tabs.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
+      if (!recent) {
+        await chromeApi.tabs.create({ url: recordURL.href, active: true });
+      } else {
+        await activateRecorder(chromeApi, recent);
+        await send(recent, 'open');
+      }
+    }
+  }
+
+  async function activateRecorder(chromeApi, tab) {
+    await chromeApi.tabs.update(tab.id, { active: true });
+    await chromeApi.windows.update(tab.windowId, { focused: true });
+  }
+
+  if (typeof module !== 'undefined' && module.exports) module.exports = { createMeetingAlertManager, runRecorderShortcut, sanitizeSchedule };
   if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
     const manager = createMeetingAlertManager(chrome);
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -167,5 +205,8 @@
     chrome.notifications.onClicked.addListener(id => { manager.notificationAction(id, 0); });
     chrome.runtime.onStartup.addListener(() => { manager.wake(); });
     chrome.runtime.onInstalled.addListener(() => { manager.wake(); });
+    chrome.commands?.onCommand.addListener(command => {
+      void runRecorderShortcut(chrome, command, extension.recordURL).catch(() => {});
+    });
   }
 })();

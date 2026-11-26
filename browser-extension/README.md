@@ -18,3 +18,9 @@ Loading the source `browser-extension` folder also works for development. Until 
 This is an unpacked development extension. It is not installed automatically and has not been published to a browser store. Browser/provider page changes may affect the active-call heuristic. Meeting formats outside the explicit URL allowlist are ignored. A user can dismiss the prompt for that meeting URL for the current tab session.
 
 Run parser, alert-manager, and mocked browser checks with `npm test` from this directory. If Playwright is not available at the adjacent repository path, set `REEL_PLAYWRIGHT_MODULE` to its `index.mjs` file.
+
+## Windows Recorder shortcuts
+
+With the configured extension loaded, open `chrome://extensions/shortcuts` or `edge://extensions/shortcuts`. Assign keys for opening or stopping Recorder, pausing or resuming, and cancelling. To use a shortcut while working in another app, set its scope to **Global** and leave Chrome or Edge running. If another app already uses a shortcut, assign an unused combination.
+
+Press Start in Recorder to open the browser's capture picker. If several Reel windows are recording at once, use the controls of the recording you want to change.

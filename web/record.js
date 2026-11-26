@@ -471,6 +471,32 @@ function onShortcut(e, nav) {
 }
 document.addEventListener("keydown", (e) => onShortcut(e));
 
+// The browser extension can operate an existing capture. Pressing Start still
+// supplies the browser's own user activation for choosing what to share.
+document.addEventListener("reel-recorder-shortcut", (event) => {
+  if (event.detail === "active") {
+    if (R.phase !== "idle") event.preventDefault();
+    return;
+  }
+  const field = document.activeElement;
+  if (document.hasFocus() && (field?.matches("input, textarea, select") || field?.isContentEditable)) return;
+  const capturing = R.phase === "recording" || R.phase === "paused";
+  switch (event.detail) {
+    case "open":
+      if (R.phase === "idle") $("start").focus();
+      break;
+    case "pause":
+      if (capturing) pauseResume();
+      break;
+    case "stop":
+      if (capturing) void stop();
+      break;
+    case "cancel":
+      if (capturing || R.phase === "countdown") void cancel();
+      break;
+  }
+});
+
 // ---------------------------------------------------------------- setup form
 
 async function fillDevices() {

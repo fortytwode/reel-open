@@ -15,7 +15,13 @@
     return url.origin === recordURL.origin && ['/record', '/record.html', '/notetaker', '/notetaker.html'].includes(url.pathname);
   }
 
-  const api = { recordPage, isRecordPage };
+  function isRecorderPage(value, recordURL) {
+    if (!isRecordPage(value, recordURL)) return false;
+    const url = new URL(value);
+    return ['/record', '/record.html'].includes(url.pathname);
+  }
+
+  const api = { recordPage, isRecordPage, isRecorderPage };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else globalThis.ReelExtension = { ...api, recordURL: recordPage(globalThis.chrome?.runtime?.getManifest?.()) };
 })();

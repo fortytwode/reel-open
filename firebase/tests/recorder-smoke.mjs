@@ -251,6 +251,22 @@ try {
   check("first live segment uploaded while recording", await until(async () => (await fetchObj(r.shareID, C.segmentFile(1))).ok, 15000));
   check("init.mp4 and live playlist uploaded", (await fetchObj(r.shareID, C.File.initSegment)).ok &&
     await until(async () => (await (await fetchObj(r.shareID, C.File.playlist)).text()).includes("#EXT-X-PLAYLIST-TYPE:EVENT"), 10000));
+  await page.bringToFront();
+  const shortcut = await page.evaluate(() => {
+    const command = (detail) => document.dispatchEvent(new CustomEvent("reel-recorder-shortcut", { detail, cancelable: true }));
+    const field = document.createElement("input");
+    document.body.append(field);
+    field.focus();
+    command("pause");
+    const stayedRecording = window.__reel.state().phase === "recording";
+    field.remove();
+    command("pause");
+    const paused = window.__reel.state().phase === "paused";
+    command("pause");
+    return { stayedRecording, paused, resumed: window.__reel.state().phase === "recording" };
+  });
+  check("global Recorder shortcut pauses and resumes without acting while editing a field",
+    shortcut.stayedRecording && shortcut.paused && shortcut.resumed, JSON.stringify(shortcut));
   await sleep(3000);
   await page.locator("#pause").click();
   const pausedAt = await page.evaluate(() => window.__reel.state().session.elapsed);
