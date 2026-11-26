@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDesktopService, desktopBrowserAppArguments, desktopLaunchAction, desktopProductURL } from '../src/desktop-service.mjs';
+import { createCompanionStartup, createDesktopService, desktopBrowserAppArguments, desktopLaunchAction, desktopProductURL } from '../src/desktop-service.mjs';
 import { createMeetingCoordinator } from '../src/meeting-coordinator.mjs';
 
 const org = {meetingServiceURL:'https://meetings.northwind.example', viewerBase:'https://library.northwind.example', viewerPath:'reel', notesBaseURL:'https://library.northwind.example/reel', webBase:'https://record.northwind.example'};
@@ -8,6 +8,46 @@ const initial = ownerUserID => ({ ownerUserID, autoJoin: false, participantConse
   systemAudioConsent: false, selection: { useAll: true, ids: [] } });
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('portable startup reads and changes only this organization’s per-user login item', () => {
+  const executable = 'C:\\User Apps\\Reel.exe';
+  const name = 'Reel Companion organization-a';
+  let own = null;
+  const otherItems = [
+    { name, scope:'machine', enabled:true },
+    { name:'Reel Companion organization-b', scope:'user', enabled:true },
+  ];
+  const app = {
+    isPackaged:true,
+    getLoginItemSettings(options) {
+      assert.deepEqual(options,{ path:executable,args:[] });
+      return { launchItems:[...otherItems,...(own ? [own] : [])] };
+    },
+    setLoginItemSettings(options) {
+      assert.deepEqual(options,{ path:executable,args:[],name,openAtLogin:options.enabled,enabled:options.enabled });
+      own=options.openAtLogin ? { name,scope:'user',enabled:options.enabled } : null;
+    },
+  };
+  const startup=createCompanionStartup({app,executable,organizationKey:'organization-a'});
+  assert.deepEqual(startup.state(),{mode:'portable',enabled:false});
+  startup.setEnabled(true);
+  assert.equal(startup.state().enabled,true);
+  own.enabled=false; // Windows Startup Apps was used to turn it off.
+  assert.equal(startup.state().enabled,false);
+  assert.equal(own.enabled,false);
+  startup.setEnabled(false);
+  assert.equal(own,null);
+});
+
+test('MSIX startup sends the user to Windows Settings without changing registry login items', async () => {
+  const urls=[];
+  const startup=createCompanionStartup({windowsStore:true,shell:{openExternal:async url=>urls.push(url)}});
+  const service=createDesktopService({startup});
+  assert.deepEqual(service.state().startup,{mode:'windows-settings'});
+  await service.action('openStartupSettings');
+  assert.deepEqual(urls,['ms-settings:startupapps']);
+  await assert.rejects(service.action('setCompanionStartup',{enabled:true}));
+});
 
 test('MSIX product launch arguments select the configured Recorder and Notetaker routes', () => {
   assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder']), 'openRecorder');

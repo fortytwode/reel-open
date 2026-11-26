@@ -95,8 +95,9 @@ try {
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap rescap">
+         IgnorableNamespaces="uap desktop rescap">
   <Identity Name="$identity" Publisher="$escapedPublisher" Version="$Version" ProcessorArchitecture="$arch" />
   <Properties>
     <DisplayName>Reel</DisplayName>
@@ -121,6 +122,11 @@ try {
       <uap:VisualElements DisplayName="Reel Companion" Description="Meeting setup, capture and local recordings."
           Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png"
           BackgroundColor="#FFFFFF" />
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="Reel.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="ReelCompanionAtLogon" Enabled="false" DisplayName="Reel Companion" />
+        </desktop:Extension>
+      </Extensions>
     </Application>
   </Applications>
   <Capabilities>
