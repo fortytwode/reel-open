@@ -53,6 +53,7 @@ export class CaptureSession {
   constructor({ settings, display, camera, mic, composite, events }) {
     Object.assign(this, { settings, display, camera, mic, composite, events });
     this.worker = null; this.audioCtx = null; this.size = null; this.phase = "idle"; this.elapsed = 0;
+    this.pauseID = 0; this.confirmedPauseID = 0;
     this.doneWaiter = null; this.readyWaiter = null; this.info = null;
     this.audioReader = null; this.audioPump = null; this.audioPendingFrames = 0;
   }
@@ -99,7 +100,7 @@ export class CaptureSession {
       camera: this.camera ? readable(this.camera) : null,
       audio: !!audioTrack, audioSampleRate: 48000, audioChannels: 2,
     };
-    this.worker = new Worker(new URL("./encoder-worker.js?v=20261025-audio1", import.meta.url), { type: "module" });
+    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-pause", import.meta.url), { type: "module" });
     this.worker.onmessage = (e) => this.onWorker(e.data);
     this.worker.onerror = (e) => this.onWorker({ type: "error", message: e.message || "Recorder worker failed" });
     const ready = new Promise((resolve, reject) => { this.readyWaiter = { resolve, reject }; });
@@ -164,7 +165,13 @@ export class CaptureSession {
     switch (m.type) {
       case "audio-consumed": this.audioPendingFrames = Math.max(0, this.audioPendingFrames - m.frames); break;
       case "ready": this.readyWaiter && this.readyWaiter.resolve(m); this.readyWaiter = null; break;
-      case "tick": this.elapsed = m.elapsed; this.events.onTick && this.events.onTick(m); break;
+      case "tick":
+        // A busy renderer can receive recording ticks after handling the Pause click.
+        if (this.phase === "paused" ? m.pauseID !== this.pauseID : m.pauseID != null) break;
+        if (m.pauseID != null) this.confirmedPauseID = m.pauseID;
+        this.elapsed = m.elapsed;
+        this.events.onTick && this.events.onTick(m);
+        break;
       case "init": this.events.onInit(m.bytes, m.codecs); break;
       case "segment": this.events.onSegment(m.index, m.duration, m.bytes); break;
       case "thumb": this.events.onThumb && this.events.onThumb(m.blob); break;
@@ -178,8 +185,13 @@ export class CaptureSession {
     }
   }
 
+  get pauseConfirmed() { return this.phase === "paused" && this.pauseID === this.confirmedPauseID; }
   begin() { this.phase = "recording"; this.worker.postMessage({ type: "begin" }); }
-  pause() { if (this.phase === "recording") { this.phase = "paused"; this.worker.postMessage({ type: "pause" }); } }
+  pause() {
+    if (this.phase !== "recording") return;
+    this.phase = "paused";
+    this.worker.postMessage({ type: "pause", pauseID: ++this.pauseID });
+  }
   resume() { if (this.phase === "paused") { this.phase = "recording"; this.worker.postMessage({ type: "resume" }); } }
   setComposite(on) { this.composite = on; this.worker && this.worker.postMessage({ type: "layout", composite: on }); }
 
