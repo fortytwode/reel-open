@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as C from "../../web/reel/core.js";
-import * as store from "../../web/reel/store.js?v=20261119-owner2";
+import * as store from "../../web/reel/store.js?v=20261126-hls-publication";
 import { Library, Publisher } from "../../web/reel/publisher.js";
 
 const now = new Date("2026-10-29T10:00:00Z");
@@ -107,19 +107,31 @@ test("meeting share copies only after the complete upload succeeds", async () =>
 function meetingRows() {
   // Queue IndexedDB requests as tasks so read/conditional-put uses one active transaction.
   const rows = new Map();
-  const db = { transaction() {
-    const tx = { objectStore: () => ({
-      get(id) {
-        const request = {};
-        setImmediate(() => {
-          request.result = structuredClone(rows.get(id));
-          request.onsuccess();
+  const files = new Map();
+  const db = { transaction(storeName) {
+    const tx = { objectStore: (name) => {
+      const values = name === "files" ? files : rows;
+      return {
+        get(id) {
+          const request = {};
+          setImmediate(() => {
+            request.result = structuredClone(values.get(id));
+            request.onsuccess();
+            setImmediate(() => tx.oncomplete?.());
+          });
+          return request;
+        },
+        put(value, id = value.id) {
+          values.set(id, structuredClone(value));
+          if (storeName === "files") setImmediate(() => tx.oncomplete?.());
+        },
+        add(value) {
+          assert.ok(!values.has(value.id));
+          values.set(value.id, structuredClone(value));
           setImmediate(() => tx.oncomplete?.());
-        });
-        return request;
-      },
-      put(row) { rows.set(row.id, structuredClone(row)); },
-    }) };
+        },
+      };
+    } };
     return tx;
   } };
   return { open() {
@@ -132,6 +144,63 @@ function meetingRows() {
 const originalIndexedDB = globalThis.indexedDB;
 test.before(() => { globalThis.indexedDB = meetingRows(); });
 test.after(() => { globalThis.indexedDB = originalIndexedDB; });
+
+test("an ordinary transcript updates notes without replacing newer publication state", async () => {
+  const library = new Library();
+  const initial = C.newRecording({ id: "transcript-race", shareID: "abcdefghij0123456789", createdAt: now, upload: "uploading" });
+  await library.update(initial);
+  const stale = library.get(initial.id);
+
+  const published = { ...initial, upload: "uploaded", playback: { hls: true, mp4: true },
+    access: { ...initial.access, expiresAt: new Date("2027-01-10T10:00:00Z") } };
+  await library.update(published);
+  Object.assign(stale, { transcriptStatus: "ready", summary: "Notes", summaryEngine: "extractive" });
+  assert.equal(await library.updateExisting(stale), true);
+
+  const row = await store.getRow(initial.id);
+  for (const recording of [library.get(initial.id), C.recordingFromJSON(row.json)]) {
+    assert.deepEqual(recording.playback, published.playback);
+    assert.deepEqual(recording.access, published.access);
+    assert.equal(recording.upload, published.upload);
+    assert.equal(recording.transcriptStatus, "ready");
+    assert.equal(recording.summary, "Notes");
+    assert.equal(recording.summaryEngine, "extractive");
+  }
+});
+
+test("republishing restores HLS from a completed upload at the open location", async () => {
+  for (const [id, key, uploadedLocation, expectedUploads] of [
+    ["open-repair", null, null, []],
+    ["old-location", null, "old-key", [C.File.initSegment, C.segmentFile(1), C.File.playlist]],
+    ["protected", "current-key", null, []],
+  ]) {
+    const recording = C.newRecording({ id, shareID: "abcdefghij0123456789", createdAt: now, upload: "uploaded" });
+    recording.captureState = "complete";
+    recording.transcriptStatus = "none";
+    recording.playback.mp4 = true;
+    recording.access.key = key;
+    const log = { ...C.newSegmentLog(), hasInit: true, ended: true, segments: [{ index: 1, duration: 2 }] };
+    const progress = { uploadedLocation, uploadedInit: true, uploaded: [1], uploadedFinalPlaylist: true };
+    const library = new Library();
+    await library.update(recording, { log, progress });
+    await store.putFile(id, C.File.initSegment, new Uint8Array([1]));
+    await store.putFile(id, C.segmentFile(1), new Uint8Array([2]));
+
+    const uploads = [], manifests = [];
+    const publisher = new Publisher({ library, auth: { session: async () => ({ uid: "owner" }) },
+      settings: () => ({}), ui: { toast() {} } });
+    publisher.firestore = () => ({ ensureRoom: async () => {}, upsertLibraryEntry: async () => {} });
+    publisher.storage = () => ({ upload: async (_share, file) => uploads.push(file) });
+    publisher.uploadMeta = async (r, status) => manifests.push(C.remoteMeta(r, status, "Owner", "Reel web"));
+    await publisher.publish(recording);
+
+    assert.equal(library.get(id).upload, "uploaded", id);
+    assert.deepEqual(manifests.map(({ status, playback }) => ({ status, playback })),
+      [{ status: "ready", playback: { hls: !key, mp4: true } }], id);
+    assert.equal((await store.getRow(id)).json.playback.hls, !key, id);
+    assert.deepEqual(uploads, expectedUploads, id);
+  }
+});
 
 test("meeting share uses the confirmed account and checks ownership in the persisted row", async () => {
   const original = meetingRecording("localOnly");
