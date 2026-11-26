@@ -7,6 +7,7 @@ import {app,BrowserWindow,ipcMain} from 'electron';
 import {startAssetServer} from '../src/asset-server.mjs';
 import {whisperSamples} from '../src/meeting-processing.mjs';
 import {createLocalWhisper} from '../src/local-whisper.mjs';
+import {withSmokeTimeout} from '../src/smoke-timeout.mjs';
 
 const audioPath=process.env.REEL_WHISPER_SMOKE_AUDIO;
 const packagedRoot=process.env.REEL_WHISPER_SMOKE_ROOT;
@@ -35,6 +36,11 @@ class SmokeWindow extends BrowserWindow{constructor(options){super(options);wind
 }}
 let assets,local,exitCode=0,modelNetworkBlocked=false,blockedRemoteRequests=0;
 const loggedPhases=new Set(),lastProgressBucket=new Map();
+async function bounded(phase,operation,timeoutMs){
+  currentPhase=phase;
+  log(`${phase}_started`);
+  return withSmokeTimeout(operation,timeoutMs,()=>log(`${phase}_timeout`));
+}
 const phaseLimits={
   window_create_requested:30_000,window_reused:30_000,renderer_load_started:30_000,renderer_dom_ready:30_000,
   renderer_load_complete:30_000,renderer_ready:30_000,task_sent:15_000,worker_message_sent:15_000,
@@ -90,41 +96,48 @@ async function transcribeWithBounds(name,samples,totalTimeoutMs){
     clearTimeout(phaseTimer);clearTimeout(totalTimer);onPhase=()=>{};
   }
 }
-try{
-  log('smoke_start');
-  await app.whenReady();
-  log('electron_ready');
-  assets=await startAssetServer({root:packagedRoot});
-  log('packaged_asset_server_ready');
-  local=createLocalWhisper({BrowserWindow:SmokeWindow,ipcMain,origin:assets.localAIOrigin,ownerID:()=> 'smoke-owner',
-    onDiagnostic:reportProgress,
-    allowRemoteModelRequest:()=>{if(modelNetworkBlocked){blockedRemoteRequests++;return false;}return true;}});
-  const samples=await whisperSamples(new Blob([await readFile(audioPath)]));
-  log('audio_fixture_ready');
-  const first=await transcribeWithBounds('first',samples,45*60_000);
-  assert.equal(first.engine,'Whisper large-v3-turbo q8');
-  assert.ok(first.text.trim(),'Whisper must decode speech from the synthetic WAV.');
-  assert.ok(/local|meeting|privacy|transcription|device/iu.test(first.text),`Unexpected Whisper output: ${first.text.slice(0,180)}`);
-  log('first_transcription_complete');
-  modelNetworkBlocked=true;
-  log('offline_policy_enabled');
-  windows.at(-1).destroy();
-  await new Promise(resolve=>setImmediate(resolve));
-  const second=await transcribeWithBounds('offline',samples,12*60_000);
-  assert.equal(second.engine,'Whisper large-v3-turbo q8');
-  assert.ok(/local|meeting|privacy|transcription|device/iu.test(second.text),`Offline cached inference failed: ${second.text.slice(0,180)}`);
-  log('offline_transcription_complete');
-  const remoteRequestBlocked=await windows.at(-1).webContents.executeJavaScript(
-    `fetch('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json',{cache:'no-store'}).then(()=>false,()=>true)`);
-  assert.equal(remoteRequestBlocked,true,'The recreated inference window must block model network requests.');
-  assert.equal(blockedRemoteRequests,1,'The production network policy must deny the probe request after window recreation.');
-  log('offline_network_denial_verified');
-  log('smoke_passed');
-}catch(error){
-  exitCode=1;log(`smoke_failed_at_${currentPhase}_${error?.name==='AbortError'?'cancelled':'error'}`);
-  process.stderr.write(`Packaged local Whisper smoke failed in ${currentRun}/${currentPhase}.\n`);
-}finally{
-  local?.dispose();
-  await assets?.close();
-  app.exit(exitCode);
+async function runSmoke(){
+  try{
+    log('smoke_start');
+    await bounded('electron_startup',()=>app.whenReady(),60_000);
+    log('electron_ready');
+    assets=await bounded('asset_server_startup',()=>startAssetServer({root:packagedRoot}),15_000);
+    log('packaged_asset_server_ready');
+    local=createLocalWhisper({BrowserWindow:SmokeWindow,ipcMain,origin:assets.localAIOrigin,ownerID:()=> 'smoke-owner',
+      onDiagnostic:reportProgress,
+      allowRemoteModelRequest:()=>{if(modelNetworkBlocked){blockedRemoteRequests++;return false;}return true;}});
+    const samples=await bounded('audio_fixture_load',async()=>whisperSamples(new Blob([await readFile(audioPath)])),30_000);
+    log('audio_fixture_ready');
+    const first=await transcribeWithBounds('first',samples,45*60_000);
+    assert.equal(first.engine,'Whisper large-v3-turbo q8');
+    assert.ok(first.text.trim(),'Whisper must decode speech from the synthetic WAV.');
+    assert.ok(/local|meeting|privacy|transcription|device/iu.test(first.text),`Unexpected Whisper output: ${first.text.slice(0,180)}`);
+    log('first_transcription_complete');
+    modelNetworkBlocked=true;
+    log('offline_policy_enabled');
+    await bounded('offline_window_recreation',()=>{
+      windows.at(-1).destroy();
+      return new Promise(resolve=>setImmediate(resolve));
+    },5_000);
+    const second=await transcribeWithBounds('offline',samples,12*60_000);
+    assert.equal(second.engine,'Whisper large-v3-turbo q8');
+    assert.ok(/local|meeting|privacy|transcription|device/iu.test(second.text),`Offline cached inference failed: ${second.text.slice(0,180)}`);
+    log('offline_transcription_complete');
+    const remoteRequestBlocked=await bounded('offline_network_probe',()=>windows.at(-1).webContents.executeJavaScript(
+      `fetch('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json',{cache:'no-store'}).then(()=>false,()=>true)`),20_000);
+    assert.equal(remoteRequestBlocked,true,'The recreated inference window must block model network requests.');
+    assert.equal(blockedRemoteRequests,1,'The production network policy must deny the probe request after window recreation.');
+    log('offline_network_denial_verified');
+    log('smoke_passed');
+  }catch(error){
+    exitCode=1;log(`smoke_failed_at_${currentPhase}_${error?.name==='AbortError'?'cancelled':'error'}`);
+    process.stderr.write(`Packaged local Whisper smoke failed in ${currentRun}/${currentPhase}.\n`);
+  }finally{
+    try{if(local)await bounded('local_ai_cleanup',()=>local.dispose(),5_000);}catch{exitCode=1;log('local_ai_cleanup_failed');}
+    try{if(assets)await bounded('asset_server_cleanup',()=>assets.close(),10_000);}catch{exitCode=1;log('asset_server_cleanup_failed');}
+    app.exit(exitCode);
+  }
 }
+// Keep Electron's ESM entry point synchronous; app.whenReady() must be attached
+// without awaiting at module scope for the Windows runtime to become ready.
+void runSmoke();

@@ -67,6 +67,49 @@ jobs:
         run: |
           node desktop-windows/tests/local-ai-package-preflight.mjs "$env:RUNNER_TEMP/demo-package/resources/app"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify packaged Electron readiness before model download
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          $appRoot = Resolve-Path "$env:RUNNER_TEMP/demo-package/resources/app"
+          $electron = Resolve-Path "$env:RUNNER_TEMP/demo-package/Reel.exe"
+          $packagePath = Join-Path $appRoot 'package.json'
+          $originalPackage = [IO.File]::ReadAllText($packagePath)
+          $probe = Join-Path $appRoot 'desktop-windows/local-ai/readiness-smoke.mjs'
+          $log = Join-Path $env:RUNNER_TEMP "electron-readiness-$env:REEL_ARCH.log"
+          try {
+            Copy-Item -LiteralPath 'desktop-windows/local-ai/readiness-smoke.mjs' -Destination $probe
+            $package = $originalPackage | ConvertFrom-Json
+            $package.main = 'desktop-windows/local-ai/readiness-smoke.mjs'
+            $utf8 = New-Object Text.UTF8Encoding($false)
+            [IO.File]::WriteAllText($packagePath, ($package | ConvertTo-Json), $utf8)
+            $env:REEL_WHISPER_SMOKE_LOG = $log
+            $process = Start-Process -FilePath $electron -PassThru -NoNewWindow
+            if (-not $process.WaitForExit(30 * 1000)) {
+              if (-not $process.HasExited) { $process.Kill($true) }
+              throw 'Packaged Electron did not become ready within 30 seconds, before model download.'
+            }
+            $process.Refresh()
+            if (Test-Path $log) { Get-Content -LiteralPath $log }
+            if ($process.ExitCode) { throw "Packaged Electron readiness smoke exited with $($process.ExitCode)" }
+            if (-not (Select-String -LiteralPath $log -Pattern '"phase":"electron_ready"' -Quiet)) {
+              throw 'Packaged Electron readiness smoke exited without an electron_ready diagnostic.'
+            }
+          } finally {
+            if (Test-Path $log) { Get-Content -LiteralPath $log }
+            [IO.File]::WriteAllText($packagePath, $originalPackage, (New-Object Text.UTF8Encoding($false)))
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:REEL_WHISPER_SMOKE_LOG -ErrorAction SilentlyContinue
+          }
+      - name: Upload packaged Electron readiness diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-readiness-${{ matrix.arch }}-diagnostics
+          path: ${{ runner.temp }}/electron-readiness-${{ matrix.arch }}.log
+          if-no-files-found: warn
+          retention-days: 7
       - name: Verify packaged local Whisper inference and offline cache
         shell: pwsh
         env:
