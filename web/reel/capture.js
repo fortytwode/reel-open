@@ -114,9 +114,9 @@ export class CaptureSession {
       bubbleScale: C.BUBBLE_DIAMETER[this.settings.bubbleSize] / 220,
       screen: this.display ? readable(this.display.getVideoTracks()[0]) : null,
       camera: this.camera ? readable(this.camera) : null,
-      audio: !!audioTrack, audioSampleRate: 48000, audioChannels: 2,
+      audio: !!audioTrack, audioSampleRate: 48000, audioChannels: 2, audioClockTime: audioTrack ? performance.now() / 1000 : null,
     };
-    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-drawing", import.meta.url), { type: "module" });
+    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-audio-timestamps", import.meta.url), { type: "module" });
     this.worker.onmessage = (e) => this.onWorker(e.data);
     this.worker.onerror = (e) => this.onWorker({ type: "error", message: e.message || "Recorder worker failed" });
     const ready = new Promise((resolve, reject) => { this.readyWaiter = { resolve, reject }; });
@@ -156,7 +156,8 @@ export class CaptureSession {
             throw new Error("Audio processing cannot keep up. Try a lower video quality.");
           }
           this.audioPendingFrames += frames;
-          try { this.worker.postMessage({ type: "audio", data: value }, [value]); }
+          // TrackProcessor PTS uses the page's monotonic clock, not AudioContext.currentTime's local origin.
+          try { this.worker.postMessage({ type: "audio", data: value, audioTime: performance.now() / 1000 }, [value]); }
           catch (e) { this.audioPendingFrames -= frames; throw e; }
           transferred = true;
         } finally { if (!transferred) value.close(); }
@@ -202,16 +203,16 @@ export class CaptureSession {
   }
 
   get pauseConfirmed() { return this.phase === "paused" && this.pauseID === this.confirmedPauseID; }
-  begin() { this.phase = "recording"; this.worker.postMessage({ type: "begin" }); }
+  begin() { this.phase = "recording"; this.worker.postMessage({ type: "begin", audioTime: performance.now() / 1000 }); }
   pause() {
     if (this.phase !== "recording") return;
     this.phase = "paused";
-    this.worker.postMessage({ type: "pause", pauseID: ++this.pauseID });
+    this.worker.postMessage({ type: "pause", pauseID: ++this.pauseID, audioTime: performance.now() / 1000 });
   }
   resume({ dropScreenFrame = false } = {}) {
     if (this.phase !== "paused") return;
     this.phase = "recording";
-    this.worker.postMessage({ type: "resume", dropScreenFrame });
+    this.worker.postMessage({ type: "resume", dropScreenFrame, audioTime: performance.now() / 1000 });
   }
   setAnnotations(strokes) { this.worker?.postMessage({ type: "annotations", strokes }); }
   setComposite(on) { this.composite = on; this.worker && this.worker.postMessage({ type: "layout", composite: on }); }
@@ -221,7 +222,7 @@ export class CaptureSession {
     this.phase = "finishing";
     await this.stopAudio();
     const done = new Promise((resolve, reject) => { this.doneWaiter = { resolve, reject }; });
-    this.worker.postMessage({ type: "stop" });
+    this.worker.postMessage({ type: "stop", audioTime: performance.now() / 1000 });
     try { return await done; } finally { this.release(); }
   }
   async cancel() {

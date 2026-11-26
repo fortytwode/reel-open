@@ -6,12 +6,15 @@
 // mp4-muxer writes fragmented MP4 that is cut into init.mp4 + 4 s segments for live HLS upload.
 // Paused time is removed (PauseClock), like Loom's "time shift on pause".
 // Runs in a worker so background-tab timer throttling never stalls the frame clock.
-import { AudioBatch } from "./audio.js?v=20261025-audio1";
+import { AudioBatch } from "./audio.js?v=20261126-audio-gap";
 import { Muxer, StreamTarget } from "../vendor/mp4-muxer.mjs";
 import { SegmentSplitter, parseInit, fragmentDuration } from "./fmp4.js";
 import { PauseClock, SEGMENT_INTERVAL, drawAnnotations, drawSharedFrame } from "./core.js?v=20261126-drawing";
 
 let S = null;
+const MAX_AUDIO_GAP_SECONDS = 2;
+const AUDIO_INTERVAL_HISTORY_SECONDS = MAX_AUDIO_GAP_SECONDS + 2;
+const MAX_AUDIO_INTERVALS = 1024;
 const post = (m, transfer) => self.postMessage(m, transfer || []);
 const now = () => performance.now() / 1000;
 
@@ -19,19 +22,21 @@ self.onmessage = async (e) => {
   const m = e.data;
   try {
     if (m.type === "start") await start(m);
-    else if (m.type === "audio") encodeAudio(m.data);
-    else if (m.type === "begin") begin();
+    else if (m.type === "audio") encodeAudio(m.data, m.audioTime);
+    else if (m.type === "begin") begin(m);
     else if (m.type === "pause") {
+      closeAudioInterval(m.audioTime);
       S.clock.pause(now());
       postTick(m.pauseID);
     }
     else if (m.type === "resume") {
       if (m.dropScreenFrame) { S.latest.screen?.close(); S.latest.screen = null; }
       S.clock.resume(now());
+      openAudioInterval(m.audioTime);
     }
     else if (m.type === "layout") { S.composite = m.composite; S.bubbleScale = m.bubbleScale ?? S.bubbleScale; }
     else if (m.type === "annotations" && S) S.annotations = m.strokes;
-    else if (m.type === "stop") await stop();
+    else if (m.type === "stop") await stop(m);
     else if (m.type === "cancel") cancel();
   } catch (err) {
     post({ type: "error", message: String(err && err.message || err) });
@@ -62,7 +67,10 @@ async function start(m) {
   S = {
     width, height, fps, layout: m.layout, composite: !!m.composite, bubbleScale: m.bubbleScale || 1, region: m.region, annotations: [],
     clock: new PauseClock(), frames: 0, nextKeyFrame: 0, audioFrames: 0,
-    audioChannels: m.audioChannels, audioSampleRate: m.audioSampleRate, audioBatch: m.audio ? new AudioBatch(4096, m.audioChannels) : null, running: false, stopped: false,
+    audioChannels: m.audioChannels, audioSampleRate: m.audioSampleRate, audioBatch: m.audio ? new AudioBatch(4096, m.audioChannels) : null,
+    timestampAudio: !!m.audio && Number.isFinite(m.audioClockTime),
+    audioInputEnd: null, audioIntervals: [], audioIntervalStart: null,
+    running: false, stopped: false,
     latest: { screen: null, camera: null }, readers: [], segments: 0, tracks: null, codecs: { video: null, audio: null },
     thumbDone: false, initPending: null, timer: null, error: null, waitingForVideoOutput: true,
   };
@@ -152,16 +160,66 @@ async function readAudio(stream) {
   }
 }
 
-function encodeAudio(data) {
+function encodeAudio(data, audioTime) {
   const frames = data.numberOfFrames;
   try {
-    if (S.running && !S.clock.isPaused && !S.stopped && S.aenc && S.aenc.state === "configured") {
+    if (S.timestampAudio && Number.isFinite(data.timestamp) && Number.isFinite(audioTime) && S.aenc && S.aenc.state === "configured") {
+      encodeTimestampedAudio(data);
+    } else if (S.running && !S.clock.isPaused && !S.stopped && S.aenc && S.aenc.state === "configured") {
       S.audioBatch.add(data, encodeAudioBatch);
     }
   } finally {
     data.close();
     post({ type: "audio-consumed", frames });
   }
+}
+
+function activeAudioIntervals() {
+  return S.audioIntervalStart == null ? S.audioIntervals : [...S.audioIntervals, { start: S.audioIntervalStart, end: Infinity }];
+}
+
+function addSilenceForRange(start, end) {
+  if (!(end > start) || !S.audioBatch) return;
+  const ranges = activeAudioIntervals().map(interval => ({ start: Math.max(start, interval.start),
+    end: Math.min(end, interval.end) })).filter(interval => interval.end > interval.start);
+  const gapFrames = ranges.reduce((total, interval) => total + Math.round((interval.end - interval.start) * S.audioSampleRate), 0);
+  if (gapFrames > S.audioSampleRate * MAX_AUDIO_GAP_SECONDS) throw new Error("Audio capture missed more than two seconds of samples.");
+  for (const interval of ranges) S.audioBatch.addSilence(Math.round((interval.end - interval.start) * S.audioSampleRate), encodeAudioBatch);
+}
+
+function encodeTimestampedAudio(data) {
+  const start = data.timestamp / 1e6, sampleRate = data.sampleRate || S.audioSampleRate;
+  const end = start + data.numberOfFrames / sampleRate;
+  const coverageStart = S.audioInputEnd ?? start;
+  if (start > coverageStart) addSilenceForRange(coverageStart, start);
+  for (const interval of activeAudioIntervals()) {
+    const from = Math.max(start, interval.start, S.audioInputEnd ?? start);
+    const to = Math.min(end, interval.end);
+    if (to <= from) continue;
+    const frameOffset = Math.max(0, Math.round((from - start) * sampleRate));
+    const frameEnd = Math.min(data.numberOfFrames, Math.round((to - start) * sampleRate));
+    if (frameEnd > frameOffset) S.audioBatch.add(data, encodeAudioBatch, frameOffset, frameEnd - frameOffset);
+  }
+  S.audioInputEnd = Math.max(S.audioInputEnd ?? end, end);
+  pruneAudioIntervals(S.audioInputEnd);
+}
+
+function pruneAudioIntervals(referenceTime) {
+  const retainAfter = referenceTime - AUDIO_INTERVAL_HISTORY_SECONDS;
+  S.audioIntervals = S.audioIntervals.filter(interval => interval.end > retainAfter);
+  if (S.audioIntervals.length > MAX_AUDIO_INTERVALS) throw new Error("Audio capture changed state too frequently.");
+}
+
+function closeAudioInterval(audioTime) {
+  if (S.timestampAudio && Number.isFinite(audioTime) && S.audioIntervalStart != null && audioTime > S.audioIntervalStart) {
+    S.audioIntervals.push({ start: S.audioIntervalStart, end: audioTime });
+    S.audioIntervalStart = null;
+    pruneAudioIntervals(Math.max(audioTime, S.audioInputEnd ?? -Infinity));
+  }
+}
+
+function openAudioInterval(audioTime) {
+  if (S.timestampAudio && Number.isFinite(audioTime)) S.audioIntervalStart = audioTime;
 }
 
 function encodeAudioBatch(samples, frames) {
@@ -174,9 +232,10 @@ function encodeAudioBatch(samples, frames) {
   try { S.aenc.encode(out); } finally { out.close(); }
 }
 
-function begin() {
+function begin(m) {
   S.clock.begin(now());
   S.running = true;
+  if (S.timestampAudio && Number.isFinite(m.audioTime)) S.audioIntervalStart = m.audioTime;
   S.timer = setInterval(tick, Math.max(5, 500 / S.fps));
   tick();
 }
@@ -282,8 +341,12 @@ function onSegment(bytes) {
   post({ type: "segment", index, duration, bytes }, [bytes.buffer]);
 }
 
-async function stop() {
+async function stop(m) {
   if (!S || S.stopped) return;
+  closeAudioInterval(m.audioTime);
+  if (S.timestampAudio && Number.isFinite(m.audioTime) && S.audioInputEnd != null && m.audioTime > S.audioInputEnd) {
+    addSilenceForRange(S.audioInputEnd, m.audioTime);
+  }
   const wasPaused = S.clock.isPaused;
   S.clock.stop(now());
   const t = S.clock.elapsed(now());
