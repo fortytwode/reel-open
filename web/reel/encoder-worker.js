@@ -60,7 +60,7 @@ async function start(m) {
     clock: new PauseClock(), frames: 0, nextKeyFrame: 0, audioFrames: 0,
     audioChannels: m.audioChannels, audioSampleRate: m.audioSampleRate, audioBatch: m.audio ? new AudioBatch(4096, m.audioChannels) : null, running: false, stopped: false,
     latest: { screen: null, camera: null }, readers: [], segments: 0, tracks: null, codecs: { video: null, audio: null },
-    thumbDone: false, initPending: null, timer: null, error: null,
+    thumbDone: false, initPending: null, timer: null, error: null, waitingForVideoOutput: true,
   };
   S.canvas = new OffscreenCanvas(width, height);
   S.ctx = S.canvas.getContext("2d", { alpha: false, desynchronized: true });
@@ -78,6 +78,7 @@ async function start(m) {
   });
   S.venc = new VideoEncoder({
     output: (chunk, meta) => {
+      S.waitingForVideoOutput = false;
       if (meta && meta.decoderConfig && !S.codecs.video) {
         S.codecs.video = { codec: "avc", codecString: meta.decoderConfig.codec, width, height, description: copyBytes(meta.decoderConfig.description) };
       }
@@ -184,6 +185,12 @@ function tick() {
   let n = 0;
   while (S.frames < target && n++ < 3) emitFrame();
   if (S.frames < target - S.fps) S.frames = target - 1;   // fell far behind (machine asleep): skip ahead
+  // If startup has queued two seconds of video without a single output, request one
+  // drain without waiting for it in the frame loop or changing the selected encoder.
+  if (S.waitingForVideoOutput && S.venc.state === "configured" && S.venc.encodeQueueSize >= S.fps * 2) {
+    S.waitingForVideoOutput = false;
+    S.venc.flush().catch((error) => { if (!S.stopped) fail("Video encoder: " + error.message); });
+  }
   const wall = now();
   if (wall - (S.lastTick || 0) >= 0.25) {
     S.lastTick = wall;
