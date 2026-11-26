@@ -91,6 +91,7 @@ try {
     $identity = 'RocketShipHQ.Reel'
     $minOS = '10.0.19041.0'
     $arch = $Architecture
+    $toastActivatorClsid = 'A4E2C27A-6732-45DA-B357-C33516B7901B'
     $manifest = @"
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
@@ -125,12 +126,12 @@ try {
           BackgroundColor="#FFFFFF" />
       <Extensions>
         <desktop:Extension Category="windows.toastNotificationActivation">
-          <desktop:ToastNotificationActivation ToastActivatorCLSID="{A4E2C27A-6732-45DA-B357-C33516B7901B}" />
+          <desktop:ToastNotificationActivation ToastActivatorCLSID="$toastActivatorClsid" />
         </desktop:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:ExeServer Executable="Reel.exe" DisplayName="Reel Companion" Arguments="----AppNotificationActivated:">
-              <com:Class Id="{A4E2C27A-6732-45DA-B357-C33516B7901B}" />
+              <com:Class Id="$toastActivatorClsid" />
             </com:ExeServer>
           </com:ComServer>
         </com:Extension>

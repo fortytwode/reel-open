@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,29 +16,55 @@ const receiver = path.join(stateRoot, 'receiver.ps1');
 writeFileSync(receiver, `param([string]$Activation)\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'delivered.txt'), $Activation)\n`);
 const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: powershell,
   launchArguments: mode === 'portable' ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', receiver] : []});
-const command = script => execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-  {encoding:'utf8', windowsHide:true, timeout:20_000}).trim();
+const command = (phase,script,timeout=15_000) => {
+  console.log(`Windows reminder smoke: ${phase} (Node ${process.arch}).`);
+  const started=Date.now();
+  const output=execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {encoding:'utf8', windowsHide:true, timeout}).trim();
+  console.log(`Windows reminder smoke: ${phase} completed in ${Date.now()-started} ms.`);
+  return output;
+};
+const taskQuery = name => command('read scheduled task through Task Scheduler COM',
+  `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${name}'); `+
+  `$p=$t.Definition.Principal; $principal=$p.UserId; $sid=$principal; `+
+  `if ($sid -notmatch '^S-1-') { $account=$principal; if ($account -notmatch '\\\\') { $account=$env:USERDOMAIN+'\\'+$account }; `+
+  `$sid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
+  `$current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; `+
+  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current;logon=[int]$p.LogonType;runLevel=[int]$p.RunLevel;args=$t.Definition.Actions.Item(1).Arguments;start=$t.Definition.Triggers.Item(1).StartBoundary} | ConvertTo-Json -Compress`);
+const taskCount = () => Number(command('count this scope’s scheduled tasks through Task Scheduler COM',
+  `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $f=$s.GetFolder([string][char]92); $count=0; `+
+  `foreach($task in @($f.GetTasks(0))) { if($task.Name.StartsWith('ReelReminder_${scope}_',[StringComparison]::Ordinal)) { $count++ } }; $count`));
 let completed = false;
 try {
+  const runtime=JSON.parse(command('inspect Task Scheduler PowerShell host',
+    `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value} | ConvertTo-Json -Compress`,10_000));
+  assert.equal(runtime.is64Bit,true,'Task Scheduler COM is queried from a 64-bit PowerShell host.');
+  console.log(`Task Scheduler PowerShell host: ${JSON.stringify(runtime)}`);
+  const currentSid=command('resolve current user SID','[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',10_000);
+  const sidHash=createHash('sha256').update(currentSid,'utf8').digest('hex');
+  const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
+  console.log('Windows reminder smoke: register current-user task.');
   manager.sync([{token,start:taskStart}]);
-  const taskJson = command(`$t=Get-ScheduledTask | Where-Object { $_.TaskName -like 'ReelReminder_${scope}_*' -and $_.Actions[0].Arguments.Contains('${token}') } | Select-Object -First 1; if (-not $t) { exit 2 }; [pscustomobject]@{ name=$t.TaskName; userSid=$t.Principal.UserId; logon=$t.Principal.LogonType.ToString(); args=$t.Actions[0].Arguments; start=$t.Triggers[0].StartBoundary } | ConvertTo-Json -Compress`);
-  let info = JSON.parse(taskJson);
-  const currentSid = command('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value');
-  assert.equal(info.userSid, currentSid, 'The scheduled task is registered to the current Windows user SID.');
-  assert.equal(info.logon, 'Interactive', 'The task uses the current interactive token and stores no password.');
+  console.log('Windows reminder smoke: Task Scheduler registration returned.');
+  let info = taskQuery(taskName);
+  assert.equal(info.userSid, info.currentSid, `Task principal ${info.user} resolves to the current Windows user SID.`);
+  assert.equal(info.logon,3,'The task uses TASK_LOGON_INTERACTIVE_TOKEN and stores no password.');
+  assert.equal(info.runLevel,0,'The task runs at the current user’s least-privileged run level.');
   assert.match(info.args, new RegExp(token));
   assert.equal(Date.parse(info.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
   assert.ok(!info.args.includes('private calendar title') && !info.args.includes('private-event-id'));
   const retryEnd=new Date(Date.now()+60_000).toISOString();
   const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
   manager.sync([{token,start:alreadyDueRetry,retry:true,end:retryEnd}]);
-  const retriedJson=command(`$t=Get-ScheduledTask | Where-Object { $_.TaskName -eq '${info.name}' } | Select-Object -First 1; if (-not $t) { exit 2 }; [pscustomobject]@{ name=$t.TaskName; start=$t.Triggers[0].StartBoundary } | ConvertTo-Json -Compress`);
-  info=JSON.parse(retriedJson);
-  assert.equal(info.name,JSON.parse(taskJson).name,'Rearming replaces the existing one-shot task instead of leaving a consumed task.');
+  console.log('Windows reminder smoke: retry task update returned.');
+  const retried=taskQuery(taskName);
+  assert.equal(retried.name,taskName,'Rearming replaces the existing one-shot task instead of leaving a consumed task.');
+  info=retried;
   assert.ok(Date.parse(info.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
   assert.ok(Date.parse(info.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
-  command(`Start-ScheduledTask -TaskName '${info.name}'`);
+  command('run registered task through Task Scheduler COM',
+    `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${info.name}'); $null=$t.Run($null)`);
   const deadline = Date.now()+15_000;
   while (Date.now()<deadline) {
     if (mode==='portable') {
@@ -49,16 +76,14 @@ try {
   }
   assert.equal(completed,true,'The registered task runs its trigger action.');
   manager.sync([{token,start:new Date(Date.now()-10_000).toISOString(),retry:true,end:new Date(Date.now()+2_000).toISOString()}]);
-  const expiredCount=command(`@(Get-ScheduledTask | Where-Object { $_.TaskName -like 'ReelReminder_${scope}_*' }).Count`);
-  assert.equal(Number(expiredCount),0,'No retry task remains when its safe delay would reach the meeting end.');
+  assert.equal(taskCount(),0,'No retry task remains when its safe delay would reach the meeting end.');
   if (mode==='msix') {
     assert.match(readFileSync(manager.launchPath,'utf8'),/"mode":"msix"/);
-    assert.ok(command("Get-AppxPackage -Name 'RocketShipHQ.Reel' | Select-Object -First 1 -ExpandProperty PackageFamilyName"),
+    assert.ok(command('resolve installed MSIX identity',"Get-AppxPackage -Name 'RocketShipHQ.Reel' | Select-Object -First 1 -ExpandProperty PackageFamilyName"),
       'The MSIX launch resolver finds the currently installed package family.');
   }
   manager.sync([]);
-  const remaining=command(`@(Get-ScheduledTask | Where-Object { $_.TaskName -like 'ReelReminder_${scope}_*' }).Count`);
-  assert.equal(Number(remaining),0,'Opt-out cleanup removes the per-user reminder task.');
+  assert.equal(taskCount(),0,'Opt-out cleanup removes the per-user reminder task.');
   console.log(`Windows Task Scheduler ${mode} registration/run/delete passed.`);
 } finally {
   try { manager.sync([]); } catch { /* Preserve the original smoke failure while attempting task cleanup. */ }

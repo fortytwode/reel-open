@@ -61,8 +61,9 @@ function Assert-ToastActivation($package) {
     $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
     $activation = @($manifest.SelectNodes("//*[local-name()='ToastNotificationActivation']"))
     $classes = @($manifest.SelectNodes("//*[local-name()='ExeServer' and @Executable='Reel.exe']/*[local-name()='Class']"))
-    if ($activation.Count -ne 1 -or $activation[0].GetAttribute('ToastActivatorCLSID') -ne '{A4E2C27A-6732-45DA-B357-C33516B7901B}' -or
-        $classes.Count -ne 1 -or $classes[0].GetAttribute('Id') -ne '{A4E2C27A-6732-45DA-B357-C33516B7901B}') {
+    $toastActivatorClsid = 'A4E2C27A-6732-45DA-B357-C33516B7901B'
+    if ($activation.Count -ne 1 -or $activation[0].GetAttribute('ToastActivatorCLSID') -ne $toastActivatorClsid -or
+        $classes.Count -ne 1 -or $classes[0].GetAttribute('Id') -ne $toastActivatorClsid) {
         throw 'The MSIX package must register Electron toast activation for Companion.'
     }
     Write-Output 'Installed Companion toast activation identity verified.'
