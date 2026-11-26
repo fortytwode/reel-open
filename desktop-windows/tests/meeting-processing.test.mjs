@@ -21,7 +21,7 @@ async function fixture(t, { frames = 16000, fetcher } = {}) {
   const audioPath = path.join(root, 'audio.pcm'), samples = Buffer.alloc(frames * 2);
   for (let i = 0; i < frames; i++) samples.writeInt16LE((i % 1000) - 500, i * 2);
   await writeFile(audioPath, samples);
-  let processing = initial(), profile = { userID: ownerUserID }, tokenProvider = async () => 'firebase-token';
+  let processing = initial(), profile = { userID: ownerUserID, email: 'owner@northwind.example' }, tokenProvider = async () => 'firebase-token';
   const listeners = new Set(), calls = [], writes = [];
   const auth = { getProfile: () => profile, getIdToken: () => tokenProvider(), onStateChange: listener => { listeners.add(listener); return () => listeners.delete(listener); } };
   const store = {
@@ -211,4 +211,24 @@ test('long meeting PCM metadata is accepted without a three-hour limit', async t
   await assert.rejects(async () => {
     for await (const chunk of pcmChunks({ ...f.info, frameCount: 4 * 60 * 60 * 16000 })) void chunk;
   }, /audio is incomplete/);
+});
+
+test('a pasted-link recording reconciles delivery only to the signed-in owner', async t => {
+  let deliverToExtraRecipient = true;
+  const f = await fixture(t, { fetcher: async (url, options) => {
+    if (url.endsWith('/transcription')) return response({ text: 'A transcript', engine: 'OpenAI gpt-transcribe' });
+    if (url.endsWith('/summary')) return response({ summary: 'A summary', engine: 'OpenAI gpt-6.1-sol' });
+    const body = JSON.parse(options.body);
+    assert.equal(body.calendar, null);
+    assert.deepEqual(body.attendees, []);
+    return response({ ...receipt(), recipients: deliverToExtraRecipient
+      ? ['owner@northwind.example', 'other@northwind.example'] : ['owner@northwind.example'] });
+  } });
+  f.set({ ...initial(), meeting: { calendar: null, attendees: ['ignored@northwind.example'] } });
+  await assert.rejects(f.processor.process({ ownerUserID, id }), /delivery was not confirmed/);
+  assert.equal(f.get().phase, 'failed');
+  deliverToExtraRecipient = false;
+  const result = await f.processor.process({ ownerUserID, id });
+  assert.equal(result.phase, 'completed');
+  assert.deepEqual(result.receipt.recipients, ['owner@northwind.example']);
 });

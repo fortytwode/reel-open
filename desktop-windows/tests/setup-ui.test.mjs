@@ -155,3 +155,85 @@ test('a persisted uploading share is retryable after app restart', async () => {
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a'}]]);
 });
+
+test('the dashboard joins a listed meeting with the current owner and can cancel while joining', async () => {
+  const elements = new Map();
+  const getElement = id => {
+    if (!elements.has(id)) elements.set(id, new Element());
+    return elements.get(id);
+  };
+  let onState, onClick, finishJoin;
+  const calls = [];
+  const initial = {
+    profile: { userID: 'owner-a', email: 'a@example.com', calendarConnected: true },
+    settings: { participantConsent: true, systemAudioConsent: true, autoJoin: false },
+    meetings: [{ id: 'calendar-occurrence', title: 'Review', start: '2026-11-26T12:00:00Z' }],
+  };
+  const api = {
+    state: async () => initial,
+    onState: callback => { onState = callback; },
+    action: (name, payload) => {
+      calls.push(JSON.stringify([name, payload]));
+      return name === 'joinMeeting' ? new Promise(resolve => { finishJoin = resolve; }) : Promise.resolve();
+    },
+  };
+  const document = { getElementById: getElement, createElement: tag => new Element(tag), querySelectorAll: () => [],
+    addEventListener: (name, callback) => { if (name === 'click') onClick = callback; } };
+  const source = await readFile(new URL('../ui/setup.mjs', import.meta.url), 'utf8');
+  vm.runInNewContext(source, { window: { reelDesktop: api }, document, setTimeout, clearTimeout });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const joinButton = () => getElement('meetingsList').children[0].children[1].children.find(child => child.dataset.action === 'joinMeeting');
+  const click = element => onClick({ target: { closest: selector => selector === '[data-action]' ? element : null } });
+  assert.equal(joinButton().textContent, 'Join & record');
+  click(joinButton());
+  assert.equal(joinButton().disabled, true);
+  assert.deepEqual(calls.map(call => JSON.parse(call)), [
+    ['joinMeeting', { id: 'calendar-occurrence', includeMicrophone: false, expectedOwnerUserID: 'owner-a' }],
+  ]);
+
+  const cancel = getElement('cancelJoinButton');
+  cancel.dataset.action = 'cancelJoin';
+  onState({ ...initial, status: { phase: 'joining' } });
+  assert.equal(cancel.classList.values.has('hidden'), false);
+  click(cancel);
+  assert.deepEqual(JSON.parse(calls[1]), ['cancelJoin', { expectedOwnerUserID: 'owner-a' }]);
+  finishJoin({ ...initial, status: { phase: 'cancelled' } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(cancel.classList.values.has('hidden'), true);
+  assert.equal(joinButton().disabled, false);
+});
+
+test('signed-in users can paste a link without Calendar and only after confirming consent', async () => {
+  const elements = new Map();
+  const getElement = id => {
+    if (!elements.has(id)) elements.set(id, new Element());
+    return elements.get(id);
+  };
+  let onSubmit;
+  const requests = [];
+  const snapshot = { profile: { userID: 'owner-a', email: 'a@example.com', calendarConnected: false }, configured: true };
+  const api = { state: async () => snapshot, action: async (name, payload) => {
+    requests.push(JSON.stringify([name, payload]));
+    return { ...snapshot, status: { phase: 'capturing', message: 'Recording' } };
+  } };
+  const document = { getElementById: getElement, createElement: tag => new Element(tag), querySelectorAll: () => [],
+    addEventListener: (name, callback) => { if (name === 'submit') onSubmit = callback; } };
+  const source = await readFile(new URL('../ui/setup.mjs', import.meta.url), 'utf8');
+  vm.runInNewContext(source, { window: { reelDesktop: api }, document, setTimeout, clearTimeout });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(getElement('manualMeeting').classList.values.has('hidden'), false);
+  getElement('meetingLink').value = 'https://meet.google.com/abc-defg-hij';
+  const form = { target: { id: 'meetingLinkForm' }, preventDefault() {} };
+  onSubmit(form);
+  assert.deepEqual(requests, []);
+  getElement('meetingLinkConsent').checked = true;
+  onSubmit(form);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(requests.map(request => JSON.parse(request)), [['joinMeetingLink', {
+    url: 'https://meet.google.com/abc-defg-hij', participantsConfirmed: true, includeMicrophone: false, expectedOwnerUserID: 'owner-a',
+  }]]);
+  assert.equal(getElement('meetingLink').value, '');
+  assert.equal(getElement('meetingLinkConsent').checked, false);
+  assert.equal(getElement('manualStop').classList.values.has('hidden'), false);
+});

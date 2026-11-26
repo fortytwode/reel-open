@@ -398,3 +398,83 @@ test('join errors without the exact typed code and valid session ID cannot regis
     assert.equal(closes, 0);
   }
 });
+
+test('manual join opens the selected future meeting with auto-join off, then saves and deduplicates it', async () => {
+  const f = fixture();
+  f.setSettings({ autoJoin: false });
+  f.setTime(start - 10 * 60_000);
+  await f.coordinator.refresh();
+  await f.coordinator.tick();
+  assert.equal(f.calls.join.length, 0);
+
+  await f.coordinator.joinMeeting({ meetingId: 'meeting-1', ownerUserID: 'firebase-owner' });
+  assert.equal(f.coordinator.getState().phase, 'capturing');
+  assert.equal(f.calls.join[0].consentConfirmed, true);
+  assert.equal(f.calls.start[0].hwnd, '12345');
+  assert.equal(f.calls.start[0].systemAudio, true);
+  assert.equal(f.calls.start[0].microphone, false);
+
+  f.setInspect('left');
+  await f.coordinator.tick();
+  assert.equal(f.coordinator.getState().phase, 'completed');
+  assert.equal(f.calls.complete.length, 1);
+  await assert.rejects(f.coordinator.joinMeeting({ meetingId: 'meeting-1', ownerUserID: 'firebase-owner' }), /already been recorded/);
+  assert.equal(f.calls.join.length, 1);
+});
+
+test('manual join rechecks consent, owner, and fresh calendar membership before opening Chrome', async () => {
+  const f = fixture();
+  await f.coordinator.refresh();
+  const selection = { meetingId: 'meeting-1', ownerUserID: 'firebase-owner' };
+  f.setSettings({ participantConsent: false });
+  await assert.rejects(f.coordinator.joinMeeting(selection), /confirm recording permissions/);
+  f.setSettings({ participantConsent: true });
+  await assert.rejects(f.coordinator.joinMeeting({ ...selection, ownerUserID: 'other-owner' }), /confirm recording permissions/);
+
+  f.setMeetings([]);
+  await assert.rejects(f.coordinator.joinMeeting(selection), /no longer available/);
+  assert.equal(f.calls.join.length, 0);
+});
+
+test('canceling an overlapping manual and scheduled join releases the owned window and prevents an automatic retry', async () => {
+  const gate = deferred();
+  let joinSignal;
+  const f = fixture({ join: async args => { joinSignal = args.signal; return gate.promise; } });
+  await f.coordinator.refresh();
+  const selection = { meetingId: 'meeting-1', ownerUserID: 'firebase-owner' };
+  const joining = f.coordinator.joinMeeting(selection);
+  await tickLoop();
+  await f.coordinator.tick();
+  assert.equal(f.coordinator.getState().phase, 'joining');
+  await assert.rejects(f.coordinator.joinMeeting(selection), /Finish the current meeting action/);
+  await f.coordinator.cancelJoin('other-owner');
+  assert.equal(joinSignal.aborted, false);
+  const cancelling = f.coordinator.cancelJoin('firebase-owner');
+  assert.equal(joinSignal.aborted, true);
+  gate.resolve({ ok: true, state: 'joined', sessionId: 'a'.repeat(32), hwnd: '12345', pid: 99 });
+  await Promise.all([joining, cancelling]);
+  assert.equal(f.coordinator.getState().phase, 'cancelled');
+  assert.equal(f.calls.start.length, 0);
+  assert.deepEqual(f.calls.close, ['a'.repeat(32)]);
+  await f.coordinator.refresh();
+  await f.coordinator.tick();
+  assert.equal(f.coordinator.getState().phase, 'scheduled');
+});
+
+test('each manual join chooses its own microphone and a denied mic never silently starts capture', async () => {
+  const inputs = [];
+  const f = fixture({ start: async args => {
+    inputs.push(args);
+    if (args.microphone) throw Object.assign(Error('Permission denied'), { code: 'microphone_unavailable' });
+    return {};
+  } });
+  f.setSettings({ autoJoin: false });
+  const selection = { meetingId: 'meeting-1', ownerUserID: 'firebase-owner' };
+  await f.coordinator.joinMeeting({ ...selection, microphone: true });
+  assert.equal(f.coordinator.getState().reason, 'microphone_unavailable');
+  assert.equal(f.calls.close.length, 1);
+  await f.coordinator.joinMeeting(selection);
+  assert.equal(f.coordinator.getState().phase, 'capturing');
+  assert.deepEqual(inputs.map(input => input.microphone), [true, false]);
+  await f.coordinator.cancel();
+});

@@ -58,13 +58,14 @@ export async function* pcmChunks(info, { startFrame = 0, signal } = {}) {
 function deliveryID(id) { return `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`; }
 function calendarContext(meeting) {
   if (meeting?.calendar) return meeting.calendar;
-  if (!meeting?.calendarID) return null;
+  if (!meeting?.calendarID || meeting.calendarID === 'manual') return null;
   return { calendar_id: meeting.calendarID, ...(meeting.eventID ? { event_id: meeting.eventID } : {}),
     ...(meeting.iCalUID ? { ical_uid: meeting.iCalUID } : {}), occurrence_start: meeting.start };
 }
-function receiptOK(value, domain) {
+function receiptOK(value, domain, onlyRecipient = null) {
   if (value?.verified !== true || value.email_status !== 'confirmed' || typeof value.page_id !== 'string'
     || !value.page_id || !Array.isArray(value.recipients) || value.recipients.some(email => !internalEmail(email, domain))) return false;
+  if (onlyRecipient && (value.recipients.length !== 1 || value.recipients[0].toLowerCase() !== onlyRecipient)) return false;
   try { const url = new URL(value.url); return url.protocol === 'https:' && ['notion.so', 'www.notion.so', 'app.notion.com'].includes(url.hostname); }
   catch { return false; }
 }
@@ -125,9 +126,12 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
     try {
       requireCurrent(ownerUserID, id, controller);
       processing = structuredClone(snapshot(ownerUserID, id));
-      if (receiptOK(processing.receipt, allowedEmailDomain)) return processing;
       const meeting = processing.meeting ?? {}, title = String(processing.title ?? meeting.title ?? 'Meeting');
-      const attendees = [...new Set((meeting.attendees ?? meeting.attendeeEmails ?? []).filter(x => typeof x === 'string'))];
+      const calendar = calendarContext(meeting);
+      const onlyRecipient = calendar ? null : auth.getProfile()?.email?.toLowerCase();
+      check(calendar || internalEmail(onlyRecipient, allowedEmailDomain), 'Sign in with your team account to deliver your recap.');
+      if (receiptOK(processing.receipt, allowedEmailDomain, onlyRecipient)) return processing;
+      const attendees = calendar ? [...new Set((meeting.attendees ?? meeting.attendeeEmails ?? []).filter(x => typeof x === 'string'))] : [];
       check(Number.isFinite(Date.parse(processing.createdAt)), 'Meeting start time is missing.');
       if (!processing.transcriptComplete) {
         const info = store.getAudioInfo({ ownerUserID, id });
@@ -173,8 +177,8 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
       await save(ownerUserID, id, controller, processing);
       const receipt = await request(ownerUserID, id, controller, deliveryURL + '/delivery/complete', JSON.stringify({ id: deliveryID(id), title,
         started_at: processing.createdAt, attendees, summary: processing.summary, segments: processing.segments,
-        calendar: calendarContext(meeting) }), { 'Content-Type': 'application/json' });
-      check(receiptOK(receipt, allowedEmailDomain), 'Meeting delivery was not confirmed. Retry to reconcile safely.');
+        calendar }), { 'Content-Type': 'application/json' });
+      check(receiptOK(receipt, allowedEmailDomain, onlyRecipient), 'Meeting delivery was not confirmed. Retry to reconcile safely.');
       processing = { ...processing, phase: 'completed', receipt, error: null };
       await save(ownerUserID, id, controller, processing);
       return processing;

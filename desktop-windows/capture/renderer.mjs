@@ -4,7 +4,7 @@ const api = window.reelCapture;
 const status = document.querySelector('#status');
 const MAX_PACKET = 16 * 1024 * 1024;
 const MAX_PENDING = 32 * 1024 * 1024;
-let stream = null, capture = null, failed = false, stopping = false, starting = false, sourceEnding = false, stopPromise;
+let stream = null, microphone = null, capture = null, failed = false, stopping = false, starting = false, sourceEnding = false, stopPromise;
 let sourceId, canRefreshAudio, refreshingAudio = false;
 let pendingBytes = 0, audioPending = 0, audioFailed = false, audioOffset = 0, audioSum = 0, audioCount = 0;
 const audioWrites = new Set();
@@ -40,7 +40,7 @@ function audioBlock(value) {
   } catch { sidecarFailure(); }
 }
 const pending = new Set();
-function releaseTracks() { stream?.getTracks().forEach(track => track.stop()); }
+function releaseTracks() { stream?.getTracks().forEach(track => track.stop()); microphone?.getTracks().forEach(track => track.stop()); }
 function fail(reason) {
   if (failed) return;
   failed = true; releaseTracks();
@@ -102,7 +102,7 @@ async function refreshAudio(request, deadline) {
     if (!failed && !stopping && !sourceEnding) await api.audioRefreshed(request, installed).catch(() => {});
   }
 }
-async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled }) {
+async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled, microphone: includeMicrophone }) {
   if (starting || failed || stopping) return;
   starting = true;
   try {
@@ -115,9 +115,16 @@ async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled
     if (stream.getVideoTracks().length !== 1 || stream.getAudioTracks().length !== 1) throw Error('Desktop video and audio required');
     stream.getVideoTracks()[0].addEventListener('ended', sourceEnded);
     watchAudioTrack(stream.getAudioTracks()[0]);
+    if (includeMicrophone) {
+      try { microphone = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }); }
+      catch { if (!failed && !stopping) fail('microphone_unavailable'); return; }
+      if (failed || stopping) { releaseTracks(); return; }
+      if (microphone.getAudioTracks().length !== 1) throw Error('Microphone audio required');
+      microphone.getAudioTracks()[0].addEventListener('ended', sourceEnded);
+    }
     capture = new CaptureSession({
-      settings: { quality: 'p720', fps: 15, audio: 'systemOnly', bubbleSize: 'medium' },
-      display: stream, camera: null, mic: null, composite: false,
+      settings: { quality: 'p720', fps: 15, audio: includeMicrophone ? 'micAndSystem' : 'systemOnly', bubbleSize: 'medium' },
+      display: stream, camera: null, mic: microphone, composite: false,
       events: { onAudio: audioBlock, onInit: bytes => append('init', 0, 0, bytes),
         onSegment: (index, duration, bytes) => append('fragment', index, duration, bytes),
         onError: () => fail('encoder_failed'), onSourceEnded: sourceEnded },
