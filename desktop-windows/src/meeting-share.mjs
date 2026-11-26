@@ -247,11 +247,10 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
         await storage.upload(bound.shareID,C.File.meta,C.encodeJSON(to.key?C.lockedStub(bound.shareID,to.passwordSalt,expiresAt,'ready'):C.remoteMeta(remote,'ready',profile.displayName||profile.email,'Reel Windows meeting')),
           {key:null,options:targetOptions});current(ownerUserID);
       } else if(to.key) {
-        // Publish the locked stub before revoking old objects so the ordinary viewer
-        // immediately requires the new password. Storage authorizes each object separately,
-        // so direct old-object reads may remain until every expiry update succeeds.
-        await storage.upload(bound.shareID,C.File.meta,C.encodeJSON(C.lockedStub(bound.shareID,to.passwordSalt,expiresAt,'processing')),
-          {key:null,options:targetOptions});current(ownerUserID);
+        // Storage authorizes each object separately and has no shared link-level ACL.
+        // Keep the current public metadata / old password stub in place until every old
+        // direct object has an expiry barrier; only then may writeProtected publish the
+        // new locked stub, so it never claims protection before the revocation completes.
         await setLocationExpiry(from.key,priorExpiry,oldFiles);current(ownerUserID);
         await firestore.setExpiry(oldRoom,priorExpiry);current(ownerUserID);
         await writeProtected();

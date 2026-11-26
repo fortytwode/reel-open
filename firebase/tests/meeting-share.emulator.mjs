@@ -163,7 +163,8 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,key,cfg))).ok,true,
     'If the first old-key revocation fails, the previous keyed video remains readable.');
   const interimOldStub=await (await fetch(C.downloadURL(shareID,C.File.meta,null,cfg))).json();
-  assert.equal(interimOldStub.locked,true);assert.equal(Object.hasOwn(interimOldStub,'title'),false);
+  assert.equal(interimOldStub.locked,true);assert.equal(interimOldStub.kdf.salt,salt,
+    'A failed password update retains only the previously published password claim.');
   failOnOldRevocation=2;oldRevocationCalls=0;
   await assert.rejects(failingOldShare.updateAccess({ownerUserID:ownerID,id}),/injected old-key expiry failure/);
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,key,cfg))).ok,false,
@@ -344,7 +345,8 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   const publicPending=await openStore.getShareRecord({ownerUserID:ownerID,id:openID});
   assert.ok(publicPending.share.accessUpdate);
   const interimStub=await (await fetch(C.downloadURL(publicShareID,C.File.meta,null,cfg))).json();
-  assert.equal(interimStub.locked,true);assert.equal(Object.hasOwn(interimStub,'title'),false);
+  assert.equal(interimStub.locked,false,'A failed revocation must not publish a locked stub for the new password.');
+  assert.equal(interimStub.title,'Synthetic open meeting');
   assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,true,
     'If the first object revocation fails, the old public video remains directly readable.');
   assert.equal((await fetch(C.downloadURL(publicShareID,C.File.transcriptText,null,cfg))).ok,true,
@@ -355,6 +357,8 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
     'A mid-revocation failure leaves the already-expired video denied.');
   assert.equal((await fetch(C.downloadURL(publicShareID,C.File.transcriptText,null,cfg))).ok,true,
     'A mid-revocation failure can leave a later public transcript object readable.');
+  const midRevocationMeta=await (await fetch(C.downloadURL(publicShareID,C.File.meta,null,cfg))).json();
+  assert.equal(midRevocationMeta.locked,false,'The link must not claim password protection while any old direct object remains readable.');
   failOnRevocation=0;revocationCalls=0;
   const openRetryStore=createLocalRecordingStore({root:openStoreRoot});
   const openRetry=createMeetingShare({auth:shareAuth,store:openRetryStore,org,cfg,
@@ -366,6 +370,9 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   const protectedPublicKey=protectedPublicRecord.share.access.key;
   assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,null,cfg))).ok,false,'The old open media path stays denied after migration.');
   assert.equal((await fetch(C.downloadURL(publicShareID,C.File.video,protectedPublicKey,cfg))).ok,true);
+  const protectedStub=await (await fetch(C.downloadURL(publicShareID,C.File.meta,null,cfg))).json();
+  assert.equal(protectedStub.locked,true);assert.equal(protectedStub.kdf.salt,protectedPublicRecord.share.access.passwordSalt,
+    'The locked stub is published only after every old public object has been revoked.');
   console.log(JSON.stringify({result:'PASS',ownerBoundRoom:true,otherOwnerDenied:true,privateLibraryDenied:true,
     passwordDeniedThenAccepted:true,publicMetadataStubOnly:true,publicMediaDenied:true,expiryPublished:true,
     accessPasswordChanged:true,oldAccessRevoked:true,oldKeyAccessCanPersistDuringFailedRevocation:true,expiryUpdated:true,passwordRemoved:true,failureRetrySurvivesRestart:true,
