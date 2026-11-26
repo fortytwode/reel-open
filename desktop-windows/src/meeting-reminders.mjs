@@ -45,12 +45,14 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
       notification.show();
     } catch { /* Windows notification settings may block local delivery. */ }
   }
-  function saveAndSync() {
+  function saveAndSync({ rearmToken = null, rearmStart = null } = {}) {
     if (!persistence) return true;
     const records = [...scheduled.values()].map(({ timer, ...record }) => record);
     try {
       persistence.save(records);
-      persistence.sync(records.filter(record => !record.fired).map(({ token, start }) => ({ token, start })));
+      persistence.sync(records.filter(record => !record.fired).map(({ token, start }) => ({
+        token, start: token === rearmToken && typeof rearmStart === 'string' ? rearmStart : start
+      })));
       lastError = null;
       needsSync = false;
       return true;
@@ -112,8 +114,8 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
     if (item.fired) return false;
     const time = at instanceof Date ? at.getTime() : Date.parse(at);
     if (owner === item.owner && reminders === true && Number.isFinite(time) && time < Date.parse(item.start)) {
-      // A task can be awakened slightly early by Windows; re-register its original boundary instead of losing it.
-      saveAndSync();
+      // Replace the consumed one-shot task with a near-term retry if Windows wakes it early.
+      saveAndSync({ rearmToken: item.token, rearmStart: new Date(time + 5_000).toISOString() });
       return false;
     }
     const authorized = owner === item.owner && reminders === true && Number.isFinite(time)

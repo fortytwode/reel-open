@@ -22,13 +22,19 @@ try {
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
   manager.sync([{token,start:taskStart}]);
   const taskJson = command(`$t=Get-ScheduledTask | Where-Object { $_.TaskName -like 'ReelReminder_${scope}_*' -and $_.Actions[0].Arguments.Contains('${token}') } | Select-Object -First 1; if (-not $t) { exit 2 }; [pscustomobject]@{ name=$t.TaskName; userSid=$t.Principal.UserId; logon=$t.Principal.LogonType.ToString(); args=$t.Actions[0].Arguments; start=$t.Triggers[0].StartBoundary } | ConvertTo-Json -Compress`);
-  const info = JSON.parse(taskJson);
+  let info = JSON.parse(taskJson);
   const currentSid = command('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value');
   assert.equal(info.userSid, currentSid, 'The scheduled task is registered to the current Windows user SID.');
   assert.equal(info.logon, 'Interactive', 'The task uses the current interactive token and stores no password.');
   assert.match(info.args, new RegExp(token));
   assert.equal(Date.parse(info.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
   assert.ok(!info.args.includes('private calendar title') && !info.args.includes('private-event-id'));
+  const retryStart=new Date(Date.now()+5_000).toISOString();
+  manager.sync([{token,start:retryStart}]);
+  const retriedJson=command(`$t=Get-ScheduledTask | Where-Object { $_.TaskName -eq '${info.name}' } | Select-Object -First 1; if (-not $t) { exit 2 }; [pscustomobject]@{ name=$t.TaskName; start=$t.Triggers[0].StartBoundary } | ConvertTo-Json -Compress`);
+  info=JSON.parse(retriedJson);
+  assert.equal(info.name,JSON.parse(taskJson).name,'Rearming replaces the existing one-shot task instead of leaving a consumed task.');
+  assert.equal(Date.parse(info.start),Date.parse(retryStart));
   command(`Start-ScheduledTask -TaskName '${info.name}'`);
   const deadline = Date.now()+15_000;
   while (Date.now()<deadline) {
