@@ -14,6 +14,9 @@ $runtimeRef = $runtimeCandidates | Where-Object { Test-Path -LiteralPath $_ -Pat
 $systemRuntimeCandidates = @(
     (Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETCore\v4.5\System.Runtime.dll'),
     (Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETCore\v4.5.2\System.Runtime.dll'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8.1\Facades\System.Runtime.dll'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\Facades\System.Runtime.dll'),
+    (Join-Path ${env:ProgramFiles(x86)} 'Reference Assemblies\Microsoft\Framework\.NETFramework\v4.5.2\Facades\System.Runtime.dll'),
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\System.Runtime.dll'),
     (Join-Path $env:WINDIR 'Microsoft.NET\FrameworkArm64\v4.0.30319\System.Runtime.dll'),
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\System.Runtime.dll')
