@@ -94,7 +94,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       <div class="mc-settings" data-settings></div>
       <div class="mc-events" data-events></div>
       <details class="mc-note" data-extension-note><summary>Detect meetings in Chrome or Edge</summary><p><a href="${esc(WEB_BASE)}/downloads/reel-meeting-prompt-0.1.1.zip" download>Download the meeting prompt extension</a>. Unzip it, open chrome://extensions or edge://extensions, turn on Developer mode, choose Load unpacked, and select the unzipped folder. On a meeting preview page, choose Allow, then confirm participant consent in Reel.</p></details>
-      <p class="mc-note" data-cloud-note>The cloud note taker can work while this computer is closed after you grant standing consent. Google Calendar is the only server calendar supported here. Outlook and Apple Calendar are available through the existing native connection; automatic server connection is not available.</p>
+      <p class="mc-note" data-cloud-note>The cloud note taker can work while this computer is closed after you grant standing consent. Google Calendar is the only server calendar supported here. Outlook and Apple Calendar connections are available through Reel for Mac.</p>
     </section>`;
 
   const q = (selector) => container.querySelector(selector);
@@ -186,6 +186,11 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     const hybridCloud = cloudNames.length > 0;
     const platform = String(capability.platform || navigator.platform || "").toLowerCase();
     const isMac = /mac|darwin/.test(platform);
+    const isWindows = /^win/.test(platform);
+    const localJoiningHelp = isWindows
+      ? "To join eligible meetings automatically on Windows, open Reel Companion from Start, connect Google Calendar and turn on automatic joining. Keep the app open and this computer awake. You can still record manually in the browser."
+      : isMac ? "Configure automatic joining in Reel Notetaker. Keep the app open and this Mac awake."
+      : "To record a meeting from this browser, open the meeting and capture it manually.";
     q(".mc-subtitle").textContent = publicSignup ? "Connect Google Calendar to find meetings and access your private notes."
       : "Choose which Google calendars Reel can use for meetings and recaps.";
     q("[data-extension-note]").hidden = publicSignup || desktop;
@@ -193,8 +198,8 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
     q("[data-cloud-note]").textContent = publicSignup
       ? "Connecting Calendar lets Reel read your selected calendars. You choose whether Reel may join and record meetings."
       : desktop && hybridCloud
-      ? `${cloudNames.join(" and ")} cloud note taker can join eligible meetings from your connected Google Calendar while this computer is closed, after participant consent. Cloud browser requests must match a connected calendar occurrence. Other providers use the Mac app while it is awake. Outlook and Apple Calendar remain native connections.`
-      : "The cloud note taker can work while this computer is closed after you grant standing consent. Google Calendar is the only server calendar supported here. Outlook and Apple Calendar are available through the existing native connection; automatic server connection is not available.";
+      ? `${cloudNames.join(" and ")} cloud note taker can join eligible meetings from your connected Google Calendar while this computer is closed, after participant consent. Cloud browser requests must match a connected calendar occurrence. For other eligible meetings, use Reel Notetaker on Mac or Reel Companion on Windows. Outlook and Apple Calendar connections are available through Reel for Mac.`
+      : "The cloud note taker can work while this computer is closed after you grant standing consent. Google Calendar is the only server calendar supported here. Outlook and Apple Calendar connections are available through Reel for Mac.";
     q("[data-live]").textContent = document.hidden ? "Paused while page is hidden" : state.busy ? "Working…" : "Live status";
     q("[data-message]").textContent = state.error || (!state.uid ? "Sign in to view or connect a calendar."
       : calendarResult === "connected" && !calendarAuthorized ? "" : calendarNotice);
@@ -206,7 +211,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
 
     q("[data-capabilities]").innerHTML = [
       !calendarAvailable && !calendarOAuth ? `<p class="mc-unavailable">Google Calendar connection is not available right now.</p>` : "",
-      desktop && !publicSignup ? `<p class="mc-note">Configure autojoin in the Mac app; Reel must stay awake. Windows autojoin is not yet available.</p>` : !botAvailable && (!publicSignup || calendarAuthorized) ? `<p class="mc-unavailable">Cloud meeting entry is not available right now.</p>` : "",
+      desktop && !publicSignup ? `<p class="mc-note">${localJoiningHelp}</p>` : !botAvailable && (!publicSignup || calendarAuthorized) ? `<p class="mc-unavailable">Cloud meeting entry is not available right now.</p>` : "",
     ].join("");
 
     const connected = !!state.config?.enabled;
