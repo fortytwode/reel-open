@@ -1,0 +1,54 @@
+name: Windows MSIX install and update
+
+on:
+  pull_request:
+    paths: ['desktop-windows/**', '.github/workflows/windows-msix.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msix-update:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, arch: x64 }
+          - { runner: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          architecture: ${{ matrix.arch }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned Electron runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix desktop-windows/probe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node desktop-windows/probe/node_modules/electron/install.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and upgrade an ephemeral test-signed app
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          python scripts/configure-organization.py organization.example.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $org = Get-Content desktop-windows/organization.json -Raw | ConvertFrom-Json
+          $credentials = Join-Path $env:RUNNER_TEMP demo-installed.json
+          @{ installed = @{ client_id = $org.googleDesktopClientId; client_secret = 'demo-installed-client' } } |
+            ConvertTo-Json | Set-Content -Encoding utf8NoBOM $credentials
+          ./desktop-windows/test-msix-update.ps1 `
+            -ElectronDist desktop-windows/probe/node_modules/electron/dist `
+            -GoogleDesktopClientId $org.googleDesktopClientId `
+            -GoogleDesktopCredentialsFile $credentials `
+            -Architecture $env:REEL_ARCH
