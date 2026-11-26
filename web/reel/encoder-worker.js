@@ -9,7 +9,7 @@
 import { AudioBatch } from "./audio.js?v=20261025-audio1";
 import { Muxer, StreamTarget } from "../vendor/mp4-muxer.mjs";
 import { SegmentSplitter, parseInit, fragmentDuration } from "./fmp4.js";
-import { PauseClock, SEGMENT_INTERVAL } from "./core.js";
+import { PauseClock, SEGMENT_INTERVAL, frameRegion } from "./core.js?v=20261126-capture-region";
 
 let S = null;
 const post = (m, transfer) => self.postMessage(m, transfer || []);
@@ -56,7 +56,7 @@ async function pickAudioConfig(sampleRate, numberOfChannels) {
 async function start(m) {
   const { width, height, fps, bitrate } = m;
   S = {
-    width, height, fps, layout: m.layout, composite: !!m.composite, bubbleScale: m.bubbleScale || 1,
+    width, height, fps, layout: m.layout, composite: !!m.composite, bubbleScale: m.bubbleScale || 1, region: m.region,
     clock: new PauseClock(), frames: 0, nextKeyFrame: 0, audioFrames: 0,
     audioChannels: m.audioChannels, audioSampleRate: m.audioSampleRate, audioBatch: m.audio ? new AudioBatch(4096, m.audioChannels) : null, running: false, stopped: false,
     latest: { screen: null, camera: null }, readers: [], segments: 0, tracks: null, codecs: { video: null, audio: null },
@@ -213,9 +213,13 @@ function draw() {
   }
   const f = S.latest.screen;
   if (f) {
-    const sw = f.displayWidth, sh = f.displayHeight, scale = Math.min(W / sw, H / sh);
-    const dw = sw * scale, dh = sh * scale;
-    ctx.drawImage(f, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    const source = S.region ? frameRegion(S.region, f.displayWidth, f.displayHeight)
+      : { x: 0, y: 0, width: f.displayWidth, height: f.displayHeight };
+    if (source) {
+      const scale = Math.min(W / source.width, H / source.height);
+      const dw = source.width * scale, dh = source.height * scale;
+      ctx.drawImage(f, source.x, source.y, source.width, source.height, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    }
   }
   const cam = S.latest.camera;
   if (S.composite && cam) {

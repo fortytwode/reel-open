@@ -522,6 +522,88 @@ try {
     check("camera-only take deleted", (await fetchObj(take2.shareID, C.File.meta)).status === 404);
   }
 
+  // ---- 5c. select and verify a real cropped capture of the synthetic shared tab.
+  if (!PROD) {
+    console.log("recording 4: shared region, startup and restart");
+    await target.evaluate(() => {
+      const fixture = document.createElement("div");
+      fixture.style.cssText = "position:fixed;inset:0;background:linear-gradient(90deg,#00c800 50%,#dc0020 50%)";
+      document.body.append(fixture);
+    });
+    await configure(page, { mode: "area", audio: "micAndSystem", fps: 24 });
+    await page.locator("#auto-upload").uncheck();
+    await page.selectOption("#countdown", "1");
+    await page.locator("#show-cursor").uncheck();
+    await page.locator("#start").click();
+    await page.locator("#region-preview").waitFor();
+    await page.evaluate(() => { window.cancelledRegionTrack = window.__reel.state().display.getVideoTracks()[0]; });
+    await page.keyboard.press("Escape");
+    check("canceling the crop releases the browser's shared track before recording",
+      await until(() => page.evaluate(() => window.__reel.state().phase === "idle" && cancelledRegionTrack.readyState === "ended")));
+    await page.locator("#start").click();
+    const preview = page.locator("#region-preview");
+    await preview.waitFor();
+    const rectangle = await preview.boundingBox();
+    if (!rectangle) throw new Error("Shared crop preview did not appear");
+    await page.mouse.move(rectangle.x + rectangle.width * 0.05, rectangle.y + rectangle.height * 0.1);
+    await page.mouse.down();
+    await page.mouse.move(rectangle.x + rectangle.width * 0.45, rectangle.y + rectangle.height * 0.9, { steps: 8 });
+    await page.mouse.up();
+    check("dragging a region selects a non-empty crop", await page.locator("#region-confirm").isEnabled());
+    // Edit one edge using the keyboard-accessible control before recording.
+    await page.locator("#region-left").fill("0");
+    const expected = await page.evaluate(() => {
+      const video = document.getElementById("region-video");
+      const region = { sourceWidth: video.videoWidth, sourceHeight: video.videoHeight };
+      for (const side of ["left", "top", "right", "bottom"]) region[side] = +document.getElementById("region-" + side).value;
+      return { region, size: window.__reel.C.outputSize(region.right - region.left, region.bottom - region.top, "p720"),
+        cursor: window.__reel.state().display.getVideoTracks()[0].getSettings().cursor ?? null };
+    });
+    await page.locator("#region-confirm").click();
+    check("area recording honors the one-second countdown", await until(async () =>
+      (await page.locator("#countdown-big").isVisible()) && (await page.locator("#countdown-big").textContent()) === "1", 5000, 30));
+    const first = await until(() => page.evaluate(() => {
+      const s = window.__reel.state();
+      return s.phase === "recording" && { id: s.recording.id, camera: s.session.composite };
+    }));
+    if (!first) throw new Error("Area recording did not start");
+    check("camera remains composited on the selected region", first.camera === true);
+    await page.locator("#pause").click();
+    await page.waitForFunction(() => window.__reel.state().session.pauseConfirmed);
+    await page.locator("#pause").click();
+    await page.locator("#restart").click();
+    const restarted = await until(() => page.evaluate(old => {
+      const s = window.__reel.state();
+      return s.phase === "recording" && s.recording.id !== old && { id: s.recording.id, region: s.region, mode: s.recording.mode };
+    }, first.id));
+    if (!restarted) throw new Error("Area recording did not restart");
+    check("restart keeps the same selected crop without reopening the picker",
+      restarted.mode === "area" && Object.entries(expected.region).every(([key, value]) => restarted.region[key] === value));
+    await sleep(2200);
+    await page.locator("#stop").click();
+    const bytes = await until(() => page.evaluate(async id => {
+      const { library, store } = window.__reel;
+      if (library.get(id)?.captureState !== "complete") return false;
+      const video = await store.getFile(id, "video.mp4");
+      return video && Array.from(new Uint8Array(await video.arrayBuffer()));
+    }, restarted.id), 15000);
+    if (!bytes) throw new Error("The selected region did not produce local video");
+    const areaFile = path.join(OUT, "selected-area.mp4");
+    await writeFile(areaFile, Buffer.from(bytes));
+    const shape = ffprobe(areaFile);
+    check("chosen crop preserves the selected shape and audio", shape.streams.some(s => s.codec_name === "h264" &&
+      s.width === expected.size.width && s.height === expected.size.height) &&
+      shape.streams.some(s => s.codec_name === "aac"), JSON.stringify(shape.streams));
+    const pixels = execFileSync("ffmpeg", ["-v", "error", "-ss", "0.8", "-i", areaFile, "-frames:v", "1",
+      "-vf", "scale=3:3", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]);
+    // Sample the right edge away from the camera in the bottom-left.
+    const [red, green, blue] = pixels.subarray(15, 18);
+    check("decoded cropped frame excludes the red area to the right of the selection",
+      pixels.length === 27 && green > red + 70 && green > blue + 70,
+      `RGB ${red},${green},${blue} · browser cursor report ${expected.cursor ?? "unavailable"}`);
+    await page.evaluate(async id => { await window.__reel.publisher.delete(window.__reel.library.get(id)); }, restarted.id);
+  }
+
   // ---- 6. delete both through the app
   console.log("delete");
   for (const id of [r.id, second.r.id]) {
