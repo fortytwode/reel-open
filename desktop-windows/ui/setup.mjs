@@ -200,10 +200,11 @@ function renderRecordings() {
       if(recording.processing.error) left.append(node('div','recording-meta',recording.processing.error));
       if(recording.processing.phase==='failed') { const button=node('button','','Retry notes'); button.type='button'; button.addEventListener('click',()=>void perform('retryProcessing',{id:recording.id,expectedOwnerUserID:snapshot.profile.userID})); left.append(button); }
       const sharing=recording.shareStatus;
-      const shareButton=node('button','',recording.sharing?'Sharing…':sharing==='uploaded'?'Copy share link':sharing?.failed||sharing==='uploading'?(recording.shareIncludesTranscript?'Retry sharing video and transcript':'Retry sharing'):'Share recording');
-      shareButton.type='button'; shareButton.disabled=recording.sharing===true; shareButton.dataset.action='shareRecording'; shareButton.dataset.recordingId=recording.id;
+      const accessUpdatePending=recording.shareAccess?.updatePending===true;
+      const shareButton=node('button','',recording.sharing?'Sharing…':accessUpdatePending?'Link update pending':sharing==='uploaded'?'Copy share link':sharing?.failed||sharing==='uploading'?(recording.shareIncludesTranscript?'Retry sharing video and transcript':'Retry sharing'):'Share recording');
+      shareButton.type='button'; shareButton.disabled=recording.sharing===true||accessUpdatePending; shareButton.dataset.action='shareRecording'; shareButton.dataset.recordingId=recording.id;
       const initialShare = !sharing;
-      let sharePassword = null, shareExpiry = null;
+      let sharePassword = null, shareExpiry = null, updateButton = null;
       if (initialShare) {
         const passwordLabel = node('label', 'recording-share-setting', 'Password (optional; at least 12 characters)');
         sharePassword = node('input'); sharePassword.type = 'password'; sharePassword.autocomplete = 'off';
@@ -216,9 +217,31 @@ function renderRecordings() {
         }
         expiryLabel.append(shareExpiry);
         left.append(passwordLabel, expiryLabel);
+      } else if (sharing === 'uploaded' || recording.shareAccess?.updatePending) {
+        const access=recording.shareAccess ?? {};
+        left.append(node('div','recording-meta',`${access.passwordProtected?'Password protected':'No password'} · ${access.expiresAt?`expires ${new Date(access.expiresAt).toLocaleString()}`:'never expires'}`));
+        if(access.updatePending) left.append(node('div','recording-meta','The previous link may remain accessible until this update succeeds. Retry to finish applying the new settings.'));
+        const passwordLabel=node('label','recording-share-setting','New password (leave blank to keep current; at least 12 characters)');
+        sharePassword=node('input');sharePassword.type='password';sharePassword.autocomplete='new-password';sharePassword.maxLength=1024;
+        sharePassword.minLength=12;sharePassword.dataset.sharePassword=recording.id;passwordLabel.append(sharePassword);
+        const removeLabel=node('label','recording-share-setting','Remove password');
+        const removePassword=node('input');removePassword.type='checkbox';removePassword.dataset.removeSharePassword=recording.id;removeLabel.append(removePassword);
+        const expiryLabel=node('label','recording-share-setting','Link expiry');
+        shareExpiry=node('select');shareExpiry.dataset.shareExpiry=recording.id;
+        for(const [value,label] of [['keep','Keep current'],['never','Never'],['hour','In 1 hour'],['day','In 1 day'],['week','In 1 week'],['month','In 30 days']]) {
+          const option=node('option','',label);option.value=value;shareExpiry.append(option);
+        }
+        expiryLabel.append(shareExpiry);
+        left.append(passwordLabel,removeLabel,expiryLabel);
+        updateButton=node('button','',recording.sharing?'Updating link…':access.updatePending?'Retry link settings update':'Update link settings');
+        updateButton.type='button';updateButton.disabled=recording.sharing===true;updateButton.dataset.action='updateMeetingShareAccess';
+        updateButton.dataset.recordingId=recording.id;updateButton.sharePasswordInput=sharePassword;
+        updateButton.shareExpiryInput=shareExpiry;updateButton.removePasswordInput=removePassword;
       }
-      shareButton.sharePasswordInput = sharePassword; shareButton.shareExpiryInput = shareExpiry;
+      shareButton.sharePasswordInput = initialShare ? sharePassword : null;
+      shareButton.shareExpiryInput = initialShare ? shareExpiry : null;
       left.append(shareButton);
+      if(updateButton) left.append(updateButton);
       if (recording.processing.transcriptReady && !sharing) {
         const withTranscript = node('button', '', 'Share video and transcript');
         withTranscript.type = 'button';
@@ -368,6 +391,14 @@ document.addEventListener('click', event=>{
     const payload = { id:target.dataset.recordingId, expectedOwnerUserID:snapshot?.profile?.userID,
       ...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{}), ...(password?{password}:{}), ...(expiry!=='never'?{expiry}:{}) };
     void perform(action,payload).finally(()=>{ if(target.sharePasswordInput) target.sharePasswordInput.value=''; });
+    return;
+  }
+  if(action==='updateMeetingShareAccess') {
+    const password=target.sharePasswordInput?.value??'';
+    const expiry=target.shareExpiryInput?.value??'keep';
+    const payload={id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID,
+      ...(password?{password}:{}),...(target.removePasswordInput?.checked?{removePassword:true}:{}),...(expiry!=='keep'?{expiry}:{})};
+    void perform(action,payload).finally(()=>{if(target.sharePasswordInput)target.sharePasswordInput.value='';});
     return;
   }
   if(action==='renameRecording') {

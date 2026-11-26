@@ -35,15 +35,24 @@ async function fixture(t, { ensureRoom = async () => {}, uploadLarge = async () 
       return structuredClone(share);
     },
     async saveShareState(value) { statuses.push(value.upload); share.upload = structuredClone(value.upload); },
+    async saveShareAccessUpdate(value) {
+      if(value.update===null) { share.access=structuredClone(share.accessUpdate.to); delete share.accessUpdate; share.upload='uploaded'; }
+      else { share.accessUpdate=structuredClone(value.update); share.upload={failed:'Link settings update is incomplete.'}; }
+    },
   };
   const auth = { getProfile:() => profile, getIdToken:async()=>{ if (!profile) throw Error('signed out'); return 'synthetic-token'; } };
   const shareAPI = createMeetingShare({ auth, store, org, copy:value=>copies.push(value),
     storageFactory:(session,cfg,nonce) => ({
       async uploadLarge(id,file,blob,options) { calls.push(['video',id,file,blob.size,options,nonce]); await uploadLarge({session,blob,options}); },
       async upload(id,file,data,options) { calls.push(['meta',id,file,data,nonce,options]); await upload({session,data,options}); },
+      async setExpiry(at,id,file,key=null) { calls.push(['expiry',at,id,file,key]); },
+      async delete(id,files,key=null) { calls.push(['delete',id,files,key]); },
     }),
     firestoreFactory:session => ({
       async ensureRoom(...args) { calls.push(['room',...args]); await ensureRoom({session}); },
+      async ownsRoom(room) { calls.push(['owns-room',room]); return true; },
+      async setExpiry(room,at) { calls.push(['room-expiry',room,at]); },
+      async migrate(...args) { calls.push(['migrate',...args]); },
       async upsertLibraryEntry(record) { calls.push(['library',record]); await upsert({session,record}); },
     }) });
   return { shareAPI, store, auth, calls, statuses, copies, setProfile:value=>{profile=value;} };
@@ -167,6 +176,39 @@ test('password and expiry protect the final media location and keep public metad
   const readyStub = JSON.parse(metadata[2][3]); assert.equal(readyStub.status,'ready');
   assert.equal(Object.hasOwn(readyStub,'title'),false); assert.equal(metadata[2][5].key,null);
   assert.ok(!f.calls.some(call=>call[0]==='video' && call[4].key===null));
+});
+
+test('published links keep their URL while access changes stage safely and resume the same derived key after failure', async t => {
+  let failVideo=false;
+  const f=await fixture(t,{uploadLarge:async()=>{if(failVideo){failVideo=false;throw Error('temporary update upload failure');}}});
+  const args={ownerUserID:'owner-a',id:'a'.repeat(32)};
+  const first=await f.shareAPI.share({...args,password:'first password 123',expiry:'week'});
+  const original=await f.store.getShareRecord(args), originalKey=original.share.access.key;
+  failVideo=true;
+  await assert.rejects(f.shareAPI.updateAccess({...args,password:'second password 456',expiry:'month'}),/temporary update upload failure/);
+  const pending=await f.store.getShareRecord(args);
+  assert.equal(pending.share.shareID,original.share.shareID);
+  assert.equal(pending.share.access.key,originalKey,'Failed updates keep the current access record authoritative.');
+  assert.equal(pending.share.accessUpdate.from.key,originalKey);
+  assert.ok(C.isValidKey(pending.share.accessUpdate.to.key));
+  assert.notEqual(pending.share.accessUpdate.to.key,originalKey);
+  assert.ok(f.calls.some(call=>call[0]==='expiry'&&call[2]===original.share.shareID&&call[4]===originalKey),
+    'The old protected objects are revoked before content is moved.');
+  await assert.rejects(f.shareAPI.share(args),/link settings update is pending/i,
+    'A regular share retry must not restore old access during a pending migration.');
+  const retried=await f.shareAPI.updateAccess(args);
+  assert.equal(retried.url,first.url,'The existing published URL is stable across password changes.');
+  const changed=await f.store.getShareRecord(args);
+  assert.equal(changed.share.upload,'uploaded');assert.equal(changed.share.accessUpdate,undefined);
+  assert.equal(changed.share.access.key,pending.share.accessUpdate.to.key,'Retry resumes with the saved derived access proof.');
+  assert.equal(changed.share.access.expiresAt,pending.share.accessUpdate.to.expiresAt);
+
+  const removed=await f.shareAPI.updateAccess({...args,removePassword:true,expiry:'keep'});
+  assert.equal(removed.url,first.url);
+  const open=await f.store.getShareRecord(args);
+  assert.equal(open.share.access.key,null);assert.equal(open.share.access.passwordSalt,null);
+  assert.ok(f.calls.some(call=>call[0]==='video'&&call[4].key===null&&call[4].options.expiresAt instanceof Date),
+    'Password removal stages public media with an expiry before activation.');
 });
 
 test('Windows protected shares reject passwords shorter than 12 characters before binding', async t => {
