@@ -35,6 +35,7 @@ if (-not $workerProperty -or $workerProperty.Value -ne $sourceWorkerHash -or $pa
 # local asset server and web/reel/encoder-worker.js from this same package.
 $probeDirectory = Join-Path $appRoot 'desktop-windows/probe'
 if (Test-Path -LiteralPath $probeDirectory) { throw 'The production archive unexpectedly contains the QA probe directory.' }
+$captureRendererPath = Join-Path $appRoot 'desktop-windows/capture/renderer.mjs'
 $sourceProbe = Join-Path $SourceRoot 'desktop-windows/probe'
 $outDirectory = Join-Path $env:RUNNER_TEMP 'packaged-meeting-capture'
 $isolatedAppData = Join-Path $env:RUNNER_TEMP 'packaged-capture-appdata'
@@ -43,10 +44,46 @@ New-Item -ItemType Directory -Path $probeDirectory, $outDirectory, $isolatedAppD
 $originalAppData = $env:APPDATA
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalPackageJson = [IO.File]::ReadAllText($packageJsonPath)
+$originalCaptureRenderer = [IO.File]::ReadAllText($captureRendererPath)
 $exitCode = $null
 try {
-  Copy-Item -LiteralPath (Join-Path $sourceProbe 'adapter-main.mjs') -Destination $probeDirectory
+  $adapterMain = [IO.File]::ReadAllText((Join-Path $sourceProbe 'adapter-main.mjs'))
+  $hookMarker = 'const failures = [];'
+  if (-not $adapterMain.Contains($hookMarker)) { throw 'Could not install the QA-only renderer diagnostic hook.' }
+  $diagnosticHook = @'
+const qaDiagnostics = { rendererConsole: [] };
+app.on('browser-window-created', (_event, window) => {
+  window.webContents.on('console-message', (_event, details) => {
+    const message = typeof details === 'string' ? details : details?.message;
+    if (typeof message === 'string' && message.length) qaDiagnostics.rendererConsole.push(message.slice(0, 500));
+  });
+});
+'@
+  $adapterMain = $adapterMain.Replace($hookMarker, $hookMarker + "`r`n" + $diagnosticHook.Trim())
+  $adapterMain = $adapterMain.Replace('const id = hwnd(fixtureWindow);', 'const id = hwnd(fixtureWindow); qaDiagnostics.fixtureWindowVisible = fixtureWindow.isVisible();')
+  $adapterMain = $adapterMain.Replace('if (exact.length !== 1) throw Error(', 'qaDiagnostics.exactWindowSourceCount = exact.length; if (exact.length !== 1) throw Error(')
+  $endpointMarker = '    recorder = createWindowsRecorder('
+  if (-not $adapterMain.Contains($endpointMarker)) { throw 'Could not install the QA-only output-endpoint diagnostic.' }
+  $endpointProbe = @'
+    let endpointProbe;
+    try {
+      endpointProbe = createNativeBridge({ executable: path.join(here, '../native/ReelNativeJoin.exe') });
+      qaDiagnostics.defaultRenderEndpointAvailable = Boolean(await endpointProbe.defaultRenderEndpoint());
+    } catch (error) {
+      qaDiagnostics.defaultRenderEndpointError = String(error?.message || error).slice(0, 300);
+    } finally { await endpointProbe?.dispose(); }
+'@
+  $adapterMain = $adapterMain.Replace($endpointMarker, $endpointProbe + $endpointMarker)
+  $finishMarker = 'async function finish(result) {'
+  if (-not $adapterMain.Contains($finishMarker)) { throw 'Could not install the QA-only diagnostic result hook.' }
+  $adapterMain = $adapterMain.Replace($finishMarker, $finishMarker + "`r`n  result.qaDiagnostics = qaDiagnostics;")
+  [IO.File]::WriteAllText((Join-Path $probeDirectory 'adapter-main.mjs'), $adapterMain, (New-Object Text.UTF8Encoding($false)))
   Copy-Item -LiteralPath (Join-Path $sourceProbe 'fixture.html') -Destination $probeDirectory
+  $rendererFailure = "} catch { fail('capture_failed'); }"
+  if (-not $originalCaptureRenderer.Contains($rendererFailure)) { throw 'Could not instrument the extracted renderer failure for QA diagnostics.' }
+  $instrumentedRenderer = $originalCaptureRenderer.Replace($rendererFailure,
+    "} catch (error) { console.error('capture_start_failure', String(error?.name || 'Error'), String(error?.message || error)); fail('capture_failed'); }")
+  [IO.File]::WriteAllText($captureRendererPath, $instrumentedRenderer, (New-Object Text.UTF8Encoding($false)))
   $package = $originalPackageJson | ConvertFrom-Json
   $package.main = 'desktop-windows/probe/adapter-main.mjs'
   [IO.File]::WriteAllText($packageJsonPath, ($package | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
@@ -57,6 +94,7 @@ try {
   $exitCode = $process.ExitCode
 } finally {
   [IO.File]::WriteAllText($packageJsonPath, $originalPackageJson, (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText($captureRendererPath, $originalCaptureRenderer, (New-Object Text.UTF8Encoding($false)))
   Remove-Item -LiteralPath $probeDirectory -Recurse -Force -ErrorAction SilentlyContinue
   $env:APPDATA = $originalAppData
   $env:LOCALAPPDATA = $originalLocalAppData
