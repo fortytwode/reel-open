@@ -26,16 +26,19 @@ const command = (phase,script,timeout=15_000) => {
 };
 const taskQuery = name => command('read scheduled task through Task Scheduler COM',
   `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${name}'); `+
-  `$taskXml=[xml]$t.Xml; $principalNode=$taskXml.SelectSingleNode("//*[local-name()='Principal']"); `+
-  `$userNode=$principalNode.SelectSingleNode("./*[local-name()='UserId']"); $principal=$userNode.InnerText; `+
-  `$logonNode=$principalNode.SelectSingleNode("./*[local-name()='LogonType']"); `+
-  `$runLevelNode=$principalNode.SelectSingleNode("./*[local-name()='RunLevel']"); `+
-  `$logonType=if($null -eq $logonNode) { '<missing>' } else { $logonNode.InnerText }; `+
-  `$runLevel=if($null -eq $runLevelNode) { '<missing>' } else { $runLevelNode.InnerText }; $sid=$principal; `+
+  `$p=$t.Definition.Principal; $principal=$p.UserId; $sid=$principal; `+
   `if ($sid -notmatch '^S-1-') { $account=$principal; if ($account -notmatch '\\\\') { $account=$env:USERDOMAIN+'\\'+$account }; `+
   `$sid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
   `$current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; `+
-  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current;logonType=$logonType;runLevel=$runLevel;args=$t.Definition.Actions.Item(1).Arguments;start=$t.Definition.Triggers.Item(1).StartBoundary} | ConvertTo-Json -Compress`);
+  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current;args=$t.Definition.Actions.Item(1).Arguments;start=$t.Definition.Triggers.Item(1).StartBoundary} | ConvertTo-Json -Compress`);
+const taskSecurity = name => {
+  console.log('Windows reminder smoke: read task logon and run level from registered task XML.');
+  const started=Date.now(), schtasks=path.join(process.env.SystemRoot || 'C:\\Windows','System32','schtasks.exe');
+  const xml=execFileSync(schtasks,['/Query','/TN',name,'/XML'],{encoding:'utf8',windowsHide:true,timeout:15_000});
+  const readTag=tag=>xml.match(new RegExp(`<${tag}>([^<]+)</${tag}>`,'i'))?.[1] ?? '<missing>';
+  console.log(`Windows reminder smoke: task XML query completed in ${Date.now()-started} ms.`);
+  return {logonType:readTag('LogonType'),runLevel:readTag('RunLevel')};
+};
 const taskCount = () => Number(command('count this scope’s scheduled tasks through Task Scheduler COM',
   `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $f=$s.GetFolder([string][char]92); $count=0; `+
   `foreach($task in @($f.GetTasks(0))) { if($task.Name.StartsWith('ReelReminder_${scope}_',[StringComparison]::Ordinal)) { $count++ } }; $count`));
@@ -53,10 +56,11 @@ try {
   manager.sync([{token,start:taskStart}]);
   console.log('Windows reminder smoke: Task Scheduler registration returned.');
   let info = taskQuery(taskName);
-  console.log(`Sanitized task principal: ${JSON.stringify({user:info.user,userSid:info.userSid,currentSid:info.currentSid,logonType:info.logonType,runLevel:info.runLevel})}`);
+  const security=taskSecurity(taskName);
+  console.log(`Sanitized task principal: ${JSON.stringify({user:info.user,userSid:info.userSid,currentSid:info.currentSid,...security})}`);
   assert.equal(info.userSid, info.currentSid, `Task principal ${info.user} resolves to the current Windows user SID.`);
-  assert.equal(info.logonType,'InteractiveToken','The task uses TASK_LOGON_INTERACTIVE_TOKEN and stores no password.');
-  assert.equal(info.runLevel,'LeastPrivilege','The task runs at the current user’s least-privileged run level.');
+  assert.equal(security.logonType,'InteractiveToken','The task uses TASK_LOGON_INTERACTIVE_TOKEN and stores no password.');
+  assert.equal(security.runLevel,'LeastPrivilege','The task runs at the current user’s least-privileged run level.');
   assert.match(info.args, new RegExp(token));
   assert.equal(Date.parse(info.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
   assert.ok(!info.args.includes('private calendar title') && !info.args.includes('private-event-id'));
