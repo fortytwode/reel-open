@@ -36,6 +36,9 @@ $certificate = $null
 $trustedCertificate = $null
 $rootCertificate = $null
 $server = $null
+$baseUri = $null
+$organizationPath = Join-Path $PSScriptRoot 'organization.json'
+$organizationOriginal = $null
 
 function Find-SignTool {
     $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
@@ -74,6 +77,15 @@ try {
         try { $null = Invoke-WebRequest -UseBasicParsing "$baseUri/"; break } catch { }
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($server.HasExited) { throw 'The local App Installer feed server did not start.' }
+    if (-not (Test-Path -LiteralPath $organizationPath)) {
+        throw 'The generated demo organization config is missing.'
+    }
+    $organizationOriginal = Get-Content -LiteralPath $organizationPath -Raw
+    $organization = $organizationOriginal | ConvertFrom-Json
+    $organization.webBase = $baseUri
+    $organization.viewerBase = $baseUri
+    $organization.notesBaseURL = "$baseUri/library"
+    [IO.File]::WriteAllText($organizationPath, ($organization | ConvertTo-Json -Depth 10), (New-Object Text.UTF8Encoding($false)))
     Write-Output 'Checking byte-range, MIME, Content-Length, and HEAD behavior before package install.'
     $head = Invoke-WebRequest -UseBasicParsing -Method Head "$baseUri/range-probe.msix"
     $headValid = ($head.StatusCode -eq 200) -and
@@ -127,12 +139,27 @@ try {
     if ($null -eq $installed -or $installed.Version.ToString() -ne $Version) {
         throw 'App Installer did not install the initial package version.'
     }
+    if (Get-Command Get-AppxPackageAutoUpdateSettings -ErrorAction SilentlyContinue) {
+        try {
+            $settings = @(Get-AppxPackageAutoUpdateSettings -PackageFullName $installed.PackageFullName -ErrorAction Stop)
+            $settingsText = $settings | Format-List * | Out-String -Width 240
+            if ($settingsText.Contains("$baseUri/$feedName")) {
+                Write-Output 'Windows reports the expected stable App Installer update URI.'
+            } else {
+                Write-Output 'Windows exposes App Installer settings; the registered feed URI is verified by the successful stable-feed upgrade.'
+            }
+        } catch {
+            Write-Output 'The optional Windows auto-update settings query is unavailable; the stable-feed upgrade remains the acceptance check.'
+        }
+    } else {
+        Write-Output 'Get-AppxPackageAutoUpdateSettings is not available on this runner; the stable-feed upgrade remains the acceptance check.'
+    }
 
     # Publish the newer feed at the same URI registered by the initial install.
     Write-Output 'Publishing the newer feed at the registered update URI.'
     Copy-Item -LiteralPath (Join-Path $tempRoot 'v2.appinstaller') -Destination $initialFeed -Force
-    $launcher = "shell:AppsFolder\$($installed.PackageFamilyName)!Companion"
-    Write-Output 'Launching the installed Companion app to trigger the App Installer update check.'
+    $launcher = "shell:AppsFolder\$($installed.PackageFamilyName)!Recorder"
+    Write-Output 'Launching the installed Recorder entry to trigger the App Installer update check.'
     Start-Process -FilePath explorer.exe -ArgumentList $launcher
     Write-Output "Waiting for Windows to install version $NextVersion from the registered feed."
     $deadline = [DateTime]::UtcNow.AddMinutes(2)
@@ -147,6 +174,12 @@ try {
     Write-Output "MSIX App Installer install/upgrade passed: $Version -> $NextVersion ($Architecture)."
 } finally {
     Write-Output 'Removing the test package, local server, and per-run trust certificate.'
+    if ($baseUri) {
+        $testAppUrl = "$baseUri/record"
+        Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains("--app=$testAppUrl") } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    }
     $testPackage = Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue |
         Where-Object { $_.Publisher -eq $publisher } | Select-Object -First 1
     if ($testPackage) {
@@ -165,6 +198,9 @@ try {
     }
     if ($certificate) {
         Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+    }
+    if ($organizationOriginal) {
+        [IO.File]::WriteAllText($organizationPath, $organizationOriginal, (New-Object Text.UTF8Encoding($false)))
     }
     if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }
