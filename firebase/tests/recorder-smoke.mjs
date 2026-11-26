@@ -16,6 +16,7 @@ import os from "node:os";
 import { chromium } from "playwright";
 import * as C from "../../web/reel/core.js";
 import { boxes } from "../../web/reel/fmp4.js";
+import { recordedToneWindowIsPresent } from "./recorder-smoke-audio-assertions.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.join(HERE, "../../web");
@@ -478,7 +479,7 @@ try {
   const audioClockElapsed = delayedAudio?.pauseAudioTime - delayedAudio?.beginAudioTime;
   check("delayed pre-pause audio signal survives in the recorded media",
     delayedAudio?.frames >= 18000 && delayedAudio.signalFrames > 0 && delayedAudio.audioTimeEnd <= delayedAudio.pauseAudioTime &&
-    Math.abs(audioClockElapsed - pausedAt) < 0.15 && Number.isFinite(backgroundToneVolume) && beforePauseMeanVolume >= backgroundToneVolume - 8,
+    Math.abs(audioClockElapsed - pausedAt) < 0.15 && recordedToneWindowIsPresent(beforePauseMeanVolume, backgroundToneVolume),
     JSON.stringify({ delayedAudio, heldStartInOutput, beforePauseMeanVolume, priorToneVolume, resumedToneVolume, audioClockElapsed, pausedAt }));
   check("audio duration stays synchronized with video across pause", a && Number.isFinite(Number(a.duration)) && Math.abs(Number(a.duration) - dur) < 0.6,
     `${a?.duration} s audio, ${dur} s video`);
