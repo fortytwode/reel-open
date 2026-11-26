@@ -133,7 +133,11 @@ if ($result.ok -eq $true) {
   $diagnosticText = [string]::Join(' | ', [string[]]@($result.qaDiagnostics.rendererConsole))
   if ($diagnosticText -notmatch 'capture_start_failure') { throw "No synthetic renderer error was captured: $diagnosticText" }
   $recordingsRoot = Join-Path $outDirectory 'recordings'
-  $completedFiles = if (Test-Path -LiteralPath $recordingsRoot) { @(Get-ChildItem -LiteralPath $recordingsRoot -Filter '*.mp4' -File -Recurse) } else { @() }
+  $completedFiles = @(
+    if (Test-Path -LiteralPath $recordingsRoot) {
+      Get-ChildItem -LiteralPath $recordingsRoot -Filter '*.mp4' -File -Recurse
+    }
+  )
   if ($completedFiles.Count) { throw 'The native loopback failure incorrectly left a completed, shareable MP4.' }
   $libraryCount = 0
   if (Test-Path -LiteralPath $recordingsRoot) {
@@ -159,7 +163,7 @@ $encoderLocalAppData = Join-Path $env:RUNNER_TEMP 'packaged-encoder-local-appdat
 New-Item -ItemType Directory -Path $encoderOutput, $encoderAppData, $encoderLocalAppData | Out-Null
 $encoderProcessExit = $null
 try {
-  foreach ($file in @('encoder-main.mjs', 'encoder-fixture.html')) {
+  foreach ($file in @('encoder-main.mjs', 'encoder-fixture.html', 'encoder-fixture.mjs')) {
     Copy-Item -LiteralPath (Join-Path $QaRoot "desktop-windows/probe/$file") -Destination $encoderProbeDirectory
   }
   $package = $originalPackageJson | ConvertFrom-Json

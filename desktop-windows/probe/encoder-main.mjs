@@ -11,6 +11,7 @@ const outArg = process.argv.find(arg => arg.startsWith('--out='));
 const outDir = path.resolve(outArg ? outArg.slice(6) : path.join(here, 'encoder-out'));
 const fixture = path.join(here, 'encoder-fixture.html');
 const files = new Map([
+  ['/encoder-fixture.mjs', 'desktop-windows/probe/encoder-fixture.mjs'],
   ['/web/reel/capture.js', 'web/reel/capture.js'],
   ['/web/reel/core.js', 'web/reel/core.js'],
   ['/web/reel/audio.js', 'web/reel/audio.js'],
@@ -18,7 +19,6 @@ const files = new Map([
   ['/web/reel/fmp4.js', 'web/reel/fmp4.js'],
   ['/web/vendor/mp4-muxer.mjs', 'web/vendor/mp4-muxer.mjs'],
 ]);
-const chunks = [];
 const segments = new Map();
 let init = null;
 let finishPromise;
@@ -131,10 +131,10 @@ async function run() {
   origin = `http://127.0.0.1:${server.address().port}`;
   window = new BrowserWindow({ width: 1000, height: 760, show: true, webPreferences: { nodeIntegration: false,
     contextIsolation: true, sandbox: true, backgroundThrottling: false } });
-  await window.loadURL(origin + '/');
   window.webContents.on('console-message', (_event, details) => {
     if (details?.message) console.log(`fixture: ${details.message}`);
   });
+  await window.loadURL(origin + '/');
 }
 
 app.whenReady().then(run).catch(error => finish({ ok: false,
