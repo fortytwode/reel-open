@@ -43,8 +43,12 @@ namespace ReelNative
                 var composition = new MediaComposition();
                 composition.Clips.Add(clip);
                 var outputFile = StorageFile.GetFileFromPathAsync(temporary).AsTask().GetAwaiter().GetResult();
+                // Match the source's codec, frame size, rate, and audio settings.
+                // The Auto preset has no camera settings in a desktop export and
+                // can fail with MF_E_ATTRIBUTENOTFOUND.
+                var profile = MediaEncodingProfile.CreateFromFileAsync(sourceFile).AsTask().GetAwaiter().GetResult();
                 var result = composition.RenderToFileAsync(outputFile, MediaTrimmingPreference.Precise,
-                    MediaEncodingProfile.CreateMp4(VideoEncodingQuality.Auto)).AsTask().GetAwaiter().GetResult();
+                    profile).AsTask().GetAwaiter().GetResult();
                 if (result != TranscodeFailureReason.None || !File.Exists(temporary) || new FileInfo(temporary).Length == 0)
                     throw new InvalidOperationException("Windows could not render the trimmed recording.");
 
