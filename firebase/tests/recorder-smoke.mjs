@@ -506,7 +506,7 @@ try {
 
   // ---- 5c. select and verify a real cropped capture of the synthetic shared tab.
   if (!PROD) {
-    console.log("recording 4: shared region, startup and restart");
+    console.log("recording 4: shared region, drawing and restart");
     await target.evaluate(() => {
       const fixture = document.createElement("div");
       fixture.style.cssText = "position:fixed;inset:0;background:linear-gradient(90deg,#00c800 50%,#dc0020 50%)";
@@ -550,9 +550,40 @@ try {
     }));
     if (!first) throw new Error("Area recording did not start");
     check("camera remains composited on the selected region", first.camera === true);
+    await page.waitForFunction(() => window.__reel.state().session.elapsed >= 0.5);
+    await page.locator("#draw").click();
+    const drawing = page.locator("#draw-dialog");
+    await drawing.waitFor();
+    check("opening Draw pauses active recording before revealing the preview",
+      await page.evaluate(() => window.__reel.state().session.pauseConfirmed) &&
+      (await page.locator("#draw-status").textContent()).includes("Close the preview, then select Resume"));
+    const pausedTime = await page.evaluate(() => window.__reel.state().session.elapsed);
+    const drawingBox = await page.locator("#draw-preview").boundingBox();
+    if (!drawingBox) throw new Error("Drawing preview did not appear");
+    const mark = async (x1, y1, x2, y2) => {
+      const move = (x, y) => page.mouse.move(drawingBox.x + x * drawingBox.width, drawingBox.y + y * drawingBox.height, { steps: 6 });
+      await move(x1, y1);
+      await page.mouse.down();
+      await move(x2, y2);
+      await page.mouse.up();
+    };
+    await mark(0.15, 0.2, 0.3, 0.25);
+    await page.locator("#draw-undo").click();
+    check("Undo removes the last mark", await page.locator("#draw-clear").isDisabled());
+    await page.selectOption("#draw-tool", "rectangle");
+    await mark(0.35, 0.1, 0.45, 0.25);
+    await page.locator("#draw-clear").click();
+    check("Clear removes the drawing marks", await page.locator("#draw-undo").isDisabled());
+    await page.selectOption("#draw-tool", "arrow");
+    await mark(0.2, 0.5, 0.75, 0.5);
+    await page.keyboard.press("Control+Alt+p");
+    check("recording time stays frozen and shortcuts cannot resume while drawing",
+      await page.evaluate(t => window.__reel.state().session.pauseConfirmed && window.__reel.state().session.elapsed === t, pausedTime));
+    await page.locator("#draw-close").click();
+    check("closing the preview waits for an explicit Resume",
+      !(await drawing.isVisible()) && (await page.locator("#pause").textContent()) === "Resume");
     await page.locator("#pause").click();
-    await page.waitForFunction(() => window.__reel.state().session.pauseConfirmed);
-    await page.locator("#pause").click();
+    await page.waitForFunction(t => window.__reel.state().session.elapsed > t, pausedTime);
     await page.locator("#restart").click();
     const restarted = await until(() => page.evaluate(old => {
       const s = window.__reel.state();
@@ -583,6 +614,11 @@ try {
     check("decoded cropped frame excludes the red area to the right of the selection",
       pixels.length === 27 && green > red + 70 && green > blue + 70,
       `RGB ${red},${green},${blue} · browser cursor report ${expected.cursor ?? "unavailable"}`);
+    const markPixels = execFileSync("ffmpeg", ["-v", "error", "-ss", "0.8", "-i", areaFile, "-frames:v", "1",
+      "-vf", "crop=4:4:(iw-4)/2:(ih-4)/2", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]);
+    const [markRed, markGreen, markBlue] = markPixels.subarray(0, 3);
+    check("the restarted video burns the arrow into the selected region",
+      markPixels.length === 48 && markRed > markGreen + 90 && markRed > markBlue + 90, `RGB ${markRed},${markGreen},${markBlue}`);
     await page.evaluate(async id => { await window.__reel.publisher.delete(window.__reel.library.get(id)); }, restarted.id);
   }
 

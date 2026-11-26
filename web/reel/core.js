@@ -708,6 +708,55 @@ export function frameRegion(region, width, height) {
   return w >= 2 && h >= 2 ? { x, y, width: w, height: h } : null;
 }
 
+/** Draw the exact shared region into a fixed output or annotation preview, keeping its aspect. */
+export function drawSharedFrame(ctx, frame, width, height, region) {
+  const sw = frame.displayWidth || frame.videoWidth, sh = frame.displayHeight || frame.videoHeight;
+  const source = region ? frameRegion(region, sw, sh) : { x: 0, y: 0, width: sw, height: sh };
+  if (!source?.width || !source.height) return;
+  const scale = Math.min(width / source.width, height / source.height);
+  const dw = source.width * scale, dh = source.height * scale;
+  ctx.drawImage(frame, source.x, source.y, source.width, source.height, (width - dw) / 2, (height - dh) / 2, dw, dh);
+}
+
+/** Marks are normalized to the encoded frame so they match both a small preview and the video. */
+export function drawAnnotations(ctx, strokes, width, height) {
+  if (!strokes?.length) return;
+  const size = Math.min(width, height);
+  ctx.save();
+  ctx.lineCap = ctx.lineJoin = "round";
+  for (const { tool, color, points } of strokes) {
+    const first = points[0], last = points.at(-1);
+    if (!first) continue;
+    const x = first.x * width, y = first.y * height, ex = last.x * width, ey = last.y * height;
+    ctx.strokeStyle = ctx.fillStyle = color;
+    ctx.lineWidth = Math.max(2, size * (tool === "highlighter" ? 0.035 : 0.008));
+    ctx.globalAlpha = tool === "highlighter" ? 0.4 : 1;
+    ctx.beginPath();
+    if (points.length === 1) {
+      if (tool === "arrow" || tool === "rectangle") continue;
+      ctx.arc(x, y, ctx.lineWidth / 2, 0, 2 * Math.PI);
+      ctx.fill();
+      continue;
+    }
+    if (tool === "rectangle") {
+      ctx.rect(Math.min(x, ex), Math.min(y, ey), Math.abs(ex - x), Math.abs(ey - y));
+    } else {
+      ctx.moveTo(x, y);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x * width, points[i].y * height);
+      if (tool === "arrow") {
+        const angle = Math.atan2(ey - y, ex - x);
+        const length = Math.min(size * 0.045, Math.hypot(ex - x, ey - y) * 0.4);
+        const spread = Math.PI * 28 / 180;
+        ctx.moveTo(ex - length * Math.cos(angle + spread), ey - length * Math.sin(angle + spread));
+        ctx.lineTo(ex, ey);
+        ctx.lineTo(ex - length * Math.cos(angle - spread), ey - length * Math.sin(angle - spread));
+      }
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 /** Loom's pixel-count bitrate tiers, ×1.5 above 30 fps. */
 export function bitrate(width, height, fps) {
   const p = width * height;
