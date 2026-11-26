@@ -242,15 +242,20 @@ try {
     await until(async () => (await (await fetchObj(r.shareID, C.File.playlist)).text()).includes("#EXT-X-PLAYLIST-TYPE:EVENT"), 10000));
   await sleep(3000);
   await page.locator("#pause").click();
+  // The click changes the controls immediately. Sample once the encoder has paused its clock.
+  const pauseConfirmed = await until(() => page.evaluate(() => window.__reel.state().session.pauseConfirmed), 5000);
   const pausedAt = await page.evaluate(() => window.__reel.state().session.elapsed);
   await sleep(2500);
   const stillPaused = await page.evaluate(() => window.__reel.state().session.elapsed);
-  check("pause stops the clock", Math.abs(stillPaused - pausedAt) < 0.6, `${pausedAt} → ${stillPaused}`);
+  check("pause stops the clock", pauseConfirmed && Math.abs(stillPaused - pausedAt) < 0.6,
+    pauseConfirmed ? `${pausedAt} → ${stillPaused}` : "encoder did not confirm pause");
   await page.locator("#pause").click();
   // Closing the bubble window switches to drawing the camera into the video (bottom-left).
   if (pipPage) await pipPage.close();
   check("closing the bubble window turns on in-video compositing", await until(() => page.evaluate(() => window.__reel.state().session.composite), 3000));
   await sleep(3000);
+  const resumedAt = await page.evaluate(() => window.__reel.state().session.elapsed);
+  check("resume restarts the clock", resumedAt > stillPaused + 0.6, `${stillPaused} → ${resumedAt}`);
   const stopT = Date.now();
   await page.locator("#stop").click();
   // Playwright may wait for a busy Windows renderer before delivering the click.

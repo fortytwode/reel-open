@@ -11,6 +11,35 @@ function audio(frames = 480) {
   return { numberOfFrames: frames, sampleRate: 48000, closed: 0, close() { this.closed++; } };
 }
 
+test("pause discards queued ticks and accepts the matching encoder time", () => {
+  const { capture } = session();
+  const elapsedUpdates = [];
+  let request;
+  capture.events.onTick = ({ elapsed }) => elapsedUpdates.push(elapsed);
+  capture.worker = { postMessage(message) { request = message; } };
+  capture.begin();
+  capture.onWorker({ type: "tick", elapsed: 7.2 });
+  capture.pause();
+  const firstPause = request.pauseID;
+  capture.onWorker({ type: "tick", elapsed: 8 });
+  assert.deepEqual(elapsedUpdates, [7.2], "a pending recording tick must not update the paused timer");
+  assert.equal(capture.pauseConfirmed, false);
+  capture.onWorker({ type: "tick", elapsed: 8.4, pauseID: firstPause });
+  assert.equal(capture.pauseConfirmed, true);
+  assert.equal(capture.elapsed, 8.4);
+
+  capture.resume();
+  capture.onWorker({ type: "tick", elapsed: 9 });
+  assert.equal(capture.pauseConfirmed, false);
+  assert.equal(capture.elapsed, 9);
+  capture.pause();
+  capture.onWorker({ type: "tick", elapsed: 8.4, pauseID: firstPause });
+  assert.equal(capture.pauseConfirmed, false);
+  capture.onWorker({ type: "tick", elapsed: 9.1, pauseID: request.pauseID });
+  assert.equal(capture.pauseConfirmed, true);
+  assert.deepEqual(elapsedUpdates, [7.2, 8.4, 9, 9.1]);
+});
+
 test("audio blocks transfer directly without a stream pull round trip", async () => {
   const { capture, errors } = session();
   const blocks = Array.from({ length: 200 }, () => audio());
