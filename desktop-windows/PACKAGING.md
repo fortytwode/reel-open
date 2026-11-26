@@ -23,6 +23,8 @@ Sign and timestamp the generated MSIX with your release signing service. Verify 
 
 Install through the architecture’s `.appinstaller` file to register the update feed. Subsequent releases keep its URL, package name and publisher and increase the three-part version. The default on-launch update check interval is 12 hours. The `Windows MSIX install and update` CI workflow exercises successive test versions using a temporary certificate confined to its disposable Windows runner.
 
+Reel Companion's startup task is off after installation. In Companion's Meeting setup, choose **Open Windows Startup Apps** and turn on **Reel Companion** to launch it the next time you sign in to Windows. Use the same Windows setting to turn it off. App Installer upgrades keep the startup task identity. In a portable build, use **Turn on start at sign-in** in Companion's Meeting setup. Turn it off before deleting or moving the extracted app folder.
+
 ## Portable test ZIP
 
 `build-portable.ps1` creates an **unsigned portable test ZIP**, using the existing

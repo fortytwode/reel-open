@@ -75,6 +75,14 @@ jobs:
             const state = await window.evaluate(() => window.reelDesktop.state());
             assert.equal(state.configured, true);
             assert.equal(state.profile, null);
+            assert.deepEqual(state.startup, {mode:'portable',enabled:false});
+            const setStartup = enabled => window.evaluate(enabled => window.reelDesktop.action('setCompanionStartup', {enabled}), enabled);
+            try {
+              assert.deepEqual((await setStartup(true)).startup, {mode:'portable',enabled:true});
+              assert.deepEqual((await window.evaluate(() => window.reelDesktop.state())).startup, {mode:'portable',enabled:true});
+            } finally {
+              assert.deepEqual((await setStartup(false)).startup, {mode:'portable',enabled:false});
+            }
           } finally {
             await app.close();
           }

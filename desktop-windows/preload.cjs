@@ -1,6 +1,7 @@
 const {contextBridge,ipcRenderer}=require('electron');
 const allowed=new Set(['signIn','connectCalendar','cancelSignIn','signOut','disconnectCalendar','refresh',
-  'saveSettings','stopRecording','retryProcessing','shareRecording','playRecording','copyTranscript','openLibrary','openNotetaker','openRecorder','openRecordings']);
+  'saveSettings','stopRecording','retryProcessing','shareRecording','playRecording','copyTranscript','openLibrary','openNotetaker','openRecorder','openRecordings',
+  'openStartupSettings','setCompanionStartup']);
 contextBridge.exposeInMainWorld('reelDesktop',Object.freeze({
   state:()=>ipcRenderer.invoke('reel-desktop:state'),
   action:(name,payload)=>{
