@@ -44,7 +44,7 @@ jobs:
           $probe = Resolve-Path desktop-windows/probe/processing-runtime.mjs
           $process = Start-Process -FilePath $electron -ArgumentList ('"' + $probe + '"') -Wait -PassThru -NoNewWindow
           if ($process.ExitCode) { throw "Audio codec test exited with $($process.ExitCode)" }
-      - name: Build and extract demo package
+      - name: Build package and run the local MP4 trim/export smoke on this architecture
         shell: pwsh
         env:
           REEL_ARCH: ${{ matrix.arch }}

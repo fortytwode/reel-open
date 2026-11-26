@@ -86,12 +86,14 @@ $productFiles = @(
     'desktop-windows/src/desktop-service.mjs', 'desktop-windows/src/google-calendar.mjs', 'desktop-windows/src/meeting-reminders.mjs',
     'desktop-windows/src/local-recordings.mjs', 'desktop-windows/src/meeting-coordinator.mjs', 'desktop-windows/src/meeting-processing.mjs', 'desktop-windows/src/meeting-share.mjs',
     'desktop-windows/src/native-bridge.mjs', 'desktop-windows/src/recorder.mjs',
+    'desktop-windows/src/trim-range.mjs',
     'desktop-windows/ui/index.html', 'desktop-windows/ui/setup.css', 'desktop-windows/ui/setup.mjs',
     'desktop-windows/capture/index.html', 'desktop-windows/capture/preload.cjs', 'desktop-windows/capture/renderer.mjs',
     'web/reel/capture.js', 'web/reel/core.js', 'web/reel/whisper-languages.js', 'web/reel/cloud.js', 'web/reel/audio.js', 'web/reel/encoder-worker.js', 'web/reel/fmp4.js',
     'web/vendor/mp4-muxer.mjs', 'web/vendor/mp4-muxer.LICENSE'
 )
-$nativeInputs = @('Core.cs', 'WinJoin.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs', 'build.cmd')
+$nativeInputs = @('Core.cs', 'WinJoin.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs',
+    'MediaTrim.cs', 'MediaTrimProgram.cs', 'MediaTrimTests.cs', 'build.cmd', 'build-media-trim.ps1')
 $sourceHashes = [ordered]@{}
 foreach ($relative in $productFiles) {
     $sourceHashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $repo $relative) -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -129,6 +131,10 @@ try {
     $nativeDestination = Join-Path $appRoot 'desktop-windows/native'
     New-Item -ItemType Directory -Path $nativeDestination | Out-Null
     Copy-Item -LiteralPath $helper -Destination (Join-Path $nativeDestination 'ReelNativeJoin.exe')
+    $trimHelper = Join-Path $PSScriptRoot 'native/ReelMediaTrim.exe'
+    if (-not (Test-Path -LiteralPath $trimHelper -PathType Leaf)) { throw 'The Windows media trim helper was not built.' }
+    $trimHelperHash = (Get-FileHash -LiteralPath $trimHelper -Algorithm SHA256).Hash.ToLowerInvariant()
+    Copy-Item -LiteralPath $trimHelper -Destination (Join-Path $nativeDestination 'ReelMediaTrim.exe')
     # UTF-8 without BOM also works with Node's JSON loader on Windows PowerShell 5.1.
     $utf8 = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText((Join-Path $appRoot 'package.json'), (@{
@@ -149,7 +155,10 @@ try {
     if ((Get-FileHash -LiteralPath (Join-Path $nativeDestination 'ReelNativeJoin.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $helperHash) {
         throw 'Packaged native helper differs from the fresh build.'
     }
-    $expectedAppFiles = @($productFiles) + @('package.json', 'desktop-windows/config.json', 'desktop-windows/native/ReelNativeJoin.exe')
+    if ((Get-FileHash -LiteralPath (Join-Path $nativeDestination 'ReelMediaTrim.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $trimHelperHash) {
+        throw 'Packaged media trim helper differs from the freshly tested build.'
+    }
+    $expectedAppFiles = @($productFiles) + @('package.json', 'desktop-windows/config.json', 'desktop-windows/native/ReelNativeJoin.exe', 'desktop-windows/native/ReelMediaTrim.exe')
     $actualAppFiles = @(Get-ChildItem -LiteralPath $appRoot -File -Recurse | ForEach-Object { $_.FullName.Substring($appRoot.Length + 1).Replace('\', '/') })
     if (@(Compare-Object $expectedAppFiles $actualAppFiles).Count -ne 0) { throw 'Unexpected application package contents.' }
     $manifest = [ordered]@{
@@ -157,6 +166,7 @@ try {
         createdAtUtc = [DateTime]::UtcNow.ToString('o'); distribution = 'unsigned portable test build'
         executableVersionNote = 'Reel.exe retains upstream Electron executable version resources.'
         nativeHelper = @{ sha256 = $helperHash; build = 'native/build.cmd: fresh production compile and policy checks'; target = 'managed .NET Framework (compiler default)' }
+        mediaTrimHelper = @{ sha256 = $trimHelperHash; build = 'native/build-media-trim.ps1: fresh AnyCPU compile and synthetic MP4 export test'; target = 'Windows Media Foundation through Windows.Media.Editing' }
         sourceSha256 = $sourceHashes; applicationFiles = $expectedAppFiles
         releaseChecks = 'Signing, real Google/Calendar/meeting UI verification and public download verification require separate evidence.'
     }
@@ -180,7 +190,7 @@ try {
         }
     } finally { $zip.Dispose() }
     Write-Output "Created unsigned portable test build: $output"
-    Write-Output "Electron $($runtimeInfo.electron), Windows $arch; native policy checks and ZIP allowlist passed."
+    Write-Output "Electron $($runtimeInfo.electron), Windows $arch; native policy checks, media trim/export smoke and ZIP allowlist passed."
     Write-Output "SHA256 $((Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant())"
 } finally {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }

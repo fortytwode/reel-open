@@ -1,4 +1,5 @@
 import { routeGoogleMeetings } from './google-calendar.mjs';
+import { normalizeTrimRange } from './trim-range.mjs';
 
 const defaults = ownerUserID => ({ownerUserID, autoJoin:false, participantConsent:false,
   systemAudioConsent:false, meetingReminders:false, selection:{useAll:true,ids:[]}});
@@ -65,12 +66,13 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,copyText,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
   const activeShares=new Set();
   const activeRecordingOperations=new Map();
+  const activeExports=new Map();
   let settingsTail=Promise.resolve(),disposePromise=null;
   let calendars=[],meetings=[],calendarOwner=null,routingUnavailable=false;
   const routingMessage='Cloud routing could not be checked. Local Meet and Teams joins are paused. Zoom can continue.';
@@ -279,6 +281,22 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if (processing?.transcriptComplete !== true || !processing.text?.trim()) throw Error('Transcript is unavailable.');
         requireOwner(ownerUserID);
         copyText(processing.text);
+      } else if(name==='exportTrimmedCopy') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof exportTrimmedCopy !== 'function') throw Error('Recording export is unavailable.');
+        const recording=store.list(ownerUserID).find(item=>item.id===payload.id);
+        const file=store.getRecordingPath({ownerUserID,id:payload.id});
+        const range=normalizeTrimRange(payload.start,payload.end,recording?.durationSeconds);
+        if (!recording || !file || !range) throw Error('Choose a valid trim range within this saved recording.');
+        const key=`${ownerUserID}:${recording.id}`;
+        if(activeExports.has(key)) throw Error('This recording is already being exported.');
+        const exporting=(async()=>{
+          await exportTrimmedCopy({ownerUserID,id:recording.id,file,title:recording.title,...range});
+          requireOwner(ownerUserID);
+        })();
+        activeExports.set(key,exporting);
+        try { await exporting; }
+        finally { if(activeExports.get(key)===exporting) activeExports.delete(key); }
       } else if(name==='shareRecording') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (typeof payload?.id !== 'string' || !shareMeeting) throw Error('Meeting sharing is unavailable.');
@@ -317,6 +335,9 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     disposePromise=(async()=>{
       // Consent mutations are durable before the process may exit.
       const cancellation=coordinator?.cancel();
+      // Keep the app process alive until native exporters release their input
+      // and temporary output files; Electron's before-quit handler awaits us.
+      await Promise.allSettled([...activeExports.values()]);
       try { await settingsTail; }
       catch {
         await cancellation;

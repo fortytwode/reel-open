@@ -176,6 +176,20 @@ function renderRecordings() {
     left.append(node('div','recording-meta',[formatDate(recording.createdAt),duration].filter(Boolean).join(' · ')));
     const play=node('button','','Play recording');
     play.type='button'; play.dataset.action='playRecording'; play.dataset.recordingId=recording.id; left.append(play);
+    const trimControls=node('div','trim-export-controls');
+    const startLabel=node('label','trim-export-setting','Start (seconds)');
+    const start=node('input'); start.type='number'; start.min='0'; start.max=String(recording.durationSeconds); start.step='0.001'; start.value='0'; start.setAttribute('aria-label',`Trim start for ${recording.title || 'recording'}`); startLabel.append(start);
+    const endLabel=node('label','trim-export-setting','End (seconds)');
+    const end=node('input'); end.type='number'; end.min='0'; end.max=String(recording.durationSeconds); end.step='0.001'; end.value=String(recording.durationSeconds); end.setAttribute('aria-label',`Trim end for ${recording.title || 'recording'}`); endLabel.append(end);
+    const trim=node('button','','Trim & export…'); trim.type='button';
+    trim.addEventListener('click',()=>{
+      start.value=start.value.trim(); end.value=end.value.trim();
+      if(!start.value || !end.value || !start.checkValidity() || !end.checkValidity()) { start.reportValidity(); end.reportValidity(); return; }
+      trim.disabled=true;
+      void perform('exportTrimmedCopy',{id:recording.id,expectedOwnerUserID:snapshot.profile?.userID,start:Number(start.value),end:Number(end.value)})
+        .finally(()=>{ trim.disabled=false; });
+    });
+    trimControls.append(node('div','recording-meta','Exports a separate MP4. The original stays unchanged.'),startLabel,endLabel,trim); left.append(trimControls);
     if(recording.processing) {
       if(recording.processing.transcriptReady) {
         const transcript=node('button','','Copy transcript');

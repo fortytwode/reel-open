@@ -51,4 +51,7 @@ test('portable allowlist contains every static dependency of the Windows main pr
   await verifyImports('desktop-windows/main.mjs');
   assert.match(build, /'web\/reel\/core\.js',[^\n]*'web\/reel\/whisper-languages\.js'/);
   assert.match(packaging, /`core\.js`, `whisper-languages\.js`/);
+  assert.match(build, /desktop-windows\/src\/trim-range\.mjs/);
+  assert.match(build, /native\/ReelMediaTrim\.exe/);
+  assert.match(packaging, /Windows Media Foundation/);
 });

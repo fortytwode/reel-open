@@ -19,20 +19,26 @@ test('the dashboard can retry a saved recording through the restricted preload',
   await api.action('copyTranscript', recording);
   await api.action('renameRecording', recording);
   await api.action('deleteRecording', recording);
+  await api.action('exportTrimmedCopy', recording);
   await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
   assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording],
     ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'copyTranscript', recording],
-    ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording]]);
+    ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording],
+    ['reel-desktop:action', 'exportTrimmedCopy', recording]]);
 });
 
 class Element {
   constructor(tag = 'div') {
     this.tagName = tag; this.children = []; this.dataset = {}; this.disabled = false;
+    this.listeners = {}; this.value = ''; this.className = '';
     this.classList = { values: new Set(), add: value => this.classList.values.add(value),
       remove: value => this.classList.values.delete(value),
       toggle: (value, force) => { const enabled = force ?? !this.classList.values.has(value); enabled ? this.classList.values.add(value) : this.classList.values.delete(value); return enabled; } };
   }
   append(...children) { this.children.push(...children); }
+  addEventListener(name, fn) { this.listeners[name] = fn; }
+  checkValidity() { return true; }
+  reportValidity() { return true; }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
   get firstChild() { return this.children[0] ?? null; }
   setAttribute() {}
@@ -155,13 +161,18 @@ test('local playback and transcript controls pass only the selected ID and owner
   const entries=getElement('recordingsList').children;
   const play=entries[0].children[0].children.find(child=>child.dataset.action==='playRecording');
   const copy=entries[1].children[0].children.find(child=>child.dataset.action==='copyTranscript');
+  const trimControls=entries[0].children[0].children.find(child=>child.className==='trim-export-controls');
+  const trim=trimControls?.children.at(-1);
   assert.ok(play); assert.ok(copy);
   onClick({target:{closest:selector=>selector==='[data-action]'?play:null}});
   onClick({target:{closest:selector=>selector==='[data-action]'?copy:null}});
+  trimControls.children[1].children[0].value='2'; trimControls.children[2].children[0].value='7';
+  trim.listeners.click();
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(JSON.parse(JSON.stringify(calls)),[
     ['playRecording',{id:'old',expectedOwnerUserID:'owner-a'}],
-    ['copyTranscript',{id:'meeting',expectedOwnerUserID:'owner-a'}]]);
+    ['copyTranscript',{id:'meeting',expectedOwnerUserID:'owner-a'}],
+    ['exportTrimmedCopy',{id:'old',expectedOwnerUserID:'owner-a',start:2,end:7}]]);
 });
 
 test('a saved meeting is shared only when its explicit button is selected', async () => {
