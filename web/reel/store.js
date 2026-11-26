@@ -76,13 +76,21 @@ export async function updateRow(id, extra) {
   if (prev) store.put({ ...prev, ...extra });
   await done(tx);
 }
-/** Background work must never restore a recording removed while it was awaiting I/O. */
+/** Save background notes only while the recording still exists. */
 export async function updateExistingRecording(recording, extra = {}) {
   const db = await open();
   const tx = db.transaction("recordings", "readwrite"), rows = tx.objectStore("recordings");
   const previous = await req(rows.get(recording.id));
-  const json = previous && C.preserveRecordingBinding(C.recordingToJSON(recording), previous.json);
-  if (json) rows.put({ ...previous, ...extra, json });
+  if (!previous) { await done(tx); return null; }
+  let json = C.recordingToJSON(recording);
+  if (C.isMeeting(json) || C.isMeeting(previous.json)) {
+    json = C.preserveRecordingBinding(json, previous.json);
+  } else {
+    // Ordinary transcription can race publication, so keep unrelated fields from the current row.
+    const { transcriptStatus, summary, summaryEngine } = json;
+    json = { ...previous.json, transcriptStatus, summary, summaryEngine };
+  }
+  rows.put({ ...previous, ...extra, json });
   await done(tx);
   return json;
 }

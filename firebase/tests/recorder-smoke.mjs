@@ -268,6 +268,34 @@ try {
   await sleep(3000);
   const resumedAt = await page.evaluate(() => window.__reel.state().session.elapsed);
   check("resume restarts the clock", resumedAt > stillPaused + 0.6, `${stillPaused} → ${resumedAt}`);
+  await page.evaluate((id) => {
+    const { library, publisher, state } = window.__reel;
+    const uploader = state().uploader;
+    const finish = uploader.finish;
+    const updateExisting = library.updateExisting;
+    let transcriptStarted;
+    const transcript = new Promise(resolve => { transcriptStarted = resolve; });
+    const marks = window.reelFinishRace = { attempted: false };
+    // Let transcription take its initial snapshot before live finalization commits HLS,
+    // then make that transcript write land after the HLS update.
+    uploader.finish = async function (...args) {
+      await finish.call(this, ...args);
+      await transcript;
+    };
+    library.updateExisting = async function (r, ...args) {
+      if (r.id !== id || r.transcriptStatus !== "pending" || marks.attempted) return updateExisting.call(this, r, ...args);
+      marks.attempted = true;
+      marks.startingHls = r.playback.hls;
+      transcriptStarted();
+      try {
+        marks.liveFinished = await publisher.liveFinish.get(id);
+        return await updateExisting.call(this, r, ...args);
+      } finally {
+        marks.hlsAfterTranscriptWrite = this.get(id)?.playback.hls;
+        library.updateExisting = updateExisting;
+      }
+    };
+  }, r.id);
   const stopT = Date.now();
   await page.locator("#stop").click();
   // Playwright may wait for a busy Windows renderer before delivering the click.
@@ -288,6 +316,9 @@ try {
       (await fetchObj(r.shareID, C.File.transcriptJSON)).ok && (await fetchObj(r.shareID, C.File.transcriptText)).ok;
   }, 30000));
   const m1 = await meta(r.shareID);
+  const marks = await page.evaluate(() => window.reelFinishRace);
+  check("HLS stays in metadata across a concurrent transcript update", marks.attempted && !marks.startingHls &&
+    marks.liveFinished && marks.hlsAfterTranscriptWrite && m1.playback.hls, JSON.stringify({ ...marks, playback: m1.playback }));
   const { schemaVersion, room: metaRoom, ownerName, app, hasThumbnail, width, transcriptStatus, locked } = m1;
   check("meta.json shape (schema 2, room, owner, app, thumbnail)", schemaVersion === 2 && metaRoom === r.shareID && ownerName && /\(web\)$/.test(app) &&
     hasThumbnail === true && width === 1280 && transcriptStatus === "ready" && locked === false,

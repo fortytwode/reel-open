@@ -4,7 +4,7 @@
 // and plays within seconds. Then video.mp4 (assembled locally from the segments), the thumbnail
 // and meta are uploaded in the background. Same remote layout as the Mac app.
 import * as C from "./core.js?v=20261126-local-import";
-import * as store from "./store.js?v=20261126-local-import";
+import * as store from "./store.js?v=20261126-hls-publication";
 import { StorageClient, FirestoreClient, SegmentUploader, CloudError, concurrently } from "./cloud.js?v=20261119-owner2";
 import { remux, parseInit, fragmentDuration } from "./fmp4.js";
 
@@ -42,8 +42,15 @@ export class Library extends EventTarget {
   async updateExisting(r, extra) {
     if (!this.items.has(r.id)) return false;
     const saved = await store.updateExistingRecording(r, extra);
-    if (!saved || !this.items.has(r.id)) return false;
-    this.items.set(r.id, C.preserveRecordingBinding(structuredClone(r), saved));
+    const current = this.items.get(r.id);
+    if (!saved || !current) return false;
+    if (C.isMeeting(saved)) {
+      this.items.set(r.id, C.preserveRecordingBinding(structuredClone(r), saved));
+    } else {
+      const { transcriptStatus, summary, summaryEngine } = r;
+      Object.assign(current, { transcriptStatus, summary, summaryEngine });
+      C.preserveRecordingBinding(current, saved);
+    }
     this.changed(); return true;
   }
   async importLocalVideo(file, { durationSeconds, width, height }, session) {
@@ -325,7 +332,12 @@ export class Publisher {
         const up = new SegmentUploader({ storage, shareID: r.shareID, key: null, expiresAt: r.access.expiresAt, cfg: this.cfg,
           files: (f) => store.getBytes(id, f), progress: row.progress, persist: (pp) => store.updateRow(id, { progress: pp }) });
         await up.finish(log);
-        r = this.library.get(id); r.playback.hls = true; await this.library.update(r);
+      }
+      // Restore the flag if an older client saved completed upload progress without it.
+      r = this.library.get(id);
+      if (!done || !r.playback.hls) {
+        r.playback.hls = true;
+        await this.library.update(r);
         if (publishProgress) await this.uploadMeta({ ...r, transcriptStatus: "pending" }, "ready", storage, owner);
       }
     }
