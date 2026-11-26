@@ -100,7 +100,7 @@ export class CaptureSession {
       camera: this.camera ? readable(this.camera) : null,
       audio: !!audioTrack, audioSampleRate: 48000, audioChannels: 2,
     };
-    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-pause", import.meta.url), { type: "module" });
+    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-video-drain", import.meta.url), { type: "module" });
     this.worker.onmessage = (e) => this.onWorker(e.data);
     this.worker.onerror = (e) => this.onWorker({ type: "error", message: e.message || "Recorder worker failed" });
     const ready = new Promise((resolve, reject) => { this.readyWaiter = { resolve, reject }; });
