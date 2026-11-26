@@ -1,7 +1,7 @@
 // Capture session (main thread): screen/window/tab via getDisplayMedia (with system or tab
 // audio where the browser offers it), camera, microphone, a Web Audio mix of mic + system audio
 // into one stereo 48 kHz track (as the Mac app and Loom mix them), and the encoder worker.
-import * as C from "./core.js";
+import * as C from "./core.js?v=20261126-capture-region";
 
 export function captureSupported() {
   return !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) && typeof VideoEncoder === "function" &&
@@ -12,14 +12,24 @@ export function captureSupported() {
 export async function pickDisplay(settings, { tabOnly = false } = {}) {
   const wantsSystem = C.usesSystem(settings.audio);
   const [w, h] = C.QUALITY.p2160;
-  const video = { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: settings.fps, max: settings.fps }, cursor: "always" };
+  const video = { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: settings.fps, max: settings.fps }, cursor: settings.showCursor === false ? "never" : "always" };
   if (tabOnly) video.displaySurface = "browser";
+  let controller;
+  if (settings.mode === "area" && typeof CaptureController === "function") {
+    const candidate = new CaptureController();
+    try {
+      // Keep the picker preview reachable when the chosen source is another tab or window.
+      candidate.setFocusBehavior("focus-capturing-application");
+      controller = candidate;
+    } catch { /* This browser can still show the preview when Reel is brought forward. */ }
+  }
   return navigator.mediaDevices.getDisplayMedia({
+    ...(controller && { controller }),
     video,
     audio: wantsSystem ? { suppressLocalAudioPlayback: false, echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false,
     systemAudio: wantsSystem && !tabOnly ? "include" : "exclude",
     selfBrowserSurface: "exclude",
-    surfaceSwitching: tabOnly ? "exclude" : "include",
+    surfaceSwitching: tabOnly || settings.mode === "area" ? "exclude" : "include",
     monitorTypeSurfaces: tabOnly ? "exclude" : "include",
   });
 }
@@ -50,8 +60,8 @@ export class CaptureSession {
    * display: MediaStream|null, camera: MediaStreamTrack|null (possibly processed), mic: MediaStream|null.
    * composite: draw the camera bubble into the video (window/tab capture or no bubble window).
    */
-  constructor({ settings, display, camera, mic, composite, events }) {
-    Object.assign(this, { settings, display, camera, mic, composite, events });
+  constructor({ settings, display, camera, mic, composite, region, events }) {
+    Object.assign(this, { settings, display, camera, mic, composite, region, events });
     this.worker = null; this.audioCtx = null; this.size = null; this.phase = "idle"; this.elapsed = 0;
     this.pauseID = 0; this.confirmedPauseID = 0;
     this.doneWaiter = null; this.readyWaiter = null; this.info = null;
@@ -59,6 +69,12 @@ export class CaptureSession {
   }
 
   outputSize() {
+    if (this.region) {
+      const { sourceWidth, sourceHeight } = this.region;
+      const rect = C.frameRegion(this.region, sourceWidth, sourceHeight);
+      if (!rect) throw new Error("Select a valid recording area.");
+      return C.outputSize(rect.width, rect.height, this.settings.quality);
+    }
     if (this.display) {
       const s = this.display.getVideoTracks()[0].getSettings();
       return C.outputSize(s.width || 1920, s.height || 1080, this.settings.quality);
@@ -94,13 +110,13 @@ export class CaptureSession {
     const readable = (track) => { const r = new MediaStreamTrackProcessor({ track }).readable; transfer.push(r); return r; };
     const msg = {
       type: "start", width, height, fps, bitrate: C.bitrate(width, height, fps),
-      layout: this.display ? "screen" : "camera", composite: this.composite,
+      layout: this.display ? "screen" : "camera", composite: this.composite, region: this.region,
       bubbleScale: C.BUBBLE_DIAMETER[this.settings.bubbleSize] / 220,
       screen: this.display ? readable(this.display.getVideoTracks()[0]) : null,
       camera: this.camera ? readable(this.camera) : null,
       audio: !!audioTrack, audioSampleRate: 48000, audioChannels: 2,
     };
-    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-video-drain", import.meta.url), { type: "module" });
+    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-capture-region", import.meta.url), { type: "module" });
     this.worker.onmessage = (e) => this.onWorker(e.data);
     this.worker.onerror = (e) => this.onWorker({ type: "error", message: e.message || "Recorder worker failed" });
     const ready = new Promise((resolve, reject) => { this.readyWaiter = { resolve, reject }; });

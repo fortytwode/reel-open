@@ -10,7 +10,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/viewer.css">
   <link rel="stylesheet" href="/meeting-calendar.css?v=20261119-choice1">
-  <link rel="stylesheet" href="/record.css?v=20261123-local1">
+  <link rel="stylesheet" href="/record.css?v=20261126-capture-region">
 </head>
 <body>
   <header class="bar">
@@ -62,6 +62,7 @@
         <label id="mode-setting">Record
           <select id="mode">
             <option value="screen">Screen, window or tab</option>
+            <option value="area">Area of a screen, window or tab</option>
             <option value="camera">Camera only</option>
           </select>
         </label>
@@ -118,12 +119,14 @@
         <label>Countdown
           <select id="countdown">
             <option value="0">None</option>
+            <option value="1">1 s</option>
             <option value="3">3 s</option>
             <option value="5">5 s</option>
           </select>
         </label>
       </div>
       <div class="checks">
+        <label><input type="checkbox" id="show-cursor"> Include pointer when supported</label>
         <label><input type="checkbox" id="copy-on-stop"> Copy link when I stop</label>
         <label><input type="checkbox" id="upload-mp4"> Also upload an MP4 (downloads, transcript API)</label>
         <label id="bg-image-row" hidden>Background image <input type="file" id="bg-image" accept="image/*"></label>
@@ -208,6 +211,28 @@
     </form>
   </dialog>
 
+  <dialog id="region-dialog" aria-labelledby="region-title" aria-describedby="region-help">
+    <form method="dialog">
+      <h3 id="region-title">Choose a recording area</h3>
+      <p id="region-help" class="small muted">Drag over the preview, or set the edges in source pixels. Only the selected area is included in the video.</p>
+      <p id="region-status" class="small muted" role="status">Waiting for the shared picture…</p>
+      <div id="region-preview" hidden>
+        <video id="region-video" aria-label="Preview of the shared source" muted playsinline></video>
+        <div id="region-outline" aria-hidden="true" hidden></div>
+      </div>
+      <fieldset id="region-edges" class="grid" disabled aria-label="Recording area edges in source pixels">
+        <label for="region-left">Left <input type="number" id="region-left" min="0" step="1" required></label>
+        <label for="region-top">Top <input type="number" id="region-top" min="0" step="1" required></label>
+        <label for="region-right">Right <input type="number" id="region-right" min="0" step="1" required></label>
+        <label for="region-bottom">Bottom <input type="number" id="region-bottom" min="0" step="1" required></label>
+      </fieldset>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button id="region-confirm" value="record" class="primary" disabled>Record this area</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="trim-dialog">
     <form method="dialog" id="trim-form">
       <h3>Trim</h3>
@@ -226,6 +251,6 @@
   <div id="toast" class="toast" role="status" hidden></div>
   <footer class="foot muted small"><a href="/notetaker" class="muted">Open Reel Notetaker</a></footer>
   <script type="module" src="/reel/install.js?v=20261119-products1"></script>
-  <script type="module" src="/record.js?v=20261126-hls-publication"></script>
+  <script type="module" src="/record.js?v=20261126-capture-region"></script>
 </body>
 </html>

@@ -696,6 +696,18 @@ export function outputSize(width, height, preset) {
   return { width: even(sw * scale), height: even(sh * scale) };
 }
 
+/** Convert a preview selection to a rectangle fully inside the current source frame. */
+export function frameRegion(region, width, height) {
+  if (!region) return null;
+  const { left, top, right, bottom, sourceWidth, sourceHeight } = region;
+  if (![left, top, right, bottom, sourceWidth, sourceHeight, width, height].every(Number.isSafeInteger)
+      || width < 2 || height < 2 || left < 0 || top < 0 || right > sourceWidth || bottom > sourceHeight
+      || right - left < 2 || bottom - top < 2) return null;
+  const x = Math.ceil(left * width / sourceWidth), y = Math.ceil(top * height / sourceHeight);
+  const w = Math.floor(right * width / sourceWidth) - x, h = Math.floor(bottom * height / sourceHeight) - y;
+  return w >= 2 && h >= 2 ? { x, y, width: w, height: h } : null;
+}
+
 /** Loom's pixel-count bitrate tiers, ×1.5 above 30 fps. */
 export function bitrate(width, height, fps) {
   const p = width * height;
@@ -716,7 +728,7 @@ export function cornerBubble(width, height, diameterFraction = 0.22, marginFract
 export const DEFAULT_SETTINGS = Object.freeze({
   mode: "screen", cameraEnabled: true, cameraID: null, microphoneID: null, audio: "micOnly", quality: "p1080", fps: 30,
   countdownSeconds: 3, bubbleSize: "medium", autoUpload: true, copyLinkOnStop: true, cameraBackground: "none",
-  liveUpload: true, uploadMP4: true,
+  liveUpload: true, uploadMP4: true, showCursor: true,
 });
 export const AUDIO_SOURCES = Object.freeze({ micOnly: "Microphone", systemOnly: "System audio only", micAndSystem: "Microphone + system audio", none: "No audio" });
 export const usesMic = (a) => a === "micOnly" || a === "micAndSystem";
@@ -728,7 +740,7 @@ export function decodeSettings(j) {
   const d = { ...DEFAULT_SETTINGS };
   if (!j || typeof j !== "object") return d;
   const pick = (k, ok) => { if (ok(j[k])) d[k] = j[k]; };
-  pick("mode", (v) => ["screen", "window", "camera"].includes(v));
+  pick("mode", (v) => ["screen", "window", "area", "camera"].includes(v));
   pick("cameraEnabled", (v) => typeof v === "boolean");
   pick("cameraID", (v) => typeof v === "string");
   pick("microphoneID", (v) => typeof v === "string");
@@ -737,7 +749,7 @@ export function decodeSettings(j) {
   pick("fps", (v) => [24, 30, 60].includes(v));
   if (Number.isInteger(j.countdownSeconds)) d.countdownSeconds = Math.min(Math.max(j.countdownSeconds, 0), 10);
   pick("bubbleSize", (v) => v in BUBBLE_DIAMETER);
-  for (const k of ["autoUpload", "copyLinkOnStop", "liveUpload", "uploadMP4"]) pick(k, (v) => typeof v === "boolean");
+  for (const k of ["autoUpload", "copyLinkOnStop", "liveUpload", "uploadMP4", "showCursor"]) pick(k, (v) => typeof v === "boolean");
   pick("cameraBackground", (v) => ["none", "blur", "image"].includes(v));
   return d;
 }

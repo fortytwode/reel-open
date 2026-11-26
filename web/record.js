@@ -6,14 +6,15 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-partial-recovery";
 import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
-import * as C from "./reel/core.js?v=20261126-serving-import";
+import * as C from "./reel/core.js?v=20261126-capture-region";
 import * as store from "./reel/store.js?v=20261126-hls-publication";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
 import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-hls-publication";
-import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-video-drain";
+import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-capture-region";
+import { chooseRecordingRegion } from "./reel/region-picker.js";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
 import { openBubble, pipSupported } from "./reel/pip.js";
 import { createCameraEffect, effectsSupported, preloadEffects } from "./reel/effects.js";
@@ -134,7 +135,7 @@ window.__reel = { library, publisher, store, C, processRecording, state: () => R
 // ---------------------------------------------------------------- recorder state (RecorderController)
 
 const R = { phase: "idle", session: null, recording: null, log: null, uploader: null, writes: Promise.resolve(),
-  bubble: null, camStream: null, camEffect: null, display: null, mic: null, unlock: null, stoppedAt: 0, liveUpload: false, cancelCountdown: false, countdownError: null };
+  bubble: null, camStream: null, camEffect: null, display: null, mic: null, region: null, unlock: null, stoppedAt: 0, liveUpload: false, cancelCountdown: false, countdownError: null };
 
 function setPhase(p) {
   if (p !== "idle") preview.stop();
@@ -177,6 +178,7 @@ async function backgroundImage() {
 }
 
 function releaseDevices() {
+  R.region = null;
   if (R.camEffect) { R.camEffect.stop(); R.camEffect = null; }
   if (R.camStream) { R.camStream.getTracks().forEach((t) => t.stop()); R.camStream = null; }
   if (R.display) { R.display.getTracks().forEach((t) => t.stop()); R.display = null; }
@@ -211,7 +213,8 @@ async function start({ reuse = false } = {}) {
   const prepareCameraAndBubble = async () => {
     camTrack = await cameraTrackFor(s);
     // PiP may need a fresh gesture once the browser's sharing picker closes.
-    if (!pipSupported() || s.mode === "camera" || (tabOnly && !navigator.userActivation?.isActive)) return;
+    const cropDisplay = s.mode === "area" && R.display?.getVideoTracks()[0]?.getSettings().displaySurface === "monitor";
+    if (!pipSupported() || s.mode === "camera" || cropDisplay || (tabOnly && !navigator.userActivation?.isActive)) return;
     try {
       R.bubble = await openBubble({
         stream: camTrack ? new MediaStream([camTrack]) : null, size: C.BUBBLE_DIAMETER[s.bubbleSize],
@@ -224,10 +227,15 @@ async function start({ reuse = false } = {}) {
   };
   try {
     if (!reuse) {
-      if (!tabOnly) await prepareCameraAndBubble();
+      if (!tabOnly && s.mode !== "area") await prepareCameraAndBubble();
       if (s.mode !== "camera") {
         try { R.display = await pickDisplay(s, { tabOnly }); }
         catch (e) { return bail(e && e.name === "NotAllowedError" ? null : "Couldn't start screen capture: " + e.message); }
+      }
+      if (s.mode === "area") {
+        R.region = await chooseRecordingRegion($("region-dialog"), R.display.getVideoTracks()[0]);
+        if (!R.region) return bail();
+        await prepareCameraAndBubble();
       }
       if (tabOnly) {
         if (R.display?.getVideoTracks()[0]?.getSettings().displaySurface !== "browser") {
@@ -251,16 +259,18 @@ async function start({ reuse = false } = {}) {
   }
   if (s.mode === "camera" && !camTrack) return bail("No camera found.");
 
-  const surface = R.display ? R.display.getVideoTracks()[0].getSettings().displaySurface : null;
+  const screen = R.display?.getVideoTracks()[0];
+  if (s.mode === "area" && screen?.readyState !== "live") return bail("Sharing stopped before recording started.");
+  const surface = screen?.getSettings().displaySurface;
   // Whole-screen capture shows the bubble window itself; otherwise draw the camera into the video.
-  const composite = !!camTrack && (surface !== "monitor" || !R.bubble);
+  const composite = !!camTrack && (!!R.region || surface !== "monitor" || !R.bubble);
 
   const now = new Date();
   let r;
   try {
     const recordingNonce = C.newRecordingNonce();
     const shareID = captureOwnerUID ? await C.ownerShareID(captureOwnerUID, recordingNonce) : C.newShareID();
-    r = C.newRecording({ shareID, createdAt: now, mode: s.mode === "camera" ? "camera" : modeForSurface(surface),
+    r = C.newRecording({ shareID, createdAt: now, mode: s.mode === "camera" || R.region ? s.mode : modeForSurface(surface),
       upload: s.autoUpload && captureOwnerUID ? "pending" : "localOnly" });
     r.recordingNonce = recordingNonce;
     if (captureOwnerUID) r.recordingOwnerUID = captureOwnerUID;
@@ -286,7 +296,7 @@ async function start({ reuse = false } = {}) {
   }
 
   const sessionObj = new CaptureSession({
-    settings: s, display: R.display, camera: camTrack, mic: R.mic, composite,
+    settings: s, display: R.display, camera: camTrack, mic: R.mic, composite, region: R.region,
     events: {
       onInit: (bytes, codecs) => queueWrite(async () => {
         await store.putFile(r.id, C.File.initSegment, bytes);
@@ -310,7 +320,10 @@ async function start({ reuse = false } = {}) {
         if (R.bubble) R.bubble.setState({ phase: R.phase, elapsed: m.elapsed });
         if (R.uploader) $("live-upload").textContent = `${R.uploader.progress.uploaded.length}/${m.segments} parts uploaded`;
       },
-      onSourceEnded: () => { if (R.phase === "recording" || R.phase === "paused") stop(); },
+      onSourceEnded: () => {
+        if (R.phase === "countdown") { R.cancelCountdown = true; R.countdownError = "Sharing stopped before recording started."; }
+        if (R.phase === "recording" || R.phase === "paused") stop();
+      },
       onError: (e) => {
         if (R.phase === "countdown") { R.cancelCountdown = true; R.countdownError = e.message; return; }
         toast("Recording stopped: " + e.message, true); stop();
@@ -341,6 +354,9 @@ async function start({ reuse = false } = {}) {
   cur.width = sessionObj.size.width; cur.height = sessionObj.size.height; cur.captureState = "recording";
   if (!sessionObj.info.audio) cur.transcriptStatus = "none";
   await library.update(cur);
+  if (R.region && screen.readyState !== "live") {
+    R.cancelCountdown = true; R.countdownError = "Sharing stopped before recording started.";
+  }
   if (R.cancelCountdown) {
     await sessionObj.cancel();
     await discard(r);
@@ -349,6 +365,9 @@ async function start({ reuse = false } = {}) {
   }
   sessionObj.begin();
   setPhase("recording");
+  if (!meetingMode && screen && s.showCursor === false && screen.getSettings().cursor !== "never") {
+    toast("This browser could not confirm that the pointer was hidden for the selected source.");
+  }
   $("live-hint").textContent = R.bubble ? "Use the floating bubble to pause or stop while you work in other apps." : "";
   console.info("Recording started", sessionObj.info, `${cur.width}x${cur.height}`, "live", R.liveUpload);
 }
@@ -480,9 +499,9 @@ function bindSettings() {
   }
   $("fps").value = String(settings.fps);
   $("fps").addEventListener("change", () => { settings.fps = parseInt($("fps").value, 10); saveSettings(); });
-  $("countdown").value = String([0, 3, 5].includes(settings.countdownSeconds) ? settings.countdownSeconds : 3);
+  $("countdown").value = String([0, 1, 3, 5].includes(settings.countdownSeconds) ? settings.countdownSeconds : 3);
   $("countdown").addEventListener("change", () => { settings.countdownSeconds = parseInt($("countdown").value, 10); saveSettings(); });
-  const checks = { "camera-on": "cameraEnabled", "auto-upload": "autoUpload", "copy-on-stop": "copyLinkOnStop", "upload-mp4": "uploadMP4" };
+  const checks = { "camera-on": "cameraEnabled", "auto-upload": "autoUpload", "copy-on-stop": "copyLinkOnStop", "upload-mp4": "uploadMP4", "show-cursor": "showCursor" };
   for (const [id, key] of Object.entries(checks)) {
     $(id).checked = settings[key];
     $(id).addEventListener("change", () => { settings[key] = $(id).checked; saveSettings(); refreshForm(); });
