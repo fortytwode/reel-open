@@ -20,6 +20,7 @@ $publisher = 'CN=Reel Ephemeral CI Test'
 $identity = 'RocketShipHQ.Reel'
 $certificate = $null
 $trustedCertificate = $null
+$rootCertificate = $null
 $server = $null
 $appInstalled = $false
 $testPassword = 'ephemeral-' + [guid]::NewGuid().ToString('N')
@@ -64,6 +65,7 @@ try {
     $cer = Join-Path $tempRoot 'test-publisher.cer'
     Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
     $trustedCertificate = Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople'
+    $rootCertificate = Import-Certificate -FilePath $cer -CertStoreLocation 'Cert:\CurrentUser\Root'
     $signTool = Find-SignTool
 
     foreach ($release in @(@{ Version = $Version; Name = 'v1' }, @{ Version = $NextVersion; Name = 'v2' })) {
@@ -113,6 +115,9 @@ try {
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if ($trustedCertificate) {
         Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPeople\$($trustedCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+    }
+    if ($rootCertificate) {
+        Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$($rootCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
     }
     if ($certificate) {
         Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
