@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Reel Meeting Prompt",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Offer to send a detected meeting link to Reel.",
   "permissions": ["alarms", "notifications", "storage"],
   "host_permissions": [
@@ -31,5 +31,19 @@
     }
   ],
   "background": { "service_worker": "background.js" },
+  "commands": {
+    "recorder-start-stop": {
+      "description": "Open or stop Reel Recorder",
+      "global": true
+    },
+    "recorder-pause-resume": {
+      "description": "Pause or resume a Reel recording",
+      "global": true
+    },
+    "recorder-cancel": {
+      "description": "Cancel a Reel recording",
+      "global": true
+    }
+  },
   "icons": { "128": "icon128.png" }
 }

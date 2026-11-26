@@ -1,7 +1,52 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createMeetingAlertManager } = require('./background.js');
+const { createMeetingAlertManager, runRecorderShortcut } = require('./background.js');
 const { recordPage } = require('./organization.js');
+
+test('Recorder shortcuts act only on one recording in the configured organization', async () => {
+  const recordURL = recordPage({ homepage_url: 'https://record.northwind.example' });
+  const calls = [];
+  const active = new Set([2]);
+  const tabs = [
+    { id: 1, url: recordURL.href, windowId: 7, lastAccessed: 10 },
+    { id: 2, url: new URL('/record.html', recordURL).href, windowId: 8, lastAccessed: 20 },
+    { id: 3, url: 'https://other.example/record', windowId: 9 },
+    { id: 4, url: new URL('/notetaker', recordURL).href, windowId: 10 },
+    { id: 5, url: new URL('/record-other', recordURL).href, windowId: 11 },
+  ];
+  const api = {
+    tabs: {
+      async query({ url }) { assert.equal(url, 'https://record.northwind.example/record*'); return tabs; },
+      async create(info) { calls.push(['create', info]); },
+      async update(id, info) { calls.push(['tab', id, info]); },
+      async sendMessage(id, { action }, { frameId }) {
+        assert.equal(frameId, 0);
+        calls.push([action, id]);
+        return action === 'active' && active.has(id);
+      },
+    },
+    windows: { async update(id, info) { calls.push(['window', id, info]); } },
+  };
+  await runRecorderShortcut(api, 'recorder-pause-resume', recordURL);
+  assert.deepEqual(calls.splice(0), [['active', 1], ['active', 2], ['pause', 2]]);
+  await runRecorderShortcut(api, 'recorder-start-stop', recordURL);
+  assert.deepEqual(calls.splice(0), [['active', 1], ['active', 2], ['stop', 2]]);
+  await runRecorderShortcut(api, 'recorder-cancel', recordURL);
+  assert.deepEqual(calls.splice(0), [
+    ['active', 1], ['active', 2], ['tab', 2, { active: true }], ['window', 8, { focused: true }], ['cancel', 2],
+  ]);
+  active.add(1);
+  await runRecorderShortcut(api, 'recorder-start-stop', recordURL);
+  assert.deepEqual(calls.splice(0), [['active', 1], ['active', 2]]);
+  active.clear();
+  await runRecorderShortcut(api, 'recorder-start-stop', recordURL);
+  assert.deepEqual(calls.splice(0), [
+    ['active', 1], ['active', 2], ['tab', 2, { active: true }], ['window', 8, { focused: true }], ['open', 2],
+  ]);
+  tabs.length = 0;
+  await runRecorderShortcut(api, 'recorder-start-stop', recordURL);
+  assert.deepEqual(calls, [['create', { url: recordURL.href, active: true }]]);
+});
 
 function harness(initialNow = Date.parse('2026-10-30T12:00:00Z')) {
   let now = initialNow;

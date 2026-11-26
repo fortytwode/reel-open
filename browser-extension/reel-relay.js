@@ -1,5 +1,13 @@
 (() => {
-  const { isRecordPage, recordURL } = globalThis.ReelExtension;
+  const { isRecordPage, isRecorderPage, recordURL } = globalThis.ReelExtension;
+  const recorderActions = new Set(['active', 'open', 'stop', 'pause', 'cancel']);
+  chrome.runtime.onMessage?.addListener((message, sender, sendResponse) => {
+    if (sender.id !== chrome.runtime.id || message?.type !== 'REEL_RECORDER_SHORTCUT' ||
+        !recorderActions.has(message.action) || !isRecorderPage(location.href, recordURL)) return false;
+    const command = new CustomEvent('reel-recorder-shortcut', { detail: message.action, cancelable: true });
+    sendResponse(!document.dispatchEvent(command));
+    return false;
+  });
   window.addEventListener('message', event => {
     if (!recordURL || event.source !== window || event.origin !== recordURL.origin) return;
     if (!isRecordPage(location.href, recordURL)) return;

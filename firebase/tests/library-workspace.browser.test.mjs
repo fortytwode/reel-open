@@ -109,7 +109,7 @@ test('Mission Control calendar stays in the workspace and clears on sign out', a
     await sync.click();
     await page.waitForTimeout(100);
     assert.equal(syncRequests, 1);
-    assert.equal(await page.locator('[data-extension-note] a').getAttribute('href'), 'https://example.test/downloads/reel-meeting-prompt-0.1.1.zip');
+    assert.equal(await page.locator('[data-extension-note] a').getAttribute('href'), 'https://example.test/downloads/reel-meeting-prompt-0.1.2.zip');
     await page.locator('#sign-out').click();
     assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
     assert.match(await page.locator('#status').textContent(), /Sign in/);
