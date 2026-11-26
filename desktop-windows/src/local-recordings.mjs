@@ -361,6 +361,12 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     const item = owner(ownerUserID).state.recordings.find(recording => recording.id === id);
     return item?.processing && existsSync(path.join(owner(ownerUserID).dir, `${id}.mp4`)) ? structuredClone(item.processing) : null;
   }
+  function getRecordingPath({ ownerUserID, id }) {
+    check(/^[0-9a-f]{32}$/.test(id ?? ''), 'Invalid recording.');
+    const value = owner(ownerUserID);
+    const file = path.join(value.dir, `${id}.mp4`);
+    return value.state.recordings.some(recording => recording.id === id) && existsSync(file) ? file : null;
+  }
   async function getShareRecord({ ownerUserID, id }) {
     check(/^[0-9a-f]{32}$/.test(id ?? ''), 'Invalid recording.');
     const value = owner(ownerUserID), item = value.state.recordings.find(recording => recording.id === id);
@@ -413,5 +419,5 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     check(item?.processing?.audioFrames > 0, 'Meeting audio is unavailable');
     return { path: path.join(value.dir, `${id}.pcm`), sampleRate: 16000, channels: 1, frameCount: item.processing.audioFrames };
   }
-  return { begin, list, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, getShareRecord, bindShare, saveShareState, listProcessing, saveProcessing, getAudioInfo };
+  return { begin, list, getRecordingPath, getSettings, saveSettings, hasCompleted, markCompleted, getProcessing, getShareRecord, bindShare, saveShareState, listProcessing, saveProcessing, getAudioInfo };
 }

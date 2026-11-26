@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDesktopService, desktopBrowserAppArguments, desktopLaunchAction, desktopProductURL } from '../src/desktop-service.mjs';
+import { createCompanionStartup, createDesktopService, desktopBrowserAppArguments, desktopLaunchAction, desktopProductURL } from '../src/desktop-service.mjs';
 import { createMeetingCoordinator } from '../src/meeting-coordinator.mjs';
 
 const org = {meetingServiceURL:'https://meetings.northwind.example', viewerBase:'https://library.northwind.example', viewerPath:'reel', notesBaseURL:'https://library.northwind.example/reel', webBase:'https://record.northwind.example'};
@@ -8,6 +8,46 @@ const initial = ownerUserID => ({ ownerUserID, autoJoin: false, participantConse
   systemAudioConsent: false, selection: { useAll: true, ids: [] } });
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('portable startup reads and changes only this organization’s per-user login item', () => {
+  const executable = 'C:\\User Apps\\Reel.exe';
+  const name = 'Reel Companion organization-a';
+  let own = null;
+  const otherItems = [
+    { name, scope:'machine', enabled:true },
+    { name:'Reel Companion organization-b', scope:'user', enabled:true },
+  ];
+  const app = {
+    isPackaged:true,
+    getLoginItemSettings(options) {
+      assert.deepEqual(options,{ path:executable,args:[] });
+      return { launchItems:[...otherItems,...(own ? [own] : [])] };
+    },
+    setLoginItemSettings(options) {
+      assert.deepEqual(options,{ path:executable,args:[],name,openAtLogin:options.enabled,enabled:options.enabled });
+      own=options.openAtLogin ? { name,scope:'user',enabled:options.enabled } : null;
+    },
+  };
+  const startup=createCompanionStartup({app,executable,organizationKey:'organization-a'});
+  assert.deepEqual(startup.state(),{mode:'portable',enabled:false});
+  startup.setEnabled(true);
+  assert.equal(startup.state().enabled,true);
+  own.enabled=false; // Windows Startup Apps was used to turn it off.
+  assert.equal(startup.state().enabled,false);
+  assert.equal(own.enabled,false);
+  startup.setEnabled(false);
+  assert.equal(own,null);
+});
+
+test('MSIX startup sends the user to Windows Settings without changing registry login items', async () => {
+  const urls=[];
+  const startup=createCompanionStartup({windowsStore:true,shell:{openExternal:async url=>urls.push(url)}});
+  const service=createDesktopService({startup});
+  assert.deepEqual(service.state().startup,{mode:'windows-settings'});
+  await service.action('openStartupSettings');
+  assert.deepEqual(urls,['ms-settings:startupapps']);
+  await assert.rejects(service.action('setCompanionStartup',{enabled:true}));
+});
 
 test('MSIX product launch arguments select the configured Recorder and Notetaker routes', () => {
   assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder']), 'openRecorder');
@@ -44,11 +84,25 @@ function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
       refresh: async () => { calls.push('refresh'); }, tick: async () => { calls.push('tick'); },
       cancel: async () => { calls.push('cancel'); }, dispose: async () => { calls.push('dispose'); } }; return coordinator; },
     openExternal: async url => calls.push(url), openProduct: async name => calls.push(name),
-    openRecordings: async owner => calls.push(owner), shareMeeting,
+    openRecordings: async owner => calls.push(owner), openRecording: async file => calls.push(['play', file]), copyText: text => calls.push(['copy', text]), shareMeeting,
     onState: value => snapshots.push(value) });
   return { service, auth, store, coordinator, settings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
     changeOwner(value) { profile = value; notify(); }, status(value) { status = value; statusNotify(value); } };
 }
+test('local playback and transcript copy are restricted to the active recording owner', async () => {
+  const f = fixture(), id = 'a'.repeat(32);
+  f.store.getRecordingPath = request => request.ownerUserID === 'owner-a' && request.id === id ? '/private/meeting.mp4' : null;
+  f.store.getProcessing = request => request.ownerUserID === 'owner-a' && request.id === id ? { transcriptComplete: true, text: 'Meeting transcript' } : null;
+  await f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' });
+  await f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-a' });
+  assert.deepEqual(f.calls.filter(value => Array.isArray(value)), [['play', '/private/meeting.mp4'], ['copy', 'Meeting transcript']]);
+  await assert.rejects(f.service.action('playRecording', { id, expectedOwnerUserID: 'another-owner' }));
+  await assert.rejects(f.service.action('copyTranscript', { id: '../escape', expectedOwnerUserID: 'owner-a' }));
+  f.changeOwner({ userID: 'owner-b', email: 'b@northwind.example', calendarConnected: true });
+  await assert.rejects(f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' }));
+  await assert.rejects(f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-b' }));
+});
+
 test('calendar remains visible with auto-join off; renderer snapshot omits private transport data', async () => {
   const f = fixture(); await f.service.pulse();
   const state = f.service.state();

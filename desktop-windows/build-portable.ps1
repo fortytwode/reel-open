@@ -88,7 +88,7 @@ $productFiles = @(
     'desktop-windows/src/native-bridge.mjs', 'desktop-windows/src/recorder.mjs',
     'desktop-windows/ui/index.html', 'desktop-windows/ui/setup.css', 'desktop-windows/ui/setup.mjs',
     'desktop-windows/capture/index.html', 'desktop-windows/capture/preload.cjs', 'desktop-windows/capture/renderer.mjs',
-    'web/reel/capture.js', 'web/reel/core.js', 'web/reel/cloud.js', 'web/reel/audio.js', 'web/reel/encoder-worker.js', 'web/reel/fmp4.js',
+    'web/reel/capture.js', 'web/reel/core.js', 'web/reel/whisper-languages.js', 'web/reel/cloud.js', 'web/reel/audio.js', 'web/reel/encoder-worker.js', 'web/reel/fmp4.js',
     'web/vendor/mp4-muxer.mjs', 'web/vendor/mp4-muxer.LICENSE'
 )
 $nativeInputs = @('Core.cs', 'WinJoin.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs', 'build.cmd')

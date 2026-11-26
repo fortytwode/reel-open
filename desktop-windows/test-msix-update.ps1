@@ -40,6 +40,23 @@ $baseUri = $null
 $organizationPath = Join-Path $PSScriptRoot 'organization.json'
 $organizationOriginal = $null
 
+function Assert-CompanionStartupTask($package) {
+    $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
+    $tasks = @($manifest.SelectNodes("//*[local-name()='Extension' and @Category='windows.startupTask']"))
+    if ($tasks.Count -ne 1) { throw 'The installed package must have exactly one startup task.' }
+    $extension = $tasks[0]
+    $application = $extension.ParentNode.ParentNode
+    $startup = $extension.SelectSingleNode("*[local-name()='StartupTask']")
+    if ($application.GetAttribute('Id') -ne 'Companion' -or
+        $extension.GetAttribute('Executable') -ne 'Reel.exe' -or
+        $extension.GetAttribute('EntryPoint') -ne 'Windows.FullTrustApplication' -or
+        $null -eq $startup -or $startup.GetAttribute('TaskId') -ne 'ReelCompanionAtLogon' -or
+        $startup.GetAttribute('Enabled') -ne 'false') {
+        throw 'The installed startup task did not retain the disabled-by-default Companion identity.'
+    }
+    Write-Output "Installed Companion startup task identity and opt-in default verified for $($package.Version)."
+}
+
 function Find-SignTool {
     $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
     foreach ($candidate in (Get-ChildItem -LiteralPath $root -Directory | Sort-Object Name -Descending)) {
@@ -139,6 +156,7 @@ try {
     if ($null -eq $installed -or $installed.Version.ToString() -ne $Version) {
         throw 'App Installer did not install the initial package version.'
     }
+    Assert-CompanionStartupTask $installed
     if (Get-Command Get-AppxPackageAutoUpdateSettings -ErrorAction SilentlyContinue) {
         try {
             $settings = @(Get-AppxPackageAutoUpdateSettings -PackageFullName $installed.PackageFullName -ErrorAction Stop)
@@ -171,6 +189,17 @@ try {
     if ($null -eq $installed -or $installed.Version.ToString() -ne $NextVersion) {
         throw 'The installed app did not upgrade from its stable App Installer URI on launch.'
     }
+    Assert-CompanionStartupTask $installed
+    $companionPath = Join-Path $installed.InstallLocation 'Reel.exe'
+    Start-Process -FilePath explorer.exe -ArgumentList "shell:AppsFolder\$($installed.PackageFamilyName)!Companion"
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        Start-Sleep -Seconds 1
+        $companion = Get-CimInstance Win32_Process -Filter "Name = 'Reel.exe'" |
+            Where-Object { $_.ExecutablePath -ieq $companionPath } | Select-Object -First 1
+        if ($companion) { break }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not $companion) { throw 'The installed Companion app that owns the startup task did not launch.' }
     Write-Output "MSIX App Installer install/upgrade passed: $Version -> $NextVersion ($Architecture)."
 } finally {
     Write-Output 'Removing the test package, local server, and per-run trust certificate.'

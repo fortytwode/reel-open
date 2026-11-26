@@ -121,7 +121,7 @@ if (!PROD) {
 }
 // Keep this capture/publishing suite deterministic and fast. The dedicated
 // recording-transcription-smoke.mjs exercises the real Whisper model with known speech.
-await ctx.route("**/reel/meeting-transcription-worker.js", (route) => route.fulfill({ contentType: "text/javascript", body:
+await ctx.route(/\/reel\/meeting-transcription-worker\.js(?:\?.*)?$/, (route) => route.fulfill({ contentType: "text/javascript", body:
   'self.onmessage = () => self.postMessage({type:"result",text:"The recorder integration fixture verifies transcript publishing.",chunks:[{timestamp:[0,2],text:"The recorder integration fixture verifies transcript publishing."}]});' }));
 const target = await ctx.newPage();
 await target.goto(ORIGIN + "/target");
@@ -252,6 +252,22 @@ try {
   check("first live segment uploaded while recording", await until(async () => (await fetchObj(r.shareID, C.segmentFile(1))).ok, 15000));
   check("init.mp4 and live playlist uploaded", (await fetchObj(r.shareID, C.File.initSegment)).ok &&
     await until(async () => (await (await fetchObj(r.shareID, C.File.playlist)).text()).includes("#EXT-X-PLAYLIST-TYPE:EVENT"), 10000));
+  await page.bringToFront();
+  const shortcut = await page.evaluate(() => {
+    const command = (detail) => document.dispatchEvent(new CustomEvent("reel-recorder-shortcut", { detail, cancelable: true }));
+    const field = document.createElement("input");
+    document.body.append(field);
+    field.focus();
+    command("pause");
+    const stayedRecording = window.__reel.state().phase === "recording";
+    field.remove();
+    command("pause");
+    const paused = window.__reel.state().phase === "paused";
+    command("pause");
+    return { stayedRecording, paused, resumed: window.__reel.state().phase === "recording" };
+  });
+  check("global Recorder shortcut pauses and resumes without acting while editing a field",
+    shortcut.stayedRecording && shortcut.paused && shortcut.resumed, JSON.stringify(shortcut));
   await sleep(3000);
   await page.locator("#pause").click();
   // The click changes the controls immediately. Sample once the encoder has paused its clock.
@@ -504,6 +520,124 @@ try {
     check("camera-only video.mp4 is H.264 1280x720", cp.streams.some((s) => s.codec_name === "h264" && s.width === 1280 && s.height === 720), JSON.stringify(cp.streams));
     await page.evaluate(async (id) => { await window.__reel.publisher.delete(window.__reel.library.get(id)); }, take2.id);
     check("camera-only take deleted", (await fetchObj(take2.shareID, C.File.meta)).status === 404);
+  }
+
+  // ---- 5c. select and verify a real cropped capture of the synthetic shared tab.
+  if (!PROD) {
+    console.log("recording 4: shared region, drawing and restart");
+    await target.evaluate(() => {
+      const fixture = document.createElement("div");
+      fixture.style.cssText = "position:fixed;inset:0;background:linear-gradient(90deg,#00c800 50%,#dc0020 50%)";
+      document.body.append(fixture);
+    });
+    await configure(page, { mode: "area", audio: "micAndSystem", fps: 24 });
+    await page.locator("#auto-upload").uncheck();
+    await page.selectOption("#countdown", "1");
+    await page.locator("#show-cursor").uncheck();
+    await page.locator("#start").click();
+    await page.locator("#region-preview").waitFor();
+    await page.evaluate(() => { window.cancelledRegionTrack = window.__reel.state().display.getVideoTracks()[0]; });
+    await page.keyboard.press("Escape");
+    check("canceling the crop releases the browser's shared track before recording",
+      await until(() => page.evaluate(() => window.__reel.state().phase === "idle" && cancelledRegionTrack.readyState === "ended")));
+    await page.locator("#start").click();
+    const preview = page.locator("#region-preview");
+    await preview.waitFor();
+    const rectangle = await preview.boundingBox();
+    if (!rectangle) throw new Error("Shared crop preview did not appear");
+    await page.mouse.move(rectangle.x + rectangle.width * 0.05, rectangle.y + rectangle.height * 0.1);
+    await page.mouse.down();
+    await page.mouse.move(rectangle.x + rectangle.width * 0.45, rectangle.y + rectangle.height * 0.9, { steps: 8 });
+    await page.mouse.up();
+    check("dragging a region selects a non-empty crop", await page.locator("#region-confirm").isEnabled());
+    // Edit one edge using the keyboard-accessible control before recording.
+    await page.locator("#region-left").fill("0");
+    const expected = await page.evaluate(() => {
+      const video = document.getElementById("region-video");
+      const region = { sourceWidth: video.videoWidth, sourceHeight: video.videoHeight };
+      for (const side of ["left", "top", "right", "bottom"]) region[side] = +document.getElementById("region-" + side).value;
+      return { region, size: window.__reel.C.outputSize(region.right - region.left, region.bottom - region.top, "p720"),
+        cursor: window.__reel.state().display.getVideoTracks()[0].getSettings().cursor ?? null };
+    });
+    await page.locator("#region-confirm").click();
+    check("area recording honors the one-second countdown", await until(async () =>
+      (await page.locator("#countdown-big").isVisible()) && (await page.locator("#countdown-big").textContent()) === "1", 5000, 30));
+    const first = await until(() => page.evaluate(() => {
+      const s = window.__reel.state();
+      return s.phase === "recording" && { id: s.recording.id, camera: s.session.composite };
+    }));
+    if (!first) throw new Error("Area recording did not start");
+    check("camera remains composited on the selected region", first.camera === true);
+    await page.waitForFunction(() => window.__reel.state().session.elapsed >= 0.5);
+    await page.locator("#draw").click();
+    const drawing = page.locator("#draw-dialog");
+    await drawing.waitFor();
+    check("opening Draw pauses active recording before revealing the preview",
+      await page.evaluate(() => window.__reel.state().session.pauseConfirmed) &&
+      (await page.locator("#draw-status").textContent()).includes("Close the preview, then select Resume"));
+    const pausedTime = await page.evaluate(() => window.__reel.state().session.elapsed);
+    const drawingBox = await page.locator("#draw-preview").boundingBox();
+    if (!drawingBox) throw new Error("Drawing preview did not appear");
+    const mark = async (x1, y1, x2, y2) => {
+      const move = (x, y) => page.mouse.move(drawingBox.x + x * drawingBox.width, drawingBox.y + y * drawingBox.height, { steps: 6 });
+      await move(x1, y1);
+      await page.mouse.down();
+      await move(x2, y2);
+      await page.mouse.up();
+    };
+    await mark(0.15, 0.2, 0.3, 0.25);
+    await page.locator("#draw-undo").click();
+    check("Undo removes the last mark", await page.locator("#draw-clear").isDisabled());
+    await page.selectOption("#draw-tool", "rectangle");
+    await mark(0.35, 0.1, 0.45, 0.25);
+    await page.locator("#draw-clear").click();
+    check("Clear removes the drawing marks", await page.locator("#draw-undo").isDisabled());
+    await page.selectOption("#draw-tool", "arrow");
+    await mark(0.2, 0.5, 0.75, 0.5);
+    await page.keyboard.press("Control+Alt+p");
+    check("recording time stays frozen and shortcuts cannot resume while drawing",
+      await page.evaluate(t => window.__reel.state().session.pauseConfirmed && window.__reel.state().session.elapsed === t, pausedTime));
+    await page.locator("#draw-close").click();
+    check("closing the preview waits for an explicit Resume",
+      !(await drawing.isVisible()) && (await page.locator("#pause").textContent()) === "Resume");
+    await page.locator("#pause").click();
+    await page.waitForFunction(t => window.__reel.state().session.elapsed > t, pausedTime);
+    await page.locator("#restart").click();
+    const restarted = await until(() => page.evaluate(old => {
+      const s = window.__reel.state();
+      return s.phase === "recording" && s.recording.id !== old && { id: s.recording.id, region: s.region, mode: s.recording.mode };
+    }, first.id));
+    if (!restarted) throw new Error("Area recording did not restart");
+    check("restart keeps the same selected crop without reopening the picker",
+      restarted.mode === "area" && Object.entries(expected.region).every(([key, value]) => restarted.region[key] === value));
+    await sleep(2200);
+    await page.locator("#stop").click();
+    const bytes = await until(() => page.evaluate(async id => {
+      const { library, store } = window.__reel;
+      if (library.get(id)?.captureState !== "complete") return false;
+      const video = await store.getFile(id, "video.mp4");
+      return video && Array.from(new Uint8Array(await video.arrayBuffer()));
+    }, restarted.id), 15000);
+    if (!bytes) throw new Error("The selected region did not produce local video");
+    const areaFile = path.join(OUT, "selected-area.mp4");
+    await writeFile(areaFile, Buffer.from(bytes));
+    const shape = ffprobe(areaFile);
+    check("chosen crop preserves the selected shape and audio", shape.streams.some(s => s.codec_name === "h264" &&
+      s.width === expected.size.width && s.height === expected.size.height) &&
+      shape.streams.some(s => s.codec_name === "aac"), JSON.stringify(shape.streams));
+    const pixels = execFileSync("ffmpeg", ["-v", "error", "-ss", "0.8", "-i", areaFile, "-frames:v", "1",
+      "-vf", "scale=3:3", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]);
+    // Sample the right edge away from the camera in the bottom-left.
+    const [red, green, blue] = pixels.subarray(15, 18);
+    check("decoded cropped frame excludes the red area to the right of the selection",
+      pixels.length === 27 && green > red + 70 && green > blue + 70,
+      `RGB ${red},${green},${blue} · browser cursor report ${expected.cursor ?? "unavailable"}`);
+    const markPixels = execFileSync("ffmpeg", ["-v", "error", "-ss", "0.8", "-i", areaFile, "-frames:v", "1",
+      "-vf", "crop=4:4:(iw-4)/2:(ih-4)/2", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]);
+    const [markRed, markGreen, markBlue] = markPixels.subarray(0, 3);
+    check("the restarted video burns the arrow into the selected region",
+      markPixels.length === 48 && markRed > markGreen + 90 && markRed > markBlue + 90, `RGB ${markRed},${markGreen},${markBlue}`);
+    await page.evaluate(async id => { await window.__reel.publisher.delete(window.__reel.library.get(id)); }, restarted.id);
   }
 
   // ---- 6. delete both through the app

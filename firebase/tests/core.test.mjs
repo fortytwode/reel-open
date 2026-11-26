@@ -291,7 +291,17 @@ test("RecordingTests", () => {
 
 test("SettingsTests (browser subset): tolerant decoding", () => {
   assert.deepEqual(C.decodeSettings(null), { ...C.DEFAULT_SETTINGS });
-  const s = C.decodeSettings({ fps: 45, countdownSeconds: 99, audio: "bogus", quality: "p720", mode: "area", liveUpload: false });
+  const s = C.decodeSettings({ fps: 45, countdownSeconds: 99, audio: "bogus", quality: "p720", mode: "area", liveUpload: false, showCursor: false });
   assert.equal(s.fps, 30); assert.equal(s.countdownSeconds, 10); assert.equal(s.audio, "micOnly"); assert.equal(s.quality, "p720");
-  assert.equal(s.mode, "screen"); assert.equal(s.liveUpload, false);
+  assert.equal(s.mode, "area"); assert.equal(s.liveUpload, false); assert.equal(s.showCursor, false);
+  assert.equal(C.decodeSettings({}).showCursor, true);
+});
+
+test("recording region scales inward and never falls back to the full frame", () => {
+  const region = { left: 101, top: 151, right: 501, bottom: 651, sourceWidth: 1200, sourceHeight: 900 };
+  assert.deepEqual(C.frameRegion(region, 1200, 900), { x: 101, y: 151, width: 400, height: 500 });
+  assert.deepEqual(C.frameRegion(region, 600, 450), { x: 51, y: 76, width: 199, height: 249 });
+  assert.equal(C.frameRegion({ ...region, right: 1201 }, 1200, 900), null);
+  assert.equal(C.frameRegion({ ...region, left: 500 }, 1200, 900), null);
+  assert.equal(C.frameRegion(region, 4, 4), null);
 });

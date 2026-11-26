@@ -10,7 +10,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/viewer.css">
   <link rel="stylesheet" href="/meeting-calendar.css?v=20261119-choice1">
-  <link rel="stylesheet" href="/record.css?v=20261123-local1">
+  <link rel="stylesheet" href="/record.css?v=20261126-drawing">
 </head>
 <body>
   <header class="bar">
@@ -32,7 +32,8 @@
     <details id="install-help" class="install-help">
       <summary>Install Reel Recorder</summary>
       <p>In Chrome or Edge, choose Install app from the address bar or browser menu. On a Mac, you can also open Recorder in Safari and choose File → Add to Dock.</p>
-      <p>You can also record here without installing. Keep Reel open until uploads finish. Shortcuts work while Reel or its floating controls are focused; the browser asks you what to share for each new recording.</p>
+      <p>You can also record here without installing. Keep Reel open until uploads finish. Shortcuts work while Reel or its floating controls are focused. The browser asks you what to share for each new recording.</p>
+      <p>On Windows, the <a href="/downloads/reel-meeting-prompt-0.1.2.zip" download>Reel extension</a> adds global shortcuts in Chrome and Edge. See the browser’s extension shortcuts page to view or change your keys.</p>
     </details>
     <p id="install-status" class="small muted" role="status"></p>
     <div id="meeting-calendar-panel"></div>
@@ -62,6 +63,7 @@
         <label id="mode-setting">Record
           <select id="mode">
             <option value="screen">Screen, window or tab</option>
+            <option value="area">Area of a screen, window or tab</option>
             <option value="camera">Camera only</option>
           </select>
         </label>
@@ -78,6 +80,9 @@
             <option value="systemOnly">System audio only</option>
             <option value="none">No audio</option>
           </select>
+        </label>
+        <label>Transcription language
+          <select id="transcription-language"></select>
         </label>
       </div>
       <div class="checks">
@@ -118,12 +123,14 @@
         <label>Countdown
           <select id="countdown">
             <option value="0">None</option>
+            <option value="1">1 s</option>
             <option value="3">3 s</option>
             <option value="5">5 s</option>
           </select>
         </label>
       </div>
       <div class="checks">
+        <label><input type="checkbox" id="show-cursor"> Include pointer when supported</label>
         <label><input type="checkbox" id="copy-on-stop"> Copy link when I stop</label>
         <label><input type="checkbox" id="upload-mp4"> Also upload an MP4 (downloads, transcript API)</label>
         <label id="bg-image-row" hidden>Background image <input type="file" id="bg-image" accept="image/*"></label>
@@ -145,6 +152,7 @@
         <span id="live-upload" class="muted small"></span>
         <span class="spacer"></span>
         <button id="pause" type="button">Pause</button>
+        <button id="draw" type="button" aria-haspopup="dialog" hidden>Draw</button>
         <button id="restart" type="button" title="Discard and start again with the same screen">Restart</button>
         <button id="cancel" type="button">Cancel</button>
         <button id="stop" type="button" class="primary">Stop</button>
@@ -170,6 +178,37 @@
       <p id="empty" class="muted">No recordings yet.</p>
     </section>
   </main>
+
+  <dialog id="draw-dialog" aria-labelledby="draw-title" aria-describedby="draw-status">
+    <h3 id="draw-title">Draw on recording</h3>
+    <p id="draw-status" class="draw-status" role="status">Recording paused. Close the preview, then select Resume to record with your marks.</p>
+    <div class="draw-tools">
+      <label>Tool
+        <select id="draw-tool">
+          <option value="pen">Pen</option>
+          <option value="highlighter">Highlighter</option>
+          <option value="arrow">Arrow</option>
+          <option value="rectangle">Rectangle</option>
+        </select>
+      </label>
+      <label>Color
+        <select id="draw-color">
+          <option value="#ff334f">Red</option>
+          <option value="#ffdc43">Yellow</option>
+          <option value="#5bc9ff">Blue</option>
+          <option value="#ffffff">White</option>
+          <option value="#1d1d1f">Black</option>
+        </select>
+      </label>
+      <button id="draw-undo" type="button" disabled>Undo</button>
+      <button id="draw-clear" type="button" disabled>Clear marks</button>
+    </div>
+    <video id="draw-video" muted playsinline hidden></video>
+    <canvas id="draw-preview" aria-label="Recording preview. Draw using a mouse, pen, or touch."></canvas>
+    <div class="dialog-actions">
+      <button id="draw-close" type="button" class="primary">Close preview</button>
+    </div>
+  </dialog>
 
   <dialog id="meeting-notes-dialog">
     <h3 id="meeting-notes-title">Meeting notes</h3>
@@ -208,6 +247,28 @@
     </form>
   </dialog>
 
+  <dialog id="region-dialog" aria-labelledby="region-title" aria-describedby="region-help">
+    <form method="dialog">
+      <h3 id="region-title">Choose a recording area</h3>
+      <p id="region-help" class="small muted">Drag over the preview, or set the edges in source pixels. Only the selected area is included in the video.</p>
+      <p id="region-status" class="small muted" role="status">Waiting for the shared picture…</p>
+      <div id="region-preview" hidden>
+        <video id="region-video" aria-label="Preview of the shared source" muted playsinline></video>
+        <div id="region-outline" aria-hidden="true" hidden></div>
+      </div>
+      <fieldset id="region-edges" class="grid" disabled aria-label="Recording area edges in source pixels">
+        <label for="region-left">Left <input type="number" id="region-left" min="0" step="1" required></label>
+        <label for="region-top">Top <input type="number" id="region-top" min="0" step="1" required></label>
+        <label for="region-right">Right <input type="number" id="region-right" min="0" step="1" required></label>
+        <label for="region-bottom">Bottom <input type="number" id="region-bottom" min="0" step="1" required></label>
+      </fieldset>
+      <div class="dialog-actions">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button id="region-confirm" value="record" class="primary" disabled>Record this area</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="trim-dialog">
     <form method="dialog" id="trim-form">
       <h3>Trim</h3>
@@ -226,6 +287,6 @@
   <div id="toast" class="toast" role="status" hidden></div>
   <footer class="foot muted small"><a href="/notetaker" class="muted">Open Reel Notetaker</a></footer>
   <script type="module" src="/reel/install.js?v=20261119-products1"></script>
-  <script type="module" src="/record.js?v=20261126-hls-publication"></script>
+  <script type="module" src="/record.js?v=20261126-language"></script>
 </body>
 </html>

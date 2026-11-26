@@ -42,10 +42,30 @@ export function desktopBrowserAppArguments(action, org) {
   return [`--app=${desktopProductURL(action, org)}`];
 }
 
+export function createCompanionStartup({ app, shell, windowsStore, executable, organizationKey }) {
+  // MSIX owns its startup task by app identity across upgrades. Its executable
+  // is in a versioned WindowsApps directory, so do not register it via Run.
+  if (windowsStore) return {
+    state: () => ({ mode: 'windows-settings' }),
+    openSettings: () => shell.openExternal('ms-settings:startupapps'),
+  };
+  if (!app.isPackaged) return null;
+  const options = { path: executable, args: [], name: `Reel Companion ${organizationKey}` };
+  const enabled = () => app.getLoginItemSettings({ path: options.path, args: options.args }).launchItems
+    .some(item => item.name === options.name && item.scope === 'user' && item.enabled);
+  return {
+    state: () => ({ mode: 'portable', enabled: enabled() }),
+    setEnabled(openAtLogin) {
+      app.setLoginItemSettings({ ...options, openAtLogin, enabled: openAtLogin });
+      if (enabled() !== openAtLogin) throw Error('Windows did not save the startup setting.');
+    },
+  };
+}
+
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,copyText,startup,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
@@ -66,7 +86,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     const phase = currentStatus ? status.phase : 'idle';
     const messageKey = currentStatus && status.reason === 'microphone_unavailable' ? status.reason : phase;
     const currentCalendar=calendarOwner===profile?.userID;
-    return {configured,profile,settings:structuredClone(settings()),calendars:structuredClone(currentCalendar?calendars:[]),
+    return {configured,profile,settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
       meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
         ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`)})) : [],
       status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},error};
@@ -159,6 +179,11 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     }
     else if (name==='openRecorder' || name==='openNotetaker') await openProduct(name);
     else if (name==='openRecordings') await openRecordings(requireOwner());
+    else if (name==='openStartupSettings' && startup?.openSettings) await startup.openSettings();
+    else if (name==='setCompanionStartup' && startup?.setEnabled) {
+      if (typeof payload?.enabled !== 'boolean') throw Error('Choose whether Reel should open when you sign in to Windows.');
+      startup.setEnabled(payload.enabled);
+    }
     else {
       if (!configured) throw Error('Automatic meetings are unavailable in this build.');
       if (name==='signIn' || name==='connectCalendar') {
@@ -235,6 +260,20 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(payload?.expectedOwnerUserID);
         if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');
         void processor?.process({ownerUserID:id,id:payload.id}).catch(()=>{});
+      } else if(name==='playRecording') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof openRecording !== 'function') throw Error('Recording is unavailable.');
+        const file=store.getRecordingPath({ownerUserID,id:payload.id});
+        requireOwner(ownerUserID);
+        if (!file) throw Error('Recording is unavailable.');
+        await openRecording(file);
+      } else if(name==='copyTranscript') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof copyText !== 'function') throw Error('Transcript is unavailable.');
+        const processing=store.getProcessing({ownerUserID,id:payload.id});
+        if (processing?.transcriptComplete !== true || !processing.text?.trim()) throw Error('Transcript is unavailable.');
+        requireOwner(ownerUserID);
+        copyText(processing.text);
       } else if(name==='shareRecording') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (typeof payload?.id !== 'string' || !shareMeeting) throw Error('Meeting sharing is unavailable.');

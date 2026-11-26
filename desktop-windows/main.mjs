@@ -12,7 +12,7 @@ import {createMeetingCoordinator} from './src/meeting-coordinator.mjs';
 import {createNativeBridge} from './src/native-bridge.mjs';
 import {createLocalRecordingStore} from './src/local-recordings.mjs';
 import {createWindowsRecorder} from './src/recorder.mjs';
-import {createDesktopService,desktopBrowserAppArguments,desktopLaunchAction,desktopProductURL} from './src/desktop-service.mjs';
+import {createCompanionStartup,createDesktopService,desktopBrowserAppArguments,desktopLaunchAction,desktopProductURL} from './src/desktop-service.mjs';
 import {createMeetingProcessor} from './src/meeting-processing.mjs';
 import {createMeetingShare} from './src/meeting-share.mjs';
 import {startAssetServer} from './src/asset-server.mjs';
@@ -166,6 +166,9 @@ async function run() {
   service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,discover:discoverGoogleMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
+    openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },
+    copyText:value=>clipboard.writeText(value),
+    startup:createCompanionStartup({app,shell,windowsStore:process.windowsStore,executable:process.execPath,organizationKey}),
     openRecordings:async owner=>{
       const directory=path.join(storageRoot,createHash('sha256').update(owner).digest('hex'));
       await mkdir(directory,{recursive:true});const error=await shell.openPath(directory);
@@ -175,6 +178,10 @@ async function run() {
     webPreferences:{preload:path.join(root,'preload.cjs'),sandbox:true,contextIsolation:true,nodeIntegration:false,
       partition:'reel-setup',backgroundThrottling:false}});
   const contents=window.webContents;
+  window.on('focus',()=>{
+    if(contents.getURL()!==origin+'/') return;
+    try { contents.send('reel-desktop:state',service.state()); } catch { /* explicit state requests report local errors */ }
+  });
   window.on('close',event=>{if(!quitting){event.preventDefault();app.quit();}});
   contents.session.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
   contents.session.setPermissionCheckHandler(()=>false);

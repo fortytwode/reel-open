@@ -23,6 +23,8 @@ Sign and timestamp the generated MSIX with your release signing service. Verify 
 
 Install through the architecture’s `.appinstaller` file to register the update feed. Subsequent releases keep its URL, package name and publisher and increase the three-part version. The default on-launch update check interval is 12 hours. The `Windows MSIX install and update` CI workflow exercises successive test versions using a temporary certificate confined to its disposable Windows runner.
 
+Reel Companion's startup task is off after installation. In Companion's Meeting setup, choose **Open Windows Startup Apps** and turn on **Reel Companion** to launch it the next time you sign in to Windows. Use the same Windows setting to turn it off. App Installer upgrades keep the startup task identity. In a portable build, use **Turn on start at sign-in** in Companion's Meeting setup. Turn it off before deleting or moving the extracted app folder.
+
 ## Portable test ZIP
 
 `build-portable.ps1` creates an **unsigned portable test ZIP**, using the existing
@@ -83,7 +85,8 @@ The ZIP contains `Reel.exe` and the Electron runtime, preserving upstream
 `desktop-windows/main.mjs`. Under `resources/app/`, an explicit allowlist copies
 only production desktop main/preload/modules/UI/capture assets, the compiled
 helper and generated public configuration. Shared `web/reel/` content is limited
-to `capture.js`, `core.js`, `audio.js`, `encoder-worker.js` and `fmp4.js`;
+to `capture.js`, `core.js`, `whisper-languages.js`, `audio.js`,
+`encoder-worker.js` and `fmp4.js`;
 `web/vendor/` includes only `mp4-muxer.mjs` and its license. These sibling paths
 match `src/asset-server.mjs`. Probe code, source tests, fixtures, account data,
 tokens and source-tree configuration files are excluded.

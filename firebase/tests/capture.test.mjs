@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CaptureSession } from "../../web/reel/capture.js";
+import { CaptureSession, pickDisplay } from "../../web/reel/capture.js";
 
 function session() {
   const errors = [];
@@ -112,4 +112,24 @@ test("a failed encoder stop still releases capture resources", async () => {
   capture.worker = { postMessage() { queueMicrotask(() => capture.onWorker({ type: "error", message: "encoder failed" })); } };
   await assert.rejects(capture.stop(), /encoder failed/);
   assert.equal(released, true);
+});
+
+test("area capture preserves the picker and requests the selected cursor behavior", async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const options = [];
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { mediaDevices: {
+    getDisplayMedia: async option => { options.push(option); return {}; },
+  }} });
+  try {
+    await pickDisplay({ mode: "area", fps: 30, audio: "micAndSystem", showCursor: false });
+    await pickDisplay({ mode: "screen", fps: 30, audio: "none" });
+    assert.equal(options[0].video.cursor, "never");
+    assert.equal(options[0].surfaceSwitching, "exclude");
+    assert.equal(options[0].systemAudio, "include");
+    assert.equal(options[1].video.cursor, "always");
+    assert.equal(options[1].surfaceSwitching, "include");
+  } finally {
+    if (original) Object.defineProperty(globalThis, "navigator", original);
+    else delete globalThis.navigator;
+  }
 });

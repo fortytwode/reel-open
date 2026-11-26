@@ -6,16 +6,19 @@
 // the next visit.
 import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261121-public-signup";
 import { organizationStorageKey, publicSignup } from "./organization.js?v=20261121-public-signup";
-import * as C from "./reel/core.js?v=20261126-meeting-transcript";
+import * as C from "./reel/core.js?v=20261126-language";
 import * as store from "./reel/store.js?v=20261126-hls-publication";
-import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261029-meetings3";
+import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261126-language";
+import { whisperLanguageOptions } from "./reel/whisper-languages.js?v=20261126-language";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { googleAccountLabel, googleSignInProvider, loadAuth, observeReelAccount, CLOUD_CONFIG, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261121-public-signup";
 import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-hls-publication";
-import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-video-drain";
+import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-drawing";
+import { chooseRecordingRegion } from "./reel/region-picker.js";
+import { createAnnotationPanel } from "./reel/annotation-panel.js?v=20261126-drawing";
 import { createPreview } from "./reel/preview.js?v=20261029-windows1";
-import { openBubble, pipSupported } from "./reel/pip.js";
+import { openBubble, pipSupported } from "./reel/pip.js?v=20261126-drawing";
 import { createCameraEffect, effectsSupported, preloadEffects } from "./reel/effects.js";
 
 const $ = (id) => document.getElementById(id);
@@ -66,6 +69,7 @@ function visibleToCurrentAccount(recording) {
   return C.canViewLocalRecording(recording, user?.uid, publicSignup);
 }
 function clearPublicAccountDetails() {
+  annotations.reset();
   $("list").replaceChildren();
   $("last").hidden = true;
   $("last-link").removeAttribute("href");
@@ -137,11 +141,18 @@ window.__reel = { library, publisher, store, C, processRecording, state: () => R
 // ---------------------------------------------------------------- recorder state (RecorderController)
 
 const R = { phase: "idle", session: null, recording: null, log: null, uploader: null, writes: Promise.resolve(),
-  bubble: null, camStream: null, camEffect: null, display: null, mic: null, unlock: null, stoppedAt: 0, liveUpload: false, cancelCountdown: false, countdownError: null };
+  bubble: null, camStream: null, camEffect: null, display: null, mic: null, region: null, unlock: null, stoppedAt: 0, liveUpload: false, cancelCountdown: false, countdownError: null,
+  drawingOpened: false, drawingBusy: false };
+const annotations = createAnnotationPanel($("draw-dialog"), (strokes) => R.session?.setAnnotations(strokes));
+function canDraw() {
+  return annotations.supported && !!R.display && visibleToCurrentAccount(R.recording) && !C.isMeeting(R.recording)
+    && (R.phase === "recording" || R.phase === "paused");
+}
 
 function setPhase(p) {
   if (p !== "idle") preview.stop();
   R.phase = p;
+  if (p !== "paused") annotations.close();
   const live = p === "countdown" || p === "recording" || p === "paused" || p === "finishing" || p === "preparing";
   $("setup").hidden = live; $("live").hidden = !live;
   $("live").classList.toggle("paused", p === "paused");
@@ -149,7 +160,8 @@ function setPhase(p) {
   $("pause").textContent = p === "paused" ? "Resume" : "Pause";
   for (const id of ["pause", "restart", "stop"]) $(id).disabled = !(p === "recording" || p === "paused");
   $("cancel").disabled = !(p === "recording" || p === "paused" || p === "countdown");
-  if (R.bubble) R.bubble.setState({ phase: p, elapsed: R.session ? R.session.elapsed : 0 });
+  $("draw").hidden = !canDraw();
+  if (R.bubble) R.bubble.setState({ phase: p, elapsed: R.session?.elapsed, canDraw: canDraw() });
 }
 
 function fmt(s) { return C.transcriptTimestamp(s); }
@@ -180,6 +192,7 @@ async function backgroundImage() {
 }
 
 function releaseDevices() {
+  R.region = null;
   if (R.camEffect) { R.camEffect.stop(); R.camEffect = null; }
   if (R.camStream) { R.camStream.getTracks().forEach((t) => t.stop()); R.camStream = null; }
   if (R.display) { R.display.getTracks().forEach((t) => t.stop()); R.display = null; }
@@ -189,6 +202,8 @@ function releaseDevices() {
 
 async function start({ reuse = false } = {}) {
   if (R.phase !== "idle") return;
+  if (!reuse) annotations.reset();
+  R.drawingOpened = R.drawingBusy = false;
   const meetingMode = isMeeting();
   const tabOnly = isTabCapture();
   let meetingDetails = null;
@@ -214,12 +229,14 @@ async function start({ reuse = false } = {}) {
   const prepareCameraAndBubble = async () => {
     camTrack = await cameraTrackFor(s);
     // PiP may need a fresh gesture once the browser's sharing picker closes.
-    if (!pipSupported() || s.mode === "camera" || (tabOnly && !navigator.userActivation?.isActive)) return;
+    const cropDisplay = s.mode === "area" && R.display?.getVideoTracks()[0]?.getSettings().displaySurface === "monitor";
+    if (!pipSupported() || s.mode === "camera" || cropDisplay || (tabOnly && !navigator.userActivation?.isActive)) return;
     try {
       R.bubble = await openBubble({
         stream: camTrack ? new MediaStream([camTrack]) : null, size: C.BUBBLE_DIAMETER[s.bubbleSize],
         handlers: {
           onPause: () => pauseResume(), onStop: (nav) => stop(nav), onCancel: () => cancel(),
+          onDraw: () => { window.focus(); void openDrawing(); },
           onKey: (e, nav) => onShortcut(e, nav), onClose: () => onBubbleClosed(),
         },
       });
@@ -227,10 +244,15 @@ async function start({ reuse = false } = {}) {
   };
   try {
     if (!reuse) {
-      if (!tabOnly) await prepareCameraAndBubble();
+      if (!tabOnly && s.mode !== "area") await prepareCameraAndBubble();
       if (s.mode !== "camera") {
         try { R.display = await pickDisplay(s, { tabOnly }); }
         catch (e) { return bail(e && e.name === "NotAllowedError" ? null : "Couldn't start screen capture: " + e.message); }
+      }
+      if (s.mode === "area") {
+        R.region = await chooseRecordingRegion($("region-dialog"), R.display.getVideoTracks()[0]);
+        if (!R.region) return bail();
+        await prepareCameraAndBubble();
       }
       if (tabOnly) {
         if (R.display?.getVideoTracks()[0]?.getSettings().displaySurface !== "browser") {
@@ -254,16 +276,18 @@ async function start({ reuse = false } = {}) {
   }
   if (s.mode === "camera" && !camTrack) return bail("No camera found.");
 
-  const surface = R.display ? R.display.getVideoTracks()[0].getSettings().displaySurface : null;
+  const screen = R.display?.getVideoTracks()[0];
+  if (s.mode === "area" && screen?.readyState !== "live") return bail("Sharing stopped before recording started.");
+  const surface = screen?.getSettings().displaySurface;
   // Whole-screen capture shows the bubble window itself; otherwise draw the camera into the video.
-  const composite = !!camTrack && (surface !== "monitor" || !R.bubble);
+  const composite = !!camTrack && (!!R.region || surface !== "monitor" || !R.bubble);
 
   const now = new Date();
   let r;
   try {
     const recordingNonce = C.newRecordingNonce();
     const shareID = captureOwnerUID ? await C.ownerShareID(captureOwnerUID, recordingNonce) : C.newShareID();
-    r = C.newRecording({ shareID, createdAt: now, mode: s.mode === "camera" ? "camera" : modeForSurface(surface),
+    r = C.newRecording({ shareID, createdAt: now, mode: s.mode === "camera" || R.region ? s.mode : modeForSurface(surface),
       upload: s.autoUpload && captureOwnerUID ? "pending" : "localOnly" });
     r.recordingNonce = recordingNonce;
     if (captureOwnerUID) r.recordingOwnerUID = captureOwnerUID;
@@ -289,7 +313,7 @@ async function start({ reuse = false } = {}) {
   }
 
   const sessionObj = new CaptureSession({
-    settings: s, display: R.display, camera: camTrack, mic: R.mic, composite,
+    settings: s, display: R.display, camera: camTrack, mic: R.mic, composite, region: R.region,
     events: {
       onInit: (bytes, codecs) => queueWrite(async () => {
         await store.putFile(r.id, C.File.initSegment, bytes);
@@ -310,10 +334,13 @@ async function start({ reuse = false } = {}) {
       }),
       onTick: (m) => {
         $("live-time").textContent = fmt(m.elapsed);
-        if (R.bubble) R.bubble.setState({ phase: R.phase, elapsed: m.elapsed });
+        if (R.bubble) R.bubble.setState({ phase: R.phase, elapsed: m.elapsed, canDraw: canDraw() });
         if (R.uploader) $("live-upload").textContent = `${R.uploader.progress.uploaded.length}/${m.segments} parts uploaded`;
       },
-      onSourceEnded: () => { if (R.phase === "recording" || R.phase === "paused") stop(); },
+      onSourceEnded: () => {
+        if (R.phase === "countdown") { R.cancelCountdown = true; R.countdownError = "Sharing stopped before recording started."; }
+        if (R.phase === "recording" || R.phase === "paused") stop();
+      },
       onError: (e) => {
         if (R.phase === "countdown") { R.cancelCountdown = true; R.countdownError = e.message; return; }
         toast("Recording stopped: " + e.message, true); stop();
@@ -344,24 +371,65 @@ async function start({ reuse = false } = {}) {
   cur.width = sessionObj.size.width; cur.height = sessionObj.size.height; cur.captureState = "recording";
   if (!sessionObj.info.audio) cur.transcriptStatus = "none";
   await library.update(cur);
+  if (R.region && screen.readyState !== "live") {
+    R.cancelCountdown = true; R.countdownError = "Sharing stopped before recording started.";
+  }
   if (R.cancelCountdown) {
     await sessionObj.cancel();
     await discard(r);
     R.session = null;
     return bail(R.countdownError ? "Couldn't start recording: " + R.countdownError : null);
   }
+  if (annotations.strokes.length) sessionObj.setAnnotations(annotations.strokes);
   sessionObj.begin();
   setPhase("recording");
+  if (!meetingMode && screen && s.showCursor === false && screen.getSettings().cursor !== "never") {
+    toast("This browser could not confirm that the pointer was hidden for the selected source.");
+  }
   $("live-hint").textContent = R.bubble ? "Use the floating bubble to pause or stop while you work in other apps." : "";
   console.info("Recording started", sessionObj.info, `${cur.width}x${cur.height}`, "live", R.liveUpload);
 }
 
 function queueWrite(fn) { R.writes = R.writes.then(fn).catch((e) => console.error("Saving segment failed", e)); return R.writes; }
 
-function pauseResume() {
+async function openDrawing() {
+  if (!canDraw() || R.drawingBusy || annotations.isOpen) return;
+  const capture = R.session, generation = authGeneration;
+  const track = R.display.getVideoTracks()[0];
+  if (track?.readyState !== "live") return;
+  R.drawingBusy = true;
+  if (R.phase === "recording") { capture.pause(); setPhase("paused"); }
+  const isCurrent = () => R.session === capture && R.phase === "paused" && authGeneration === generation;
+  try {
+    const deadline = performance.now() + 2000;
+    while (isCurrent() && !capture.pauseConfirmed && performance.now() < deadline) await sleep(25);
+    if (!isCurrent()) return;
+    if (!capture.pauseConfirmed) throw new Error("Pause not confirmed");
+    const opened = await annotations.open(track, R.region, capture.size, () => isCurrent() && capture.pauseConfirmed);
+    if (opened && R.session === capture) R.drawingOpened = true;
+  } catch {
+    if (isCurrent()) toast("Couldn't open the drawing preview. Recording is paused. Select Resume to continue.", true);
+  } finally {
+    if (R.session === capture) R.drawingBusy = false;
+  }
+}
+
+async function pauseResume() {
   if (!R.session) return;
   if (R.phase === "recording") { R.session.pause(); setPhase("paused"); }
-  else if (R.phase === "paused") { R.session.resume(); setPhase("recording"); }
+  else if (R.phase === "paused" && !R.drawingBusy && !annotations.isOpen) {
+    const capture = R.session, afterDrawing = R.drawingOpened;
+    // Give Chromium time to remove the dialog from the shared surface, then drop the last captured frame.
+    if (afterDrawing) {
+      R.drawingBusy = true;
+      await sleep(150);
+      if (R.session !== capture || R.phase !== "paused") return;
+      R.drawingBusy = false;
+    }
+    R.drawingOpened = false;
+    capture.resume({ dropScreenFrame: afterDrawing });
+    setPhase("recording");
+  }
 }
 
 function onBubbleClosed() {
@@ -456,6 +524,32 @@ function onShortcut(e, nav) {
 }
 document.addEventListener("keydown", (e) => onShortcut(e));
 
+// The browser extension can operate an existing capture. Pressing Start still
+// supplies the browser's own user activation for choosing what to share.
+document.addEventListener("reel-recorder-shortcut", (event) => {
+  if (event.detail === "active") {
+    if (R.phase !== "idle") event.preventDefault();
+    return;
+  }
+  const field = document.activeElement;
+  if (document.hasFocus() && (field?.matches("input, textarea, select") || field?.isContentEditable)) return;
+  const capturing = R.phase === "recording" || R.phase === "paused";
+  switch (event.detail) {
+    case "open":
+      if (R.phase === "idle") $("start").focus();
+      break;
+    case "pause":
+      if (capturing) pauseResume();
+      break;
+    case "stop":
+      if (capturing) void stop();
+      break;
+    case "cancel":
+      if (capturing || R.phase === "countdown") void cancel();
+      break;
+  }
+});
+
 // ---------------------------------------------------------------- setup form
 
 async function fillDevices() {
@@ -484,9 +578,13 @@ function bindSettings() {
   }
   $("fps").value = String(settings.fps);
   $("fps").addEventListener("change", () => { settings.fps = parseInt($("fps").value, 10); saveSettings(); });
-  $("countdown").value = String([0, 3, 5].includes(settings.countdownSeconds) ? settings.countdownSeconds : 3);
+  $("countdown").value = String([0, 1, 3, 5].includes(settings.countdownSeconds) ? settings.countdownSeconds : 3);
   $("countdown").addEventListener("change", () => { settings.countdownSeconds = parseInt($("countdown").value, 10); saveSettings(); });
-  const checks = { "camera-on": "cameraEnabled", "auto-upload": "autoUpload", "copy-on-stop": "copyLinkOnStop", "upload-mp4": "uploadMP4" };
+  const language = $("transcription-language");
+  language.replaceChildren(...whisperLanguageOptions().map(({ code, label }) => new Option(label, code)));
+  language.value = settings.transcriptionLanguage;
+  language.addEventListener("change", () => { settings.transcriptionLanguage = language.value; saveSettings(); });
+  const checks = { "camera-on": "cameraEnabled", "auto-upload": "autoUpload", "copy-on-stop": "copyLinkOnStop", "upload-mp4": "uploadMP4", "show-cursor": "showCursor" };
   for (const [id, key] of Object.entries(checks)) {
     $(id).checked = settings[key];
     $(id).addEventListener("change", () => { settings[key] = $(id).checked; saveSettings(); refreshForm(); });
@@ -502,6 +600,7 @@ function bindSettings() {
   });
   $("start").addEventListener("click", () => start());
   $("pause").addEventListener("click", () => pauseResume());
+  $("draw").addEventListener("click", () => openDrawing());
   $("stop").addEventListener("click", () => stop());
   $("cancel").addEventListener("click", () => cancel());
   $("restart").addEventListener("click", () => restart());
@@ -759,7 +858,7 @@ function processRecording(recording, { resumeNotes = false } = {}) {
           if (notesRecordingID === id) $("meeting-notes-status").textContent = transcriptionProgress.get(id);
           renderList();
         } })
-        : await transcribeMeeting(blob, { onProgress: (p) => {
+        : await transcribeMeeting(blob, { language: settings.transcriptionLanguage, onProgress: (p) => {
         transcriptionProgress.set(id, p.message || "Transcribing locally…");
         if (notesRecordingID === id) $("meeting-notes-status").textContent = transcriptionProgress.get(id);
         renderList();

@@ -42,6 +42,16 @@ dialog h3 { margin: 0 0 4px; }
 dialog form > label { margin-top: 10px; }
 dialog label.inline { flex-direction: row; align-items: center; gap: 6px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+#region-dialog { width: min(680px, 92vw); }
+#region-preview { position: relative; width: min(100%, calc(var(--region-aspect, 1) * 42vh)); aspect-ratio: var(--region-aspect, 1); margin: 10px auto; background: #000; cursor: crosshair; overflow: hidden; touch-action: none; }
+#region-video { display: block; width: 100%; height: 100%; pointer-events: none; }
+#region-outline { position: absolute; border: 2px solid #fff; box-shadow: 0 0 0 9999px #0007, inset 0 0 0 1px #000; pointer-events: none; }
+#region-edges { grid-template-columns: repeat(4, minmax(0, 1fr)); border: 0; padding: 0; margin: 12px 0 0; }
+#draw-dialog { box-sizing: border-box; width: min(760px, 94vw); max-height: 92vh; }
+.draw-status { background: #fff5db; color: #593b07; border-radius: 8px; padding: 8px 12px; font-size: 14px; }
+.draw-tools { display: flex; align-items: end; flex-wrap: wrap; gap: 8px; }
+#draw-preview { display: block; width: min(100%, calc(var(--draw-aspect, 1) * 53vh)); aspect-ratio: var(--draw-aspect, 1); margin: 12px auto 0; border-radius: 8px; background: #000; cursor: crosshair; touch-action: none; }
+@media (max-width: 480px) { #region-edges { grid-template-columns: 1fr 1fr; } }
 #trim-video { width: 100%; max-height: 280px; background: #000; border-radius: 8px; margin: 8px 0; }
 .trim-row { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 8px; align-items: end; }
 

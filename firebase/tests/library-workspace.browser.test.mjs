@@ -99,6 +99,9 @@ test('Mission Control calendar stays in the workspace and clears on sign out', a
     await page.locator('#meeting-calendar-panel').waitFor({state:'hidden'});
     assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
     assert.equal(await page.locator('#view-title').textContent(), 'Meetings');
+    const macHistory = page.getByRole('link', {name:'Open local meeting history on Mac'});
+    assert.equal(await macHistory.getAttribute('href'), 'reel://home');
+    assert.equal(await page.locator('#windows-local-history').isHidden(), true);
     await page.locator('#nav-calendar').click();
     await page.locator('#meeting-calendar-panel .mc-card').waitFor();
     const sync = page.locator('[data-action="sync"]');
@@ -106,11 +109,31 @@ test('Mission Control calendar stays in the workspace and clears on sign out', a
     await sync.click();
     await page.waitForTimeout(100);
     assert.equal(syncRequests, 1);
-    assert.equal(await page.locator('[data-extension-note] a').getAttribute('href'), 'https://example.test/downloads/reel-meeting-prompt-0.1.1.zip');
+    assert.equal(await page.locator('[data-extension-note] a').getAttribute('href'), 'https://example.test/downloads/reel-meeting-prompt-0.1.2.zip');
     await page.locator('#sign-out').click();
     assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
     assert.match(await page.locator('#status').textContent(), /Sign in/);
     await page.addInitScript(() => Object.defineProperty(navigator, 'platform', {value:'Win32'}));
+    await page.route('https://meetings.example.test/meetings', route => route.fulfill({json:{meetings:[
+      {id:'mac-only-clip',title:'Mac recording fixture',started_at:'2026-11-26T09:00:00Z',recording_source:'mac'},
+      {id:'browser-only-clip',title:'Browser recording fixture',started_at:'2026-11-26T08:00:00Z',recording_source:'browser'},
+    ]}}));
+    await page.goto('about:blank');
+    await page.goto(`${hosted}/reel/notetaker#meetings`);
+    await page.locator('#windows-local-history').waitFor();
+    assert.match(await page.locator('#windows-local-history').textContent(), /open Reel Companion from Start.*Latest recordings/);
+    assert.equal(await macHistory.count(), 0);
+    assert.equal(await page.locator('#record-meeting').isVisible(), true);
+    const macRecording = page.locator('.nt-past').filter({hasText:'Mac recording fixture'});
+    await macRecording.waitFor();
+    assert.equal(await macRecording.getAttribute('href'), null);
+    assert.match(await macRecording.textContent(), /Open Reel Notetaker on that Mac/);
+    const browserRecording = page.getByRole('link').filter({hasText:'Browser recording fixture'});
+    assert.equal(await browserRecording.getAttribute('href'), 'https://example.test/record#local-recordings');
+    await page.locator('#nav-calendar').click();
+    const joiningHelp = page.locator('[data-capabilities]').getByText(/open Reel Companion from Start/);
+    await joiningHelp.waitFor();
+    assert.match(await joiningHelp.textContent(), /connect Google Calendar and turn on automatic joining/);
     await page.goto(`http://127.0.0.1:${server.address().port}/notetaker#meeting-request=${encodeURIComponent(JSON.stringify({url:'https://meet.google.com/abc-defg-hij'}))}`);
     const manual = page.locator('[data-browser] a').filter({hasText:'Capture manually'});
     await manual.waitFor({state:'attached'});

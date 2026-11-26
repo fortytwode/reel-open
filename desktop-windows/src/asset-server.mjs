@@ -7,7 +7,7 @@ const files=new Map([
   ['/setup.mjs',new URL('../ui/setup.mjs',import.meta.url)],
   ['/capture/',new URL('../capture/index.html',import.meta.url)],
   ['/capture/renderer.mjs',new URL('../capture/renderer.mjs',import.meta.url)],
-  ...['capture.js','core.js','audio.js','encoder-worker.js','fmp4.js'].map(name=>
+  ...['capture.js','core.js','whisper-languages.js','audio.js','encoder-worker.js','fmp4.js'].map(name=>
     [`/web/reel/${name}`,new URL(`../../web/reel/${name}`,import.meta.url)]),
   ['/web/vendor/mp4-muxer.mjs',new URL('../../web/vendor/mp4-muxer.mjs',import.meta.url)]
 ]);

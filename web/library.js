@@ -1,5 +1,5 @@
 import * as firebase from "./reel/firebase.js?v=20261121-public-signup";
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261125-complete1";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261126-local-history";
 import * as org from "./organization.js?v=20261121-public-signup";
 import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261105-parity2";
 
@@ -20,6 +20,12 @@ const observeReelAccount = firebase.observeReelAccount ?? ((am, auth, receive) =
   receive(candidate?.emailVerified && firebase.isOrganizationEmail(candidate.email) ? candidate : null, candidate)));
 
 const el = (id) => document.getElementById(id);
+const platform = navigator.platform || "";
+const isMac = /^(Mac|Darwin)/i.test(platform);
+const isWindows = /^Win/i.test(platform);
+for (const link of document.querySelectorAll("[data-mac-app]")) link.hidden = !isMac;
+const windowsHistory = el("windows-local-history");
+if (windowsHistory) windowsHistory.hidden = !isWindows;
 const status = el("status");
 let auth, am, fs, db, currentUser, entries = [], meetings = [], meetingShareIDs = new Set(), recent = [], loading = true, meetingLoading = false, loadError = "", meetingError = "", loadNumber = 0, meetingLoadNumber = 0, stopListening = () => {};
 let preferences = new Map(), folders = [], organizationReady = false, organizationError = "", organizationMessage = "", creatingFolder = false, accountNumber = 0;
@@ -601,19 +607,26 @@ function renderMeetings() {
     const started = new Date(m.started_at);
     const label = Number.isNaN(started.getTime()) ? "Earlier" : dayLabel(started);
     if (label !== pastDay) { pastDay = label; past.append(node("h3", "nt-day", label)); }
-    const row = node("a", "nt-row nt-past");
-    row.href = m.participantNote ? libraryURL(`meetings/${m.id}`) : m.recording_source === "mac" ? "reel-notetaker://home" : organization.webBase + "/record?mode=meeting";
+    const fromMac = m.recording_source === "mac", fromBrowser = m.recording_source === "browser";
+    const href = m.participantNote ? libraryURL(`meetings/${m.id}`)
+      : fromMac && isMac ? "reel-notetaker://home"
+      : fromBrowser ? organization.webBase + "/record#local-recordings" : null;
+    const row = node(href ? "a" : "div", "nt-row nt-past");
+    if (href) row.href = href;
     row.append(node("span", "nt-time", Number.isNaN(started.getTime()) ? "" : timeOf(started)));
     const main = node("span", "nt-main"); main.append(node("strong", "", m.title));
     const hit = term && transcriptHits.get(m.id);
-    const preview = hit ? `Transcript: ${hit}` : m.participantNote ? summaryPreview(m.summary) : "Recorded on this Mac. Open Reel Notetaker to read it.";
+    const localPreview = fromMac ? "Recorded on a Mac. Open Reel Notetaker on that Mac to view it."
+      : fromBrowser ? "Open the Recorder in the browser that captured this meeting."
+      : "Open Reel on the device that captured this meeting.";
+    const preview = hit ? `Transcript: ${hit}` : m.participantNote ? summaryPreview(m.summary) : localPreview;
     if (preview) main.append(node("span", "nt-preview", preview));
     const ready = m.participantNote && String(m.summary || "").trim();
     if (m.participantNote && !ready) main.append(node("span", "nt-preview", "No summary yet"));
     if (m.shared_with_me) main.querySelector("strong").append(node("span", "nt-soon nt-maybe", "Shared with you"));
     if (m.tasks_done) main.querySelector("strong").append(node("span", "nt-soon nt-done", `${m.tasks_done} done`));
     row.append(main, peopleChips(m.attendees), node("span", "nt-length", lengthLabel(m.duration_seconds)));
-    if (!ready) row.append(node("span", "nt-chip nt-chip-off", m.participantNote ? "No notes" : "On this Mac"));
+    if (!ready) row.append(node("span", "nt-chip nt-chip-off", m.participantNote ? "No notes" : fromMac ? "On a Mac" : fromBrowser ? "In browser" : "Saved locally"));
     past.append(row);
   }
   if (!filtered.length && !busy) past.append(node("p", "nt-empty", term || pastPerson || pastRange !== "any" ? "No meetings match. Try a different search or filter." : "No meeting notes yet. Notes appear here after Reel Notetaker records a call you were invited to."));

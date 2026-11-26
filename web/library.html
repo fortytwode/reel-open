@@ -12,7 +12,7 @@
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js" crossorigin>
   <link rel="stylesheet" href="./library.css?v=20261125-polish3">
   <link rel="stylesheet" href="./meeting-calendar.css?v=20261125-complete1">
-  <script type="module" src="./library.js?v=20261125-polish1"></script>
+  <script type="module" src="./library.js?v=20261126-local-history"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -43,8 +43,12 @@
       <section class="page-content">
         <div class="heading-row">
           <div class="heading"><div class="breadcrumb">Library <span aria-hidden="true">/</span></div><h1 id="view-title">Screen recordings</h1><p id="view-description" hidden>Videos opened from this library on this browser.</p><p id="meeting-description" hidden>Read notes from meetings you were invited to. The original video stays on the recording device unless explicitly shared.</p></div>
-          <div id="meeting-actions" hidden><a class="button secondary" href="reel://home">Open local meeting history on Mac</a> <a id="record-meeting" class="button" href="/record?mode=meeting" data-recorder="?mode=meeting">Record a meeting</a></div>
-          <details class="record-options"><summary class="new-video">New video <span aria-hidden="true">⌄</span></summary><div class="record-menu"><a href="/record" data-recorder="">Record in browser <span aria-hidden="true">↗</span></a><a href="/record?mode=meeting" data-recorder="?mode=meeting">Record a meeting <span aria-hidden="true">↗</span></a><a href="reel://record">Record on Mac <span aria-hidden="true">↗</span></a></div></details>
+          <div id="meeting-actions" hidden>
+            <a class="button secondary" href="reel://home" data-mac-app hidden>Open local meeting history on Mac</a>
+            <a id="record-meeting" class="button" href="/record?mode=meeting" data-recorder="?mode=meeting">Record a meeting</a>
+            <p class="footnote" id="windows-local-history" hidden>For meetings saved by the Windows app, open Reel Companion from Start and look under Latest recordings. You can record a meeting in this browser without Companion.</p>
+          </div>
+          <details class="record-options"><summary class="new-video">New video <span aria-hidden="true">⌄</span></summary><div class="record-menu"><a href="/record" data-recorder="">Record in browser <span aria-hidden="true">↗</span></a><a href="/record?mode=meeting" data-recorder="?mode=meeting">Record a meeting <span aria-hidden="true">↗</span></a><a href="reel://record" data-mac-app hidden>Record on Mac <span aria-hidden="true">↗</span></a></div></details>
         </div>
         <div class="toolbar">
           <div class="tabs"><a id="video-tab" class="tab active" href="/library#library" data-library="#library">Screen recordings</a></div>
@@ -63,7 +67,7 @@
           <div class="skeleton-card"><div class="skeleton-thumb"></div><div class="skeleton-copy"><span></span><span></span><span></span></div></div>
         </div>
         <div id="recordings" class="recordings" aria-label="Videos"></div>
-        <p id="library-footnote" class="footnote">Find recordings saved on this device in <a id="local-browser-recordings" href="/record#local-recordings" data-recorder="#local-recordings">the browser recorder</a> or <a id="local-mac-recordings" href="reel://local-library">Reel for Mac</a>. Uploaded recordings appear in your private online library. Share links let others watch subject to your password and expiry settings.</p>
+        <p id="library-footnote" class="footnote">Find recordings saved on this device in <a id="local-browser-recordings" href="/record#local-recordings" data-recorder="#local-recordings">the browser recorder</a><span data-mac-app hidden> or <a id="local-mac-recordings" href="reel://local-library">Reel for Mac</a></span>. Uploaded recordings appear in your private online library. Share links let others watch subject to your password and expiry settings.</p>
       </section>
     </main>
   </div>
