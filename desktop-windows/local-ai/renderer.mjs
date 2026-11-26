@@ -11,5 +11,11 @@ api.onTask(task=>{
   if(task?.type==='cancel'){if(active?.requestID===task.requestID){active=null;worker.terminate();newWorker();status.textContent='Transcription cancelled.';progress.hidden=true;}return;}
   if(!task||task.type!=='transcribe'||typeof task.requestID!=='string'||active)return;
   active={requestID:task.requestID};status.textContent='Loading the local Whisper model…';progress.hidden=false;progress.value=0;
-  worker.postMessage({type:'transcribe',requestID:task.requestID,pcm:task.samples,sampleRate:16000,language:task.language},[task.samples]);
+  try{
+    if(!(task.samples instanceof Float32Array)||!(task.samples.buffer instanceof ArrayBuffer))throw Error('Invalid audio samples.');
+    worker.postMessage({type:'transcribe',requestID:task.requestID,pcm:task.samples,sampleRate:16000,language:task.language},[task.samples.buffer]);
+  }catch{
+    active=null;status.textContent='Local transcription could not start. Retry the saved recording.';progress.hidden=true;
+    api.complete({requestID:task.requestID,ok:false,error:status.textContent});
+  }
 });
