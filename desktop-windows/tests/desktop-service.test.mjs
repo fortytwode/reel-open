@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createDesktopService } from '../src/desktop-service.mjs';
+import { createDesktopService, desktopBrowserAppArguments, desktopLaunchAction, desktopProductURL } from '../src/desktop-service.mjs';
 import { createMeetingCoordinator } from '../src/meeting-coordinator.mjs';
 
 const org = {meetingServiceURL:'https://meetings.northwind.example', viewerBase:'https://library.northwind.example', viewerPath:'reel', notesBaseURL:'https://library.northwind.example/reel', webBase:'https://record.northwind.example'};
@@ -8,6 +8,21 @@ const initial = ownerUserID => ({ ownerUserID, autoJoin: false, participantConse
   systemAudioConsent: false, selection: { useAll: true, ids: [] } });
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('MSIX product launch arguments select the configured Recorder and Notetaker routes', () => {
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder']), 'openRecorder');
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-notetaker']), 'openNotetaker');
+  assert.equal(desktopLaunchAction(['Reel.exe']), null);
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder', '--open-notetaker']), null);
+  assert.equal(desktopLaunchAction(['Reel.exe', '--open-recorder', '--open-recorder']), 'openRecorder');
+  assert.equal(desktopProductURL('openRecorder', org), 'https://record.northwind.example/record');
+  assert.equal(desktopProductURL('openNotetaker', org), 'https://record.northwind.example/notetaker');
+  assert.deepEqual(desktopBrowserAppArguments('openRecorder', org), ['--app=https://record.northwind.example/record']);
+  assert.deepEqual(desktopBrowserAppArguments('openNotetaker', org), ['--app=https://record.northwind.example/notetaker']);
+  assert.throws(() => desktopProductURL('openLibrary', org), /Unknown Reel product launch/);
+  assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
+});
+
 function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;

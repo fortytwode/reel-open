@@ -1,4 +1,5 @@
 import {app,BrowserWindow,clipboard,desktopCapturer,dialog,ipcMain,Menu,safeStorage,shell} from 'electron';
+import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {existsSync,mkdirSync,readFileSync} from 'node:fs';
 import {mkdir} from 'node:fs/promises';
@@ -11,7 +12,7 @@ import {createMeetingCoordinator} from './src/meeting-coordinator.mjs';
 import {createNativeBridge} from './src/native-bridge.mjs';
 import {createLocalRecordingStore} from './src/local-recordings.mjs';
 import {createWindowsRecorder} from './src/recorder.mjs';
-import {createDesktopService} from './src/desktop-service.mjs';
+import {createDesktopService,desktopBrowserAppArguments,desktopLaunchAction,desktopProductURL} from './src/desktop-service.mjs';
 import {createMeetingProcessor} from './src/meeting-processing.mjs';
 import {createMeetingShare} from './src/meeting-share.mjs';
 import {startAssetServer} from './src/asset-server.mjs';
@@ -34,7 +35,11 @@ app.setPath('sessionData',stateRoot);
 app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
 if(!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on('second-instance',()=>{window?.show();window?.focus();});
+  app.on('second-instance',(_event,commandLine)=>{
+    const action=desktopLaunchAction(commandLine);
+    if(action) { void openProductEntry(action); return; }
+    window?.show();window?.focus();
+  });
   app.on('activate',()=>window?.show());
   app.on('window-all-closed',()=>app.quit());
   app.on('before-quit',event=>{
@@ -55,9 +60,71 @@ else {
     })();
   });
   // Top-level await app.whenReady() deadlocks Electron's ESM startup on the tested Windows runtime.
-  app.whenReady().then(run).catch(async()=>{
+  app.whenReady().then(async()=>{
+    const action=desktopLaunchAction(process.argv);
+    if(action && await openProductEntry(action)) { app.quit(); return; }
+    await run();
+  }).catch(async()=>{
     await dialog.showMessageBox({type:'error',title:'Reel could not start',message:'Reel could not load its local desktop components. Reopen Reel or use the browser recorder.'});
     quitting=true;app.quit();
+  });
+}
+async function openProductEntry(action) {
+  const product=action==='openRecorder'?'Recorder':'Notetaker';
+  try {
+    const url=desktopProductURL(action,org);
+    for(const executable of installedBrowsers()) {
+      try {
+        await launchBrowserApp(executable,desktopBrowserAppArguments(action,org));
+        return true;
+      } catch { /* Try another verified Edge or Chrome install. */ }
+    }
+    await shell.openExternal(url);
+    await showLaunchMessage({type:'info',title:`Opened Reel ${product} in your browser`,
+      message:`Edge or Chrome was not found in its standard install location. The default browser opened instead; install Edge or Chrome to open Reel ${product} in its own app window.`});
+    return true;
+  } catch(cause) {
+    const options={type:'error',title:`Could not open Reel ${product}`,
+      message:cause?.message || `Reel ${product} could not open. Check its organization URL and your browser installation.`};
+    await showLaunchMessage(options);
+    return false;
+  }
+}
+async function showLaunchMessage(options) {
+  if(window && !window.isDestroyed()) {
+    await dialog.showMessageBox(window,options);
+    window.show();
+  } else await dialog.showMessageBox(options);
+}
+function installedBrowsers() {
+  const programFiles=process.env.ProgramFiles || 'C:\\Program Files';
+  const programFilesX86=process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const local=process.env.LOCALAPPDATA || '';
+  const candidates=[
+    [path.join(programFilesX86,'Microsoft','Edge','Application','msedge.exe'),programFilesX86],
+    [path.join(programFiles,'Microsoft','Edge','Application','msedge.exe'),programFiles],
+    [local && path.join(local,'Microsoft','Edge','Application','msedge.exe'),local],
+    [path.join(programFilesX86,'Google','Chrome','Application','chrome.exe'),programFilesX86],
+    [path.join(programFiles,'Google','Chrome','Application','chrome.exe'),programFiles],
+    [local && path.join(local,'Google','Chrome','Application','chrome.exe'),local],
+  ];
+  const found=[];
+  for(const [executable,rootPath] of candidates) {
+    if(!executable || !rootPath) continue;
+    try {
+      const resolved=path.resolve(executable).toLowerCase();
+      const root=path.resolve(rootPath).toLowerCase()+path.sep;
+      if(resolved.startsWith(root) && existsSync(executable)
+        && !found.includes(executable)) found.push(executable);
+    } catch { /* Ignore missing or non-file browser candidates. */ }
+  }
+  return found;
+}
+function launchBrowserApp(executable,args) {
+  return new Promise((resolve,reject)=>{
+    const child=spawn(executable,args,{detached:true,stdio:'ignore',windowsHide:false});
+    child.once('error',reject);
+    child.once('spawn',()=>{child.unref();resolve();});
   });
 }
 async function run() {

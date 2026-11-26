@@ -17,6 +17,30 @@ const messages = {
 const keys = ['ownerUserID','expectedOwnerUserID','autoJoin','participantConsent','systemAudioConsent','selection'];
 const selectionKey = value => JSON.stringify({useAll:value.useAll,ids:[...new Set(value.ids)].sort()});
 
+export function desktopLaunchAction(args = []) {
+  let action = null;
+  for (const arg of args) {
+    const next = arg === '--open-recorder' ? 'openRecorder'
+      : arg === '--open-notetaker' ? 'openNotetaker' : null;
+    if (!next) continue;
+    if (action && action !== next) return null;
+    action = next;
+  }
+  return action;
+}
+
+export function desktopProductURL(action, org) {
+  const path = action === 'openRecorder' ? '/record'
+    : action === 'openNotetaker' ? '/notetaker' : null;
+  if (!path) throw Error('Unknown Reel product launch.');
+  if (!org?.webBase) throw Error('The organization has not configured its web URLs.');
+  return org.webBase + path;
+}
+
+export function desktopBrowserAppArguments(action, org) {
+  return [`--app=${desktopProductURL(action, org)}`];
+}
+
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
@@ -119,12 +143,11 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   }
   async function action(name,payload) {
     if (closed || closing) throw Error('Reel is shutting down.');
-    if (name==='openLibrary' || name==='openRecorder' || name==='openNotetaker') {
+    if (name==='openLibrary') {
       if (!org) throw Error('The organization has not configured its web URLs.');
-      const destinations = { openLibrary: org.notesBaseURL, openRecorder: org.webBase + '/record',
-        openNotetaker: org.webBase + '/notetaker' };
-      await openExternal(destinations[name]);
+      await openExternal(org.notesBaseURL);
     }
+    else if (name==='openRecorder' || name==='openNotetaker') await openExternal(desktopProductURL(name, org));
     else if (name==='openRecordings') await openRecordings(requireOwner());
     else {
       if (!configured) throw Error('Automatic meetings are unavailable in this build.');
