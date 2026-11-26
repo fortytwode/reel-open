@@ -116,7 +116,7 @@ test('a saved meeting is shared only when its explicit button is selected', asyn
   const snapshot={configured:true,profile:{userID:'owner-a',email:'a@example.com',calendarConnected:true},
     settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},
     meetings:[],status:{phase:'idle'},recordings:[{id:'meeting-id',title:'Weekly meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9,
-      processing:{phase:'completed'},shareStatus:null}]};
+      processing:{phase:'completed',transcriptReady:true},shareStatus:null}]};
   const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
   const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
     addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
@@ -125,10 +125,15 @@ test('a saved meeting is shared only when its explicit button is selected', asyn
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(calls.length,0,'rendering a saved meeting must not start an upload');
   const button=getElement('recordingsList').children[0].children[0].children.find(child=>child.dataset.action==='shareRecording');
+  const transcriptButton=getElement('recordingsList').children[0].children[0].children.find(child=>child.dataset.includeTranscript==='true');
+  assert.equal(transcriptButton.textContent,'Share video and transcript');
   assert.ok(button); assert.equal(button.textContent,'Share recording');
   onClick({target:{closest:selector=>selector==='[data-action]'?button:null}});
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a'}]]);
+  onClick({target:{closest:selector=>selector==='[data-action]'?transcriptButton:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))),['shareRecording',{id:'meeting-id',expectedOwnerUserID:'owner-a',includeTranscript:true}]);
 });
 
 test('a persisted uploading share is retryable after app restart', async () => {

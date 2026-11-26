@@ -19,9 +19,11 @@ async function fixture(t, { ensureRoom = async () => {}, uploadLarge = async () 
   const store = {
     getShareRecord: ({ownerUserID,id}) => ownerUserID === 'owner-a' && id === 'a'.repeat(32)
       ? { id, title:'Weekly meeting', createdAt:'2026-11-06T12:00:00.000Z', durationSeconds:9, width:640, height:360, path:file, meeting:true, share:share && structuredClone(share) } : null,
+    getProcessing: () => ({ transcriptComplete:true, language:'en', engine:'test', text:'Ready to share',
+      segments:[{start:0,end:3,text:'Ready to share',privateField:'private'}], attendees:['private@example.com'] }),
     async bindShare(value) {
       calls.push(['bind', value]);
-      if (!share) share = { ownerUserID:value.ownerUserID, recordingNonce:value.recordingNonce, shareID:value.shareID, upload:'pending' };
+      if (!share) share = { ownerUserID:value.ownerUserID, recordingNonce:value.recordingNonce, shareID:value.shareID, includeTranscript:value.includeTranscript, upload:'pending' };
       return structuredClone(share);
     },
     async saveShareState(value) { statuses.push(value.upload); share.upload = structuredClone(value.upload); },
@@ -51,6 +53,8 @@ test('explicit share binds to the current owner, uploads playable MP4 metadata a
   assert.equal(metadata[1], room[1]); assert.equal(metadata[2], 'meta.json');
   const remote = JSON.parse(metadata[3]);
   assert.equal(remote.status, 'ready'); assert.deepEqual(remote.playback,{hls:false,mp4:true});
+  assert.equal(remote.transcriptStatus,'none');
+  assert.deepEqual(f.calls.filter(c=>c[0]==='meta').map(c=>c[2]),['meta.json']);
   assert.equal(remote.width,640); assert.equal(remote.height,360); assert.equal(remote.ownerName,'Meeting Owner');
   assert.equal(f.calls.at(-1)[0], 'library');
   assert.equal(share.url, `https://record.example/v/${room[1]}`); assert.deepEqual(f.copies,[share.url]);
@@ -92,4 +96,20 @@ test('same recording requests share one in-flight publication', async t => {
   const a=f.shareAPI.share({ownerUserID:'owner-a',id:'a'.repeat(32)}), b=f.shareAPI.share({ownerUserID:'owner-a',id:'a'.repeat(32)});
   await entered.promise; gate.resolve();
   assert.strictEqual(await a,await b); assert.equal(f.calls.filter(call=>call[0]==='video').length,1);
+});
+
+test('transcript choice persists across retry and publishes only viewer fields', async t => {
+  let first = true;
+  const f = await fixture(t,{uploadLarge:async()=>{ if (first) { first=false; throw Error('interrupted'); } }});
+  const args={ownerUserID:'owner-a',id:'a'.repeat(32)};
+  await assert.rejects(f.shareAPI.share({...args,includeTranscript:true}),/interrupted/);
+  await f.shareAPI.share(args);
+  const uploads=f.calls.filter(c=>c[0]==='meta');
+  assert.deepEqual(uploads.map(c=>c[2]),['transcript.json','transcript.txt','meta.json']);
+  const transcript=JSON.parse(uploads[0][3]);
+  assert.equal(transcript.id,uploads[0][1]);
+  assert.deepEqual(transcript.segments,[{start:0,end:3,text:'Ready to share'}]);
+  assert.ok(!Object.hasOwn(transcript,'attendees'));
+  assert.match(uploads[1][3],/\[0:00\] Ready to share/);
+  assert.equal(JSON.parse(uploads[2][3]).transcriptStatus,'ready');
 });

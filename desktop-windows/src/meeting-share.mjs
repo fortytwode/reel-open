@@ -20,7 +20,7 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
       'Sign in as the meeting owner to share this recording.');
   }
   const active = new Map();
-  async function runShare({ ownerUserID, id }) {
+  async function runShare({ ownerUserID, id, includeTranscript = false }) {
     current(ownerUserID);
     const record = await store.getShareRecord({ ownerUserID, id });
     check(record?.meeting === true, 'This saved meeting recording is unavailable.');
@@ -31,7 +31,7 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
         const recordingNonce = C.newRecordingNonce();
         const shareID = await C.ownerShareID(ownerUserID, recordingNonce);
         current(ownerUserID);
-        bound = await store.bindShare({ ownerUserID, expectedOwnerUserID: ownerUserID, id, recordingNonce, shareID });
+        bound = await store.bindShare({ ownerUserID, expectedOwnerUserID: ownerUserID, id, recordingNonce, shareID, includeTranscript: includeTranscript === true });
       }
       current(ownerUserID);
       if (bound.upload === 'uploaded') {
@@ -48,6 +48,19 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
       const remote = C.newRecording({ id, shareID: bound.shareID, title, createdAt: date, mode: 'window', upload: 'uploaded' });
       Object.assign(remote, { durationSeconds: record.durationSeconds, width: record.width, height: record.height,
         captureState: 'complete', transcriptStatus: 'none', playback: { hls: false, mp4: true }, meeting: {} });
+      let transcript;
+      if (bound.includeTranscript === true) {
+        const processing = store.getProcessing({ ownerUserID, id });
+        check(processing?.transcriptComplete === true && processing.text?.trim()
+          && processing.segments?.length, 'This recording has no finished transcript to share.');
+        transcript = {
+          schemaVersion: 1, id: bound.shareID, title, createdAt: date.toISOString(),
+          durationSeconds: remote.durationSeconds, language: processing.language ?? 'en', engine: processing.engine,
+          timingGranularity: processing.timingGranularity, text: processing.text,
+          segments: processing.segments.map(({ start, end, text }) => ({ start, end, text })),
+        };
+        remote.transcriptStatus = 'ready';
+      }
       await store.saveShareState({ ownerUserID, expectedOwnerUserID: ownerUserID, id, shareID: bound.shareID, upload: 'uploading' });
       current(ownerUserID);
       const profile = auth.getProfile();
@@ -65,6 +78,12 @@ export function createMeetingShare({ auth, store, org, cfg: cloudOverrides = {},
         options: { contentDisposition: C.attachmentDisposition(title) },
       });
       current(ownerUserID);
+      if (transcript) {
+        await storage.upload(bound.shareID, C.File.transcriptJSON, C.encodeJSON(transcript));
+        current(ownerUserID);
+        await storage.upload(bound.shareID, C.File.transcriptText, C.transcriptText(transcript));
+        current(ownerUserID);
+      }
       await storage.upload(bound.shareID, C.File.meta,
         C.encodeJSON(C.remoteMeta(remote, 'ready', profile.displayName || profile.email, 'Reel Windows meeting')));
       current(ownerUserID);

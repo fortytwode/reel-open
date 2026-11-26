@@ -771,7 +771,7 @@ function processRecording(recording, { resumeNotes = false } = {}) {
         ...(result.timingGranularity ? { timingGranularity: result.timingGranularity } : {}) };
       if (publisher.deletions.has(id) || (meeting && authGeneration !== expectedGeneration)) return;
       if (!await store.putTranscript(id, new Blob([JSON.stringify(transcript)], { type: "application/json" }),
-        new Blob([transcriptText(transcript)], { type: "text/plain" }))) return;
+        new Blob([C.transcriptText(transcript)], { type: "text/plain" }))) return;
       // Uploading continues during local inference/file writes. Preserve its latest state.
       r = library.get(id);
       if (!r) return;
@@ -837,10 +837,6 @@ function processRecording(recording, { resumeNotes = false } = {}) {
   }).finally(() => { transcriptionJobs.delete(id); transcriptionProgress.delete(id); renderList(); });
   transcriptionJobs.set(id, task); transcriptionQueue = task;
   return task;
-}
-function transcriptText(t) {
-  const timingNotice = t.timingGranularity === "chunk" ? "Times are approximate audio-chunk boundaries, not word timestamps.\n\n" : "";
-  return t.title + "\n\n" + timingNotice + t.segments.map((s) => `[${fmt(s.start)}] ${s.text}`).join("\n") + "\n";
 }
 async function downloadTranscript(id) {
   const blob = await store.getFile(id, C.File.transcriptText);

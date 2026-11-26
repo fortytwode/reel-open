@@ -10,8 +10,8 @@ const check = (condition, message) => { if (!condition) throw new Error(message)
 const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
   systemAudioConsent: false, selection: { useAll: true, ids: [] } });
 const metadata = recording => ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
-  durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload) } : {}),
-  ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
+  durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload), shareIncludesTranscript: recording.share.includeTranscript === true } : {}),
+  ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()), error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
 
 // Only the boxes and sample tables produced by Reel's pinned fragmented muxer are accepted.
 // This detects damaged/out-of-order appends; playback still requires the real media probe.
@@ -371,7 +371,7 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     return { id, title: item.title, createdAt: item.createdAt, durationSeconds: item.durationSeconds,
       ...dimensions, path: file, meeting: true, share: item.share ? structuredClone(item.share) : null };
   }
-  async function bindShare({ ownerUserID, expectedOwnerUserID, id, recordingNonce, shareID } = {}) {
+  async function bindShare({ ownerUserID, expectedOwnerUserID, id, recordingNonce, shareID, includeTranscript = false } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The meeting owner changed.');
     check(/^[0-9a-f]{32}$/.test(id ?? '') && /^[0-9a-f]{32}$/.test(recordingNonce ?? '')
       && /^r2[0-9a-f]{38}$/.test(shareID ?? ''), 'Invalid meeting share binding.');
@@ -382,7 +382,11 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
       if (item.share) {
         check(item.share.ownerUserID === ownerUserID && item.share.recordingNonce === recordingNonce
           && item.share.shareID === shareID, 'This recording is already bound to its original owner.');
-      } else item.share = { ownerUserID, recordingNonce, shareID, upload: 'pending' };
+      } else {
+        if (includeTranscript) check(item.processing.transcriptComplete === true && item.processing.text?.trim()
+          && item.processing.segments?.length, 'This recording has no finished transcript to share.');
+        item.share = { ownerUserID, recordingNonce, shareID, includeTranscript: includeTranscript === true, upload: 'pending' };
+      }
       return state;
     });
     return structuredClone(state.recordings.find(recording => recording.id === id).share);

@@ -46,18 +46,25 @@ try {
   await writeFile(path.join(recordingPath,'library.json'),JSON.stringify({version:1,ownerUserID:ownerID,
     settings:{ownerUserID:ownerID,autoJoin:false,participantConsent:false,systemAudioConsent:false,selection:{useAll:true,ids:[]}},
     completed:{},recordings:[{id,title:'Synthetic local meeting',createdAt:'2026-11-26T10:00:00.000Z',durationSeconds:3,
-      width:640,height:360,processing:{phase:'completed',meeting:{attendees:['private-attendee@northwind.example']}}}]}));
+      width:640,height:360,processing:{phase:'completed', transcriptComplete:true, language:'en', engine:'test',
+        text:'Synthetic caption', timingGranularity:'chunk', segments:[{start:0,end:2,text:'Synthetic caption'}], meeting:{attendees:['private-attendee@northwind.example']}}}]}));
   const store=createLocalRecordingStore({root:storeRoot});
 const port=Number(process.env.REEL_SHARE_PORT||5052), origin=`http://127.0.0.1:${port}`;
 const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://127.0.0.1:8080',viewerBase:origin};
   const copied=[];
   const share=createMeetingShare({auth:{getProfile:()=>({userID:ownerID,email:ownerApp.user.email,displayName:'Synthetic meeting owner'}),getIdToken:()=>ownerApp.user.getIdToken()},
     store,org,cfg,copy:url=>copied.push(url)});
-  const result=await share.share({ownerUserID:ownerID,id});
+  const result=await share.share({ownerUserID:ownerID,id,includeTranscript:true});
   assert.equal(result.uploaded,true); assert.equal(copied[0],result.url);
   const local=await store.getShareRecord({ownerUserID:ownerID,id});
   const shareID=local.share.shareID;
   assert.equal(shareID,await C.ownerShareID(ownerID,local.share.recordingNonce));
+  const transcriptResponse = await fetch(C.downloadURL(shareID, C.File.transcriptJSON, null, cfg));
+  assert.equal(transcriptResponse.ok,true);
+  const transcript = await transcriptResponse.json();
+  assert.equal(transcript.id,shareID);
+  assert.equal(transcript.text,'Synthetic caption');
+  assert.ok(!JSON.stringify(transcript).includes('private-attendee'));
   const ownerCloud=new FirestoreClient(ownerApp.session,cfg), otherCloud=new FirestoreClient(otherApp.session,cfg);
   assert.equal(await ownerCloud.ownsRoom(shareID),true);
   assert.equal(await otherCloud.ownsRoom(shareID),false);
@@ -104,8 +111,10 @@ const cfg={...org,storageOrigin:'http://127.0.0.1:9199',firestoreOrigin:'http://
   }, undefined, {timeout:25000});
   assert.ok(played,'The generated Windows meeting share should play in the existing viewer.');
   assert.ok(await page.locator('#download').isVisible());
+  await page.locator('#tab-transcript').click();
+  await page.locator('#segments').getByText('Synthetic caption').first().waitFor();
   console.log(JSON.stringify({result:'PASS',ownerBoundRoom:true,otherOwnerDenied:true,privateLibraryDenied:true,
-    videoStreams:probe.streams,viewerPlayed:true,shareURL:result.url}));
+    videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
   await context.close();
 } finally {
   await browser?.close().catch(()=>{});

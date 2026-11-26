@@ -208,7 +208,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (typeof payload?.id !== 'string' || !shareMeeting) throw Error('Meeting sharing is unavailable.');
         const key=`${id}:${payload.id}`;activeShares.add(key);emit();
-        try { await shareMeeting.share({ownerUserID:id,id:payload.id}); }
+        try { await shareMeeting.share({ownerUserID:id,id:payload.id,...(payload.includeTranscript === true ? { includeTranscript:true } : {})}); }
         finally { activeShares.delete(key);emit(); }
       } else if(name==='stopRecording') { await coordinator.cancel();emit(); }
       else if(name==='refresh') { cache=null;await pulse(); }

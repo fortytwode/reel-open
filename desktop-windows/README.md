@@ -1,6 +1,6 @@
 # Windows meeting companion
 
-The experimental Windows companion uses Electron for account setup, calendar discovery and recording. A native Windows helper identifies the exact meeting window in Chrome. Recordings stay on the signed-in owner’s computer until they choose **Share recording**. Sharing uploads the video and copies a link that anyone with the link can open.
+The experimental Windows companion uses Electron for account setup, calendar discovery and recording. A native Windows helper identifies the exact meeting window in Chrome. Recordings stay on the signed-in owner’s computer until they choose **Share recording**. Sharing uploads the video and copies a link that anyone with the link can open. Once the transcript is ready, **Share video and transcript** includes it in the same viewer.
 
 The companion opens **Reel Recorder** and **Reel Notetaker** from your organization’s deployment. You can install them separately from Chrome or Edge. Use Recorder for a walkthrough and a share link. Use Notetaker to choose calendars and review meeting notes.
 

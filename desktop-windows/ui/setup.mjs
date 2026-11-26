@@ -127,9 +127,18 @@ function renderRecordings() {
       if(recording.processing.error) left.append(node('div','recording-meta',recording.processing.error));
       if(recording.processing.phase==='failed') { const button=node('button','','Retry notes'); button.type='button'; button.addEventListener('click',()=>void perform('retryProcessing',{id:recording.id,expectedOwnerUserID:snapshot.profile.userID})); left.append(button); }
       const sharing=recording.shareStatus;
-      const shareButton=node('button','',recording.sharing?'Sharing…':sharing==='uploaded'?'Copy share link':sharing?.failed||sharing==='uploading'?'Retry sharing':'Share recording');
+      const shareButton=node('button','',recording.sharing?'Sharing…':sharing==='uploaded'?'Copy share link':sharing?.failed||sharing==='uploading'?(recording.shareIncludesTranscript?'Retry sharing video and transcript':'Retry sharing'):'Share recording');
       shareButton.type='button'; shareButton.disabled=recording.sharing===true; shareButton.dataset.action='shareRecording'; shareButton.dataset.recordingId=recording.id;
       left.append(shareButton);
+      if (recording.processing.transcriptReady && !sharing) {
+        const withTranscript = node('button', '', 'Share video and transcript');
+        withTranscript.type = 'button';
+        withTranscript.disabled = shareButton.disabled;
+        withTranscript.dataset.action = 'shareRecording';
+        withTranscript.dataset.recordingId = recording.id;
+        withTranscript.dataset.includeTranscript = 'true';
+        left.append(withTranscript);
+      }
       if(sharing?.failed) left.append(node('div','recording-meta','Sharing failed. Select Retry sharing to try again.'));
     }
     row.append(left); list.append(row); }
@@ -226,7 +235,7 @@ document.addEventListener('click', event=>{
   const target=event.target.closest('[data-action]'); if(!target || target.disabled) return;
   const action=target.dataset.action;
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
-  if(action==='shareRecording') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if(action==='shareRecording') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID,...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{})}); return; }
   perform(action);
 });
 document.addEventListener('change', event=>{ if(event.target.matches('[data-setting],[data-calendar]')) scheduleSave(); });

@@ -748,3 +748,8 @@ export function transcriptTimestamp(seconds) {
   const t = Math.max(0, Math.floor(seconds)), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 }
+
+export function transcriptText(t) {
+  const timingNotice = t.timingGranularity === "chunk" ? "Times are approximate audio-chunk boundaries, not word timestamps.\n\n" : "";
+  return t.title + "\n\n" + timingNotice + t.segments.map((s) => `[${transcriptTimestamp(s.start)}] ${s.text}`).join("\n") + "\n";
+}
