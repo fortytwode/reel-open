@@ -239,7 +239,8 @@ export class Publisher {
     const task = (async () => {
       try {
         const live = this.liveFinish.get(id);
-        if (live) { await live; this.liveFinish.delete(id); }
+        const retryLiveMetadata = live ? !(await live) : false;
+        if (live) this.liveFinish.delete(id);
         let r = this.library.get(id);
         if (!r) return;
         let s = await this.session();
@@ -269,7 +270,7 @@ export class Publisher {
         this.library.setProgress(id, 0);
         try {
           s.assertCurrent?.();
-          await this.sync(id, s, meetingShare ? false : copyLink, meetingShare);
+          await this.sync(id, s, meetingShare ? false : copyLink, meetingShare, retryLiveMetadata);
           r = this.library.get(id); r.upload = "uploaded"; await this.library.update(r);
           if (meetingShare && copyLink && s.isCurrent()) this.ui.copy(C.shareURL(r, this.cfg));
         } catch (e) {
@@ -286,7 +287,7 @@ export class Publisher {
     return task;
   }
 
-  async sync(id, s, copyLink, allowMeetingShare = false) {
+  async sync(id, s, copyLink, allowMeetingShare = false, retryLiveMetadata = false) {
     let r = this.library.get(id);
     if (C.isMeeting(r)) {
       if (!allowMeetingShare || !s.assertCurrent) throw new Error("Confirm sharing as the meeting owner.");
@@ -295,8 +296,11 @@ export class Publisher {
     const storage = this.storage(s, r), owner = this.owner(s), key = r.access.key;
     const options = { expiresAt: r.access.expiresAt };
     const playable = r.playback.hls || r.playback.mp4;
-    // Keep transcript polling active until this pass uploads its final transcript files.
-    await this.uploadMeta({ ...r, transcriptStatus: "pending" }, allowMeetingShare ? "processing" : (playable ? "ready" : "processing"), storage, owner);
+    // Keep existing playable metadata while updating files, unless live finalization failed to publish it.
+    const publishProgress = allowMeetingShare || !playable || retryLiveMetadata;
+    if (publishProgress) {
+      await this.uploadMeta({ ...r, transcriptStatus: "pending" }, playable && !allowMeetingShare ? "ready" : "processing", storage, owner);
+    }
     if (copyLink && !playable && !allowMeetingShare) this.ui.copy(C.shareURL(r, this.cfg));
     await this.firestore(s).ensureRoom(C.recordingRoom(r), r.createdAt, r.access.expiresAt, 0, r.recordingNonce).catch(() => {});
 
@@ -312,7 +316,7 @@ export class Publisher {
           files: (f) => store.getBytes(id, f), progress: row.progress, persist: (pp) => store.updateRow(id, { progress: pp }) });
         await up.finish(log);
         r = this.library.get(id); r.playback.hls = true; await this.library.update(r);
-        await this.uploadMeta({ ...r, transcriptStatus: "pending" }, "ready", storage, owner);
+        if (publishProgress) await this.uploadMeta({ ...r, transcriptStatus: "pending" }, "ready", storage, owner);
       }
     }
 

@@ -201,23 +201,35 @@ try {
 
   // A failed audio pump must abort countdown instead of starting a silent recording.
   await page.selectOption("#countdown", "3");
-  await page.locator("#start").click();
-  check("Start releases preview devices before capture", await page.evaluate(() => setupPreviewTracks.every(t => t.readyState === "ended")) && await page.locator("#preview").isHidden());
-  const counting = await until(() => page.evaluate(() => {
-    const s = window.__reel.state(); return s.phase === "countdown" && !!s.session?.info;
-  }), 10000);
-  if (counting) await page.evaluate(() => {
-    const worker = window.__reel.state().session.worker, post = worker.postMessage.bind(worker);
-    worker.postMessage = (message, transfer) => {
-      if (message.type === "audio") { worker.postMessage = post; throw new Error("Test audio transfer failed"); }
-      return post(message, transfer);
+  await page.evaluate(() => {
+    const post = Worker.prototype.postMessage;
+    window.countdownAudioFault = { phase: null, restore: () => { Worker.prototype.postMessage = post; } };
+    Worker.prototype.postMessage = function (message, ...args) {
+      const { phase, session } = window.__reel.state();
+      if (message.type === "audio" && this === session?.worker) {
+        window.countdownAudioFault.phase = phase;
+        window.countdownAudioFault.restore();
+        throw new Error("Test audio transfer failed");
+      }
+      return post.call(this, message, ...args);
     };
   });
-  const aborted = counting && await until(() => page.evaluate(() => {
-    const s = window.__reel.state(); return s.phase === "idle" && s.session === null && window.__reel.library.list().length === 0;
-  }), 12000);
-  check("audio failure during countdown aborts before recording", aborted && (await page.locator("#toast").innerText()).includes("Test audio transfer failed"));
-  if (!aborted) {
+  await page.locator("#start").click();
+  check("Start releases preview devices before capture", await page.evaluate(() => setupPreviewTracks.every(t => t.readyState === "ended")) && await page.locator("#preview").isHidden());
+  const countdownResult = () => page.evaluate(() => {
+    const { phase, session } = window.__reel.state();
+    return { phase, activeSession: !!session, localRecordings: window.__reel.library.list().length,
+      faultPhase: window.countdownAudioFault.phase, toast: document.getElementById("toast").textContent };
+  });
+  const aborted = await until(async () => {
+    const result = await countdownResult();
+    return result.faultPhase && result.phase === "idle" && !result.activeSession && result.localRecordings === 0 && result;
+  }, 12000);
+  const result = aborted || await countdownResult();
+  await page.evaluate(() => window.countdownAudioFault.restore());
+  check("audio failure during countdown aborts before recording", aborted && result.faultPhase === "countdown" &&
+    result.toast === "Couldn't start recording: Test audio transfer failed", JSON.stringify(result));
+  if (!aborted && result.phase !== "idle") {
     page.once("dialog", (dialog) => dialog.accept());
     await page.locator("#cancel").click();
     await until(() => page.evaluate(() => window.__reel.state().phase === "idle"), 10000);
@@ -270,8 +282,27 @@ try {
       (await fetchObj(r.shareID, C.File.transcriptJSON)).ok && (await fetchObj(r.shareID, C.File.transcriptText)).ok;
   }, 30000));
   const m1 = await meta(r.shareID);
-  check("meta.json shape (schema 2, room, owner, app, thumbnail)", m1.schemaVersion === 2 && m1.room === r.shareID && m1.ownerName && /\(web\)$/.test(m1.app) &&
-    m1.hasThumbnail === true && m1.width === 1280 && m1.transcriptStatus === "ready" && m1.locked === false, JSON.stringify(m1));
+  const { schemaVersion, room: metaRoom, ownerName, app, hasThumbnail, width, transcriptStatus, locked } = m1;
+  check("meta.json shape (schema 2, room, owner, app, thumbnail)", schemaVersion === 2 && metaRoom === r.shareID && ownerName && /\(web\)$/.test(app) &&
+    hasThumbnail === true && width === 1280 && transcriptStatus === "ready" && locked === false,
+    JSON.stringify({ schemaVersion, metaRoom, expectedRoom: r.shareID, ownerName, app, hasThumbnail, width, transcriptStatus, locked }));
+  const refresh = await page.evaluate(async (id) => {
+    const { publisher, library } = window.__reel;
+    await publisher.uploads.get(id);
+    const uploadMeta = publisher.uploadMeta, statuses = [];
+    publisher.uploadMeta = async function (recording, ...args) {
+      await uploadMeta.call(this, recording, ...args);
+      if (recording.id === id) statuses.push(recording.transcriptStatus);
+    };
+    try {
+      const refreshed = await publisher.refreshTranscript(id, library.get(id).recordingOwnerUID);
+      return { refreshed, statuses };
+    } finally {
+      publisher.uploadMeta = uploadMeta;
+    }
+  }, r.id);
+  check("re-publishing a ready transcript keeps its metadata ready", refresh.refreshed && refresh.statuses.length > 0 &&
+    refresh.statuses.every((status) => status === "ready"), JSON.stringify(refresh));
   check("thumb.jpg uploaded", (await fetchObj(r.shareID, C.File.thumbnail)).ok);
   const mp4 = await download(r.shareID, C.File.video);
   const probe = ffprobe(mp4);
