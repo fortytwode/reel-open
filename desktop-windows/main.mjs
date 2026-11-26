@@ -165,7 +165,7 @@ async function run() {
     onSourceEnded:()=>service?.action('stopRecording')});
   service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,discover:discoverGoogleMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
-    openExternal:value=>shell.openExternal(value),
+    openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
     openRecordings:async owner=>{
       const directory=path.join(storageRoot,createHash('sha256').update(owner).digest('hex'));
       await mkdir(directory,{recursive:true});const error=await shell.openPath(directory);
@@ -199,7 +199,8 @@ async function run() {
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {label:'Reel',submenu:[{label:'Meeting setup',click:()=>window.show()},{type:'separator'},{role:'quit'}]},
-    {label:'File',submenu:[{label:'Record in browser',click:()=>void service.action('openRecorder')},
+    {label:'File',submenu:[{label:'Open Reel Recorder',click:()=>void service.action('openRecorder')},
+      {label:'Open Reel Notetaker',click:()=>void service.action('openNotetaker')},
       {label:'Web library',click:()=>void service.action('openLibrary')} ]},
     {label:'Edit',submenu:[{role:'copy'},{role:'paste'},{role:'selectAll'}]}
   ]));

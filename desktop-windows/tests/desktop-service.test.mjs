@@ -43,7 +43,8 @@ function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
       getState: () => status, onStateChange: fn => { statusNotify = fn; return () => {}; },
       refresh: async () => { calls.push('refresh'); }, tick: async () => { calls.push('tick'); },
       cancel: async () => { calls.push('cancel'); }, dispose: async () => { calls.push('dispose'); } }; return coordinator; },
-    openExternal: async url => calls.push(url), openRecordings: async owner => calls.push(owner), shareMeeting,
+    openExternal: async url => calls.push(url), openProduct: async name => calls.push(name),
+    openRecordings: async owner => calls.push(owner), shareMeeting,
     onState: value => snapshots.push(value) });
   return { service, auth, store, coordinator, settings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
     changeOwner(value) { profile = value; notify(); }, status(value) { status = value; statusNotify(value); } };
@@ -97,7 +98,7 @@ test('sign-out stops local capture and only fixed external destinations can be o
   assert.equal(f.calls[0], 'https://library.northwind.example/reel');
   await f.service.action('openRecorder');
   await f.service.action('openNotetaker', {url:'https://bad.example'});
-  assert.deepEqual(f.calls.slice(1), ['https://record.northwind.example/record', 'https://record.northwind.example/notetaker']);
+  assert.deepEqual(f.calls.slice(1), ['openRecorder', 'openNotetaker']);
   await f.service.action('signOut');
   assert.equal(f.service.state().profile, null); assert.ok(f.calls.includes('cancel'));
   await assert.rejects(f.service.action('openRecordings'), /sign in/i);

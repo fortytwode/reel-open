@@ -44,7 +44,7 @@ export function desktopBrowserAppArguments(action, org) {
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openRecordings,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
@@ -147,7 +147,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       if (!org) throw Error('The organization has not configured its web URLs.');
       await openExternal(org.notesBaseURL);
     }
-    else if (name==='openRecorder' || name==='openNotetaker') await openExternal(desktopProductURL(name, org));
+    else if (name==='openRecorder' || name==='openNotetaker') await openProduct(name);
     else if (name==='openRecordings') await openRecordings(requireOwner());
     else {
       if (!configured) throw Error('Automatic meetings are unavailable in this build.');
