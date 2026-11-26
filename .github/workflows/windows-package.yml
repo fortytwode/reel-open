@@ -65,9 +65,17 @@ jobs:
       - name: Preflight extracted local Whisper assets
         shell: pwsh
         run: |
-          node desktop-windows/tests/local-ai-package-preflight.mjs "$env:RUNNER_TEMP/demo-package/resources/app"
+          $appRoot = Resolve-Path "$env:RUNNER_TEMP/demo-package/resources/app"
+          node desktop-windows/tests/local-ai-package-preflight.mjs "$appRoot"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Verify packaged Electron readiness before model download
+          $smoke = Join-Path $appRoot 'desktop-windows/local-ai/smoke.mjs'
+          $helper = Join-Path $appRoot 'desktop-windows/src/smoke-timeout.mjs'
+          New-Item -ItemType Directory -Force -Path (Split-Path $smoke),(Split-Path $helper) | Out-Null
+          Copy-Item -LiteralPath 'desktop-windows/local-ai/smoke.mjs' -Destination $smoke
+          Copy-Item -LiteralPath 'desktop-windows/src/smoke-timeout.mjs' -Destination $helper
+          node desktop-windows/tests/local-ai-smoke-package-preflight.mjs "$appRoot"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify packaged smoke startup before model download
         shell: pwsh
         env:
           REEL_ARCH: ${{ matrix.arch }}
@@ -76,37 +84,39 @@ jobs:
           $electron = Resolve-Path "$env:RUNNER_TEMP/demo-package/Reel.exe"
           $packagePath = Join-Path $appRoot 'package.json'
           $originalPackage = [IO.File]::ReadAllText($packagePath)
-          $probe = Join-Path $appRoot 'desktop-windows/local-ai/readiness-smoke.mjs'
           $log = Join-Path $env:RUNNER_TEMP "electron-readiness-$env:REEL_ARCH.log"
           try {
-            Copy-Item -LiteralPath 'desktop-windows/local-ai/readiness-smoke.mjs' -Destination $probe
             $package = $originalPackage | ConvertFrom-Json
-            $package.main = 'desktop-windows/local-ai/readiness-smoke.mjs'
+            $package.main = 'desktop-windows/local-ai/smoke.mjs'
             $utf8 = New-Object Text.UTF8Encoding($false)
             [IO.File]::WriteAllText($packagePath, ($package | ConvertTo-Json), $utf8)
             $env:REEL_WHISPER_SMOKE_LOG = $log
+            $env:REEL_WHISPER_SMOKE_ROOT = $appRoot
+            $env:REEL_WHISPER_SMOKE_ARCH = $env:REEL_ARCH
+            $env:REEL_WHISPER_SMOKE_STARTUP_ONLY = '1'
             $process = Start-Process -FilePath $electron -PassThru -NoNewWindow
             if (-not $process.WaitForExit(30 * 1000)) {
               if (-not $process.HasExited) { $process.Kill($true) }
-              throw 'Packaged Electron did not become ready within 30 seconds, before model download.'
+              throw 'Packaged local Whisper smoke did not start and reach Electron readiness within 30 seconds, before model download.'
             }
             $process.Refresh()
             if (Test-Path $log) { Get-Content -LiteralPath $log }
-            if ($process.ExitCode) { throw "Packaged Electron readiness smoke exited with $($process.ExitCode)" }
-            if (-not (Select-String -LiteralPath $log -Pattern '"phase":"electron_ready"' -Quiet)) {
-              throw 'Packaged Electron readiness smoke exited without an electron_ready diagnostic.'
+            if ($process.ExitCode) { throw "Packaged smoke startup preflight exited with $($process.ExitCode)" }
+            foreach ($phase in @('smoke_start','electron_ready','smoke_startup_preflight_passed')) {
+              if (-not (Select-String -LiteralPath $log -Pattern ('"phase":"' + $phase + '"') -Quiet)) {
+                throw "Packaged smoke startup preflight exited without $phase diagnostic."
+              }
             }
           } finally {
             if (Test-Path $log) { Get-Content -LiteralPath $log }
             [IO.File]::WriteAllText($packagePath, $originalPackage, (New-Object Text.UTF8Encoding($false)))
-            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
-            Remove-Item Env:REEL_WHISPER_SMOKE_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:REEL_WHISPER_SMOKE_LOG,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_STARTUP_ONLY -ErrorAction SilentlyContinue
           }
-      - name: Upload packaged Electron readiness diagnostics
+      - name: Upload packaged smoke startup diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: electron-readiness-${{ matrix.arch }}-diagnostics
+          name: local-whisper-startup-${{ matrix.arch }}-diagnostics
           path: ${{ runner.temp }}/electron-readiness-${{ matrix.arch }}.log
           if-no-files-found: warn
           retention-days: 7
@@ -130,8 +140,8 @@ jobs:
           $packagePath = Join-Path $appRoot 'package.json'
           $originalPackage = [IO.File]::ReadAllText($packagePath)
           $smoke = Join-Path $appRoot 'desktop-windows/local-ai/smoke.mjs'
+          $helper = Join-Path $appRoot 'desktop-windows/src/smoke-timeout.mjs'
           try {
-            Copy-Item -LiteralPath 'desktop-windows/local-ai/smoke.mjs' -Destination $smoke
             $package = $originalPackage | ConvertFrom-Json
             $package.main = 'desktop-windows/local-ai/smoke.mjs'
             $utf8 = New-Object Text.UTF8Encoding($false)
@@ -150,7 +160,7 @@ jobs:
             if ($process.ExitCode) { throw "Packaged local Whisper inference/offline cache smoke exited with $($process.ExitCode)" }
           } finally {
             [IO.File]::WriteAllText($packagePath, $originalPackage, (New-Object Text.UTF8Encoding($false)))
-            Remove-Item -LiteralPath $smoke -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $smoke,$helper -Force -ErrorAction SilentlyContinue
             Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_LOG -ErrorAction SilentlyContinue
           }
       - name: Print packaged local Whisper diagnostics

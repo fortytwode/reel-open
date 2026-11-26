@@ -13,7 +13,8 @@ const audioPath=process.env.REEL_WHISPER_SMOKE_AUDIO;
 const packagedRoot=process.env.REEL_WHISPER_SMOKE_ROOT;
 const expectedArch=process.env.REEL_WHISPER_SMOKE_ARCH;
 const logPath=process.env.REEL_WHISPER_SMOKE_LOG;
-assert.ok(audioPath&&packagedRoot&&logPath&&['x64','arm64'].includes(expectedArch),'Supply synthetic PCM16/16kHz/mono speech, extracted resources/app path, log path, and expected architecture.');
+const startupOnly=process.env.REEL_WHISPER_SMOKE_STARTUP_ONLY==='1';
+assert.ok((startupOnly||audioPath)&&packagedRoot&&logPath&&['x64','arm64'].includes(expectedArch),'Supply synthetic PCM16/16kHz/mono speech unless startup-only, extracted resources/app path, log path, and expected architecture.');
 assert.equal(process.platform,'win32');
 assert.equal(process.arch,expectedArch);
 writeFileSync(logPath,'');
@@ -99,6 +100,12 @@ async function transcribeWithBounds(name,samples,totalTimeoutMs){
 async function runSmoke(){
   try{
     log('smoke_start');
+    if(startupOnly){
+      await bounded('electron_startup',()=>app.whenReady(),20_000);
+      log('electron_ready');
+      log('smoke_startup_preflight_passed');
+      return;
+    }
     await bounded('electron_startup',()=>app.whenReady(),60_000);
     log('electron_ready');
     assets=await bounded('asset_server_startup',()=>startAssetServer({root:packagedRoot}),15_000);
