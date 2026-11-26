@@ -116,8 +116,11 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
       } else if (message.type === 'failed') {
         const reasons = { source_ended: 'The recording source ended.', write_failed: 'The recording could not be saved.',
           queue_overflow: 'Recording storage cannot keep up.', encoder_failed: 'The recording encoder failed.',
-          capture_failed: 'The meeting window could not be captured.' };
-        fail(capture, Error(reasons[message.reason] ?? 'The meeting recording failed.'));
+          capture_failed: 'The meeting window could not be captured.',
+          microphone_unavailable: 'The microphone could not be captured. Check Windows microphone permissions or turn off Include my microphone.' };
+        const error = Error(reasons[message.reason] ?? 'The meeting recording failed.');
+        if (message.reason === 'microphone_unavailable') error.code = message.reason;
+        fail(capture, error);
       } else throw Error('Unexpected capture status');
       return { ok: true };
     } catch (error) { fail(capture, error); throw error; }
@@ -184,10 +187,17 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
       && details?.isMainFrame === true && details.requestingUrl === captureURL
       && contents.mainFrame.url === captureURL && contents.getURL() === captureURL
       && (details.securityOrigin === undefined || ownedOrigin(details.securityOrigin));
-    session.setPermissionCheckHandler((_contents, permission, requestingOrigin, details) =>
-      permission === 'display-capture' && ownedOrigin(requestingOrigin) && ownedCaptureRequest(_contents, details));
+    const permittedCapture = (requester, permission, details, isCheck = false) => {
+      if (!ownedCaptureRequest(requester, details)) return false;
+      if (permission === 'display-capture') return true;
+      if (permission !== 'media' || capture.phase !== 'starting' || args.microphone !== true) return false;
+      if (isCheck) return details?.mediaType === 'audio';
+      return Array.isArray(details?.mediaTypes) && details.mediaTypes.length === 1 && details.mediaTypes[0] === 'audio';
+    };
+    session.setPermissionCheckHandler((requester, permission, requestingOrigin, details) =>
+      ownedOrigin(requestingOrigin) && permittedCapture(requester, permission, details, true));
     session.setPermissionRequestHandler((requester, permission, callback, details) =>
-      callback(permission === 'display-capture' && ownedCaptureRequest(requester, details)));
+      callback(permittedCapture(requester, permission, details)));
     session.setDevicePermissionHandler(() => false);
     // No getDisplayMedia picker/fallback is used. This renderer gets only its selected desktop source.
     session.setDisplayMediaRequestHandler((_request, callback) => callback(null));
@@ -200,14 +210,14 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     await window.loadURL(captureURL);
     capture.audioEndpoint = await readAudioEndpoint();
     if (terminal(capture)) return;
-    contents.send(COMMAND, { type: 'start', token: capture.token, sourceId: matches[0].id, canRefreshAudio: Boolean(defaultRenderEndpoint) });
+    contents.send(COMMAND, { type: 'start', token: capture.token, sourceId: matches[0].id, canRefreshAudio: Boolean(defaultRenderEndpoint), microphone: args.microphone });
   }
   function start(args = {}) {
     try {
       check(!current, 'A meeting recording is already active.');
       check(typeof args.hwnd === 'string' && /^[1-9]\d{0,19}$/.test(args.hwnd) && Number.isSafeInteger(args.pid) && args.pid > 0
         && typeof args.ownerUserID === 'string' && args.ownerUserID.length > 0 && args.meeting && typeof args.meeting === 'object'
-        && args.systemAudio === true && args.microphone === false && args.signal
+        && args.systemAudio === true && typeof args.microphone === 'boolean' && args.signal
         && typeof args.signal.addEventListener === 'function', 'Invalid meeting capture request');
       if (args.signal.aborted) throw abortError();
       const token = randomBytes(16).toString('hex'), handle = Object.freeze({ id: token });

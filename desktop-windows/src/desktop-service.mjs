@@ -10,7 +10,8 @@ const messages = {
   saving:'Finishing your local recording.', completed:'Your recording was saved on this computer.',
   close_required:'Close the meeting window Reel opened, then refresh to continue.',
   calendar_unavailable:'Calendar could not be refreshed. Check your connection or reconnect Google Calendar.',
-  failed:'The meeting could not start automatically. Check Chrome and join the meeting manually.',
+  failed:'The meeting could not start. Check the meeting and your Chrome profile, then try again.',
+  microphone_unavailable:'Reel could not use the microphone. Check Windows microphone permissions or start the meeting with Include my microphone off.',
   save_failed:'The recording could not be completed. Open the recordings folder to recover available local files.',
   retry_wait:'Reel will retry the meeting connection shortly.', cancelled:'Meeting setup was cancelled.'
 };
@@ -71,7 +72,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   const activeShares=new Set();
   let settingsTail=Promise.resolve(),disposePromise=null;
   let calendars=[],meetings=[],calendarOwner=null,routingUnavailable=false;
-  const routingMessage='Cloud routing could not be checked. Automatic Meet and Teams joins are paused; Zoom can continue.';
+  const routingMessage='Cloud routing could not be checked. Local Meet and Teams joins are paused. Zoom can continue.';
   const settings = () => {
     const id=auth?.getProfile()?.userID ?? null;
     if (!id) return defaults(null);
@@ -81,12 +82,14 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   function state() {
     const profile=auth?.getProfile() ?? null, status=coordinator?.getState() ?? {phase:'idle'};
     // Do not surface a previous owner's meeting state while cancellation is saving.
-    const phase=status.ownerUserID && status.ownerUserID !== profile?.userID ? 'idle' : status.phase;
+    const currentStatus = !status.ownerUserID || status.ownerUserID === profile?.userID;
+    const phase = currentStatus ? status.phase : 'idle';
+    const messageKey = currentStatus && status.reason === 'microphone_unavailable' ? status.reason : phase;
     const currentCalendar=calendarOwner===profile?.userID;
     return {configured,profile,settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
       meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
         ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`)})) : [],
-      status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[phase] ?? messages.idle},error};
+      status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},error};
   }
   function emit() { if (!closed) onState(state()); }
   function invalidate() {
@@ -100,13 +103,20 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     if (cache?.ownerUserID === profile?.userID && cache.ownerEmail === profile?.email
       && cache.key === key && Date.now()-cache.at < 10_000) result=cache.result;
     else {
-      result=await discover(args);
+      try {
+        result = profile?.calendarConnected ? await discover(args) : null;
+      } catch (error) {
+        if (!args.pastedLink) throw error;
+      }
+      const hasCalendarResult = Boolean(result);
+      if (!result && args.pastedLink) result = { ownerUserID: profile?.userID, calendars: [], meetings: [] };
+      if (!result) throw Error('Connect Google Calendar to continue.');
       if (args.signal?.aborted || version !== generation || result.ownerUserID !== auth.getProfile()?.userID
         || profile?.email !== auth.getProfile()?.email) throw Error('The calendar account changed.');
-      cache={ownerUserID:result.ownerUserID,ownerEmail:profile.email,key,at:Date.now(),result};
+      if (hasCalendarResult) cache={ownerUserID:result.ownerUserID,ownerEmail:profile.email,key,at:Date.now(),result};
     }
     // Google discovery can be cached briefly; cloud ownership must be fresh before each coordinator refresh/join.
-    const routed=await routeGoogleMeetings({auth,snapshot:result,routingURL:org && org.meetingServiceURL + '/calendar/desktop',fetch:fetcher,signal:args.signal});
+    const routed=await routeGoogleMeetings({auth,snapshot:result,routingURL:org && org.meetingServiceURL + '/calendar/desktop',fetch:fetcher,signal:args.signal,now:args.now,pastedLink:args.pastedLink});
     if (args.signal?.aborted || version !== generation || profile?.userID !== auth.getProfile()?.userID
       || profile?.email !== auth.getProfile()?.email) throw Error('The calendar account changed.');
     routingUnavailable=routed.routingUnavailable;
@@ -136,7 +146,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     }
     const operation=(async()=>{
       const profile=auth.getProfile(), version=generation;
-      if (!profile?.calendarConnected) { await coordinator.refresh(); emit(); return; }
+      if (!profile?.calendarConnected) { await coordinator.refresh(); await coordinator.tick(); emit(); return; }
       const controller=new AbortController(); calendarController=controller;
       try {
         const result=await calendarDiscover({auth,selection:settings().selection,now:new Date(),signal:controller.signal});
@@ -225,6 +235,27 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if (version!==generation || requireOwner()!==id) throw Error('The account changed. Refresh your settings.');
         if (revision!==settingsRevision) return state();
         settingsCache=saved;error=null;emit();await pulse();
+      } else if(name==='joinMeeting' || name==='joinMeetingLink') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        const pasted = name==='joinMeetingLink';
+        const allowed = ['expectedOwnerUserID', 'includeMicrophone', ...(pasted ? ['url', 'participantsConfirmed'] : ['id'])];
+        if (Object.keys(payload).some(key => !allowed.includes(key))
+          || (payload.includeMicrophone !== undefined && typeof payload.includeMicrophone !== 'boolean'))
+          throw Error('Invalid meeting request.');
+        if (pasted && (typeof payload.url !== 'string' || payload.url.length > 8_192 || payload.participantsConfirmed !== true))
+          throw Error('Enter a meeting link and confirm that participants agreed to recording.');
+        if (!pasted && (typeof payload.id !== 'string' || !payload.id || payload.id.length > 4_096))
+          throw Error('Choose a meeting from your calendar.');
+        const version=generation, revision=settingsRevision;
+        await settingsTail;
+        if (version!==generation || revision!==settingsRevision || requireOwner()!==id || closing)
+          throw Error('Your account or recording settings changed. Refresh and try again.');
+        cache=null;
+        await coordinator.joinMeeting({ ownerUserID:id, microphone:payload.includeMicrophone === true,
+          ...(pasted ? { url:payload.url, participantsConfirmed:payload.participantsConfirmed } : { meetingId:payload.id }) });
+      } else if(name==='cancelJoin') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        await coordinator.cancelJoin(id);
       } else if(name==='retryProcessing') {
         const id=requireOwner(payload?.expectedOwnerUserID);
         if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');

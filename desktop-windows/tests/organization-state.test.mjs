@@ -87,7 +87,7 @@ async function startDesktop(base, org) {
         calls.push(url);
         if (url.endsWith('/transcription')) return Response.json({ text: 'Transcript', engine: 'OpenAI gpt-transcribe' });
         if (url.endsWith('/summary')) return Response.json({ summary: 'Summary', engine: 'OpenAI gpt-6.1-sol' });
-        return Response.json({ verified: true, page_id: 'fixture', url: 'https://www.notion.so/fixture', recipients: [], email_status: 'confirmed' });
+        return Response.json({ verified: true, page_id: 'fixture', url: 'https://www.notion.so/fixture', recipients: [`person@${org.allowedEmailDomain}`], email_status: 'confirmed' });
       } });
       return { ...processor, resume: () => (resume = processor.resume()) };
     } }

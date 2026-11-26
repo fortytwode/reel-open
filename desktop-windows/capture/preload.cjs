@@ -8,7 +8,7 @@ ipcRenderer.on('reel-capture:command', (_event, message) => {
     if (token || !/^[0-9a-f]{32}$/.test(message.token ?? '')) return;
     token = message.token;
   } else if (message.token !== token) return;
-  const command = message.type === 'start' ? { type: 'start', sourceId: message.sourceId, canRefreshAudio: message.canRefreshAudio === true } : { type: message.type, request: message.request, deadline: message.deadline };
+  const command = message.type === 'start' ? { type: 'start', sourceId: message.sourceId, canRefreshAudio: message.canRefreshAudio === true, microphone: message.microphone === true } : { type: message.type, request: message.request, deadline: message.deadline };
   if (listener) listener(command); else pending = command;
 });
 const status = message => ipcRenderer.invoke('reel-capture:status', { token, ...message });
