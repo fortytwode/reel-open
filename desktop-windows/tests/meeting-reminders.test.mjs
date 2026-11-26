@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createMeetingReminders, meetingReminderIDFromActivation } from '../src/meeting-reminders.mjs';
+import { createEncryptedReminderStore } from '../src/windows-reminder-tasks.mjs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const start = Date.parse('2026-11-26T10:00:00Z');
 const meeting = (id = 'meeting-1', startAt = start) => ({ id, title: 'Planning',
@@ -178,4 +182,39 @@ test('a refreshed meeting title is used when its persistent reminder fires', () 
   scheduler.update({owner:'owner-a',reminders:true,meetings:[{...meeting('renamed-event'),title:'New title'}]});
   assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(start)}),true);
   assert.equal(f.shown[0].options.body,'New title');
+});
+
+test('an early-trigger retry survives a failed task sync and is retried from encrypted schedule state', () => {
+  const f=fixture(),root=mkdtempSync(path.join(os.tmpdir(),'reel-reminder-retry-'));
+  let plan=[],failSync=false;
+  try {
+    const filePath=path.join(root,'reminders.encrypted');
+    const safeStorage={isEncryptionAvailable:()=>true,encryptString:value=>Buffer.from(value).map(byte=>byte^0x5a),
+      decryptString:value=>Buffer.from(value).map(byte=>byte^0x5a).toString()};
+    const encrypted=createEncryptedReminderStore({safeStorage,filePath});
+    const persistence={load:encrypted.load,save:encrypted.save,sync:value=>{
+      if(failSync) throw Error('temporary Task Scheduler failure');
+      plan=structuredClone(value);
+    }};
+    const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+    const fractionalStart=start+250,event=meeting('sync-retry',fractionalStart);
+    const scheduler=createMeetingReminders({Notification,now:()=>new Date(fractionalStart-60_000),persistence});
+    scheduler.update({owner:'owner-a',reminders:true,meetings:[event]});
+    const token=encrypted.load()[0].token,earlyAt=fractionalStart-1;
+    failSync=true;
+    assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(earlyAt)}),false);
+    const persistedRetry=encrypted.load()[0].retryStart;
+    assert.equal(persistedRetry,new Date(fractionalStart+4_999).toISOString());
+    assert.equal(readFileSync(filePath,'utf8').includes('retryStart'),false,'The retry marker is encrypted at rest.');
+    assert.ok(scheduler.error);
+    failSync=false;
+    scheduler.dispose();
+    const restarted=createMeetingReminders({Notification,now:()=>new Date(earlyAt+1_000),persistence});
+    restarted.update({owner:'owner-a',reminders:true,meetings:[event],at:new Date(earlyAt+1_000)});
+    assert.deepEqual(plan,[{token,start:persistedRetry,retry:true,end:encrypted.load()[0].end}],
+      'A restarted scheduler reuses the saved retry boundary rather than reverting to the consumed event start.');
+    assert.equal(restarted.error,null);
+    assert.equal(restarted.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart)}),true);
+    assert.equal(f.shown.length,1);
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });

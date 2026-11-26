@@ -10,7 +10,10 @@ function validStoredReminder(item) {
     && typeof item.meetingID === 'string' && item.meetingID.length > 0 && item.meetingID.length <= 4096
     && typeof item.title === 'string' && item.title.length <= 500
     && Number.isFinite(Date.parse(item.start)) && Number.isFinite(Date.parse(item.end))
-    && Date.parse(item.end) > Date.parse(item.start) && (item.fired === undefined || typeof item.fired === 'boolean');
+    && Date.parse(item.end) > Date.parse(item.start)
+    && (item.retryStart === undefined || (typeof item.retryStart === 'string' && Number.isFinite(Date.parse(item.retryStart))
+      && Date.parse(item.retryStart) >= Date.parse(item.start) && Date.parse(item.retryStart) < Date.parse(item.end)))
+    && (item.fired === undefined || typeof item.fired === 'boolean');
 }
 
 export function meetingReminderIDFromActivation(details) {
@@ -45,14 +48,16 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
       notification.show();
     } catch { /* Windows notification settings may block local delivery. */ }
   }
-  function saveAndSync({ rearmToken = null, rearmStart = null } = {}) {
+  function saveAndSync() {
     if (!persistence) return true;
     const records = [...scheduled.values()].map(({ timer, ...record }) => record);
     try {
       persistence.save(records);
-      persistence.sync(records.filter(record => !record.fired).map(({ token, start, end }) => token === rearmToken && typeof rearmStart === 'string'
-        ? { token, start: rearmStart, retry: true, end }
-        : { token, start }));
+      persistence.sync(records.filter(record => !record.fired).flatMap(record => {
+        if (record.retryStart) return Date.parse(record.retryStart) < Date.parse(record.end)
+          ? [{ token: record.token, start: record.retryStart, retry: true, end: record.end }] : [];
+        return [{ token: record.token, start: record.start }];
+      }));
       lastError = null;
       needsSync = false;
       return true;
@@ -115,7 +120,8 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
     const time = at instanceof Date ? at.getTime() : Date.parse(at);
     if (owner === item.owner && reminders === true && Number.isFinite(time) && time < Date.parse(item.start)) {
       // Replace the consumed one-shot task with a near-term retry if Windows wakes it early.
-      saveAndSync({ rearmToken: item.token, rearmStart: new Date(time + 5_000).toISOString() });
+      item.retryStart = new Date(Math.max(Date.parse(item.start), time + 5_000)).toISOString();
+      saveAndSync();
       return false;
     }
     const authorized = owner === item.owner && reminders === true && Number.isFinite(time)
