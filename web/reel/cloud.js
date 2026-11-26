@@ -162,7 +162,7 @@ export class FirestoreClient {
     let token = null;
     do {
       const { res, json } = await this.call((await this.requests()).list(roomID, collection, token));
-      if (res.status === 404 || res.status === 403) return out;
+      if (res.status === 404) return out;
       if (!res.ok) throw new CloudError(`Couldn't list ${collection} (HTTP ${res.status})`);
       for (const d of (json && json.documents) || []) out.push({ name: d.name, fields: d.fields || {} });
       token = json && json.nextPageToken;
@@ -185,8 +185,10 @@ export class FirestoreClient {
   }
   /** Views, reactions and comments move to the new room (password changed); the old one is deleted. */
   async migrate(oldRoom, newRoom, createdAt, expiresAt, recordingNonce = null) {
-    const source = await this.call((await this.requests()).getRoom(oldRoom)).catch(() => null);
-    const fields = source?.res.ok ? C.documentFields(source.json) : null;
+    const source = await this.call((await this.requests()).getRoom(oldRoom));
+    if (!source.res.ok && source.res.status !== 404)
+      throw new CloudError(`Couldn't read the source comments room (HTTP ${source.res.status})`);
+    const fields = source.res.ok ? C.documentFields(source.json) : null;
     const views = fields ? (Number.isInteger(fields.views) ? fields.views : 0) : null;
     const title = fields?.ownerUid === this.session.uid && typeof fields.titleOverride === "string" && fields.titleOverride.trim() && fields.titleOverride.length <= 500 ? fields.titleOverride : null;
     await this.ensureRoom(newRoom, createdAt, expiresAt, views ?? 0, recordingNonce);
@@ -202,10 +204,13 @@ export class FirestoreClient {
   }
   async deleteRoom(roomID) {
     for (const collection of ["reactions", "comments"]) {
-      for (const d of await this.list(roomID, collection)) await send((await this.requests()).delete(roomID, d.name));
+      for (const d of await this.list(roomID, collection)) {
+        const { res } = await this.call((await this.requests()).delete(roomID, d.name));
+        if (!res.ok && res.status !== 404) throw new CloudError(`Couldn't remove migrated ${collection} (HTTP ${res.status})`);
+      }
     }
     const { res } = await this.call((await this.requests()).delete(roomID));
-    if (!res.ok && res.status !== 404 && res.status !== 403) throw new CloudError(`Couldn't delete comments room (HTTP ${res.status})`);
+    if (!res.ok && res.status !== 404) throw new CloudError(`Couldn't delete comments room (HTTP ${res.status})`);
   }
 }
 

@@ -246,6 +246,53 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
     'Retry copies the remaining comments exactly once.');
   assert.equal(await ownerCloud.ownsRoom(C.room(shareID,pendingKey)),false);
 
+  let migrationKey=partialMigration.share.access.key;
+  const sourceRoom=C.room(shareID,migrationKey);let sourceGets=0,sourceFailureInjected=false;
+  globalThis.fetch=async(input,init)=>{
+    const url=String(input?.url??input);
+    if(init?.method==='GET'&&url.endsWith(`/videos/${sourceRoom}`)&&++sourceGets===2) {
+      sourceFailureInjected=true;return new Response('transient source room failure',{status:503});
+    }
+    return nativeFetch(input,init);
+  };
+  try {
+    await assert.rejects(restartedShare.updateAccess({ownerUserID:ownerID,id,password:'meeting-access-000'}),/source comments room \(HTTP 503\)/);
+  } finally { globalThis.fetch=nativeFetch; }
+  assert.ok(sourceFailureInjected,'The injected source-room failure must reach the migration read after ownership preflight.');
+  let sourceRetry=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  assert.ok(sourceRetry.share.accessUpdate,'A transient source-room read error keeps the access journal pending.');
+  assert.equal(await ownerCloud.ownsRoom(sourceRoom),true,'The source room remains owned and available for retry.');
+  assert.equal((await getDocs(collection(ownerDB,'videos',sourceRoom,'comments'))).size,2,'Source discussion survives the transient read error.');
+  assert.equal((await getDocs(collection(ownerDB,'videos',sourceRoom,'reactions'))).size,1);
+  await restartedShare.updateAccess({ownerUserID:ownerID,id});
+  sourceRetry=await restartedStore.getShareRecord({ownerUserID:ownerID,id});migrationKey=sourceRetry.share.access.key;
+  let retryRoom=C.room(shareID,migrationKey);
+  assert.equal((await getDocs(collection(ownerDB,'videos',retryRoom,'comments'))).size,2,'Retry moves comments after the source read recovers.');
+  assert.equal((await getDocs(collection(ownerDB,'videos',retryRoom,'reactions'))).size,1);
+  assert.equal(await ownerCloud.ownsRoom(sourceRoom),false);
+
+  const deleteSourceRoom=retryRoom;let deleteFailureInjected=false;
+  globalThis.fetch=async(input,init)=>{
+    const url=String(input?.url??input);
+    if(!deleteFailureInjected&&init?.method==='DELETE'&&url.includes(`/videos/${deleteSourceRoom}/reactions/`)) {
+      deleteFailureInjected=true;return new Response('injected child delete failure',{status:500});
+    }
+    return nativeFetch(input,init);
+  };
+  try {
+    await assert.rejects(restartedShare.updateAccess({ownerUserID:ownerID,id,password:'meeting-access-111'}),/remove migrated reactions \(HTTP 500\)/);
+  } finally { globalThis.fetch=nativeFetch; }
+  assert.ok(deleteFailureInjected,'The child document delete must be exercised.');
+  let deleteRetry=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
+  assert.ok(deleteRetry.share.accessUpdate,'A failed child delete keeps the journal pending.');
+  assert.equal(await ownerCloud.ownsRoom(deleteSourceRoom),true,'The source room remains until child cleanup succeeds.');
+  await restartedShare.updateAccess({ownerUserID:ownerID,id});
+  deleteRetry=await restartedStore.getShareRecord({ownerUserID:ownerID,id});migrationKey=deleteRetry.share.access.key;
+  retryRoom=C.room(shareID,migrationKey);
+  assert.equal((await getDocs(collection(ownerDB,'videos',retryRoom,'comments'))).size,2,'Delete retry does not duplicate comments.');
+  assert.equal((await getDocs(collection(ownerDB,'videos',retryRoom,'reactions'))).size,1,'Delete retry does not duplicate reactions.');
+  assert.equal(await ownerCloud.ownsRoom(deleteSourceRoom),false,'Successful retry removes the source room only after all children are deleted.');
+
   const expiryUpdate=await restartedShare.updateAccess({ownerUserID:ownerID,id,expiry:'hour'});
   assert.equal(expiryUpdate.url,result.url);
   afterChange=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
@@ -258,6 +305,7 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   const openShare=await restartedStore.getShareRecord({ownerUserID:ownerID,id});
   assert.equal(openShare.share.access.key,null);assert.equal(openShare.share.access.passwordSalt,null);
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,null,cfg))).ok,true,'Removing the password activates the staged public copy.');
+  assert.equal((await fetch(C.downloadURL(shareID,C.File.video,migrationKey,cfg))).ok,false,'Removing the current password retires its keyed copy.');
   assert.equal((await fetch(C.downloadURL(shareID,C.File.video,pendingKey,cfg))).ok,false,'Removing a password retires its keyed copy.');
   const openMeta=await (await fetch(C.downloadURL(shareID,C.File.meta,null,cfg))).json();
   assert.equal(openMeta.locked,false,'The stable URL now opens without a password.');
@@ -321,7 +369,7 @@ const cfg={...org,storageOrigin:`http://127.0.0.1:${storagePort}`,firestoreOrigi
   console.log(JSON.stringify({result:'PASS',ownerBoundRoom:true,otherOwnerDenied:true,privateLibraryDenied:true,
     passwordDeniedThenAccepted:true,publicMetadataStubOnly:true,publicMediaDenied:true,expiryPublished:true,
     accessPasswordChanged:true,oldAccessRevoked:true,oldKeyAccessCanPersistDuringFailedRevocation:true,expiryUpdated:true,passwordRemoved:true,failureRetrySurvivesRestart:true,
-    partialFirestoreMigrationRetryIsIdempotent:true,
+    partialFirestoreMigrationRetryIsIdempotent:true,sourceReadFailureStaysPending:true,childDeleteFailureStaysPending:true,
     publicToProtected:true,publicAccessRemainsPossibleDuringFailedRevocation:true,videoStreams:probe.streams,viewerPlayed:true,transcriptVisible:true,shareURL:result.url}));
   await context.close();
 } finally {
