@@ -44,11 +44,25 @@ function fixture({ realCoordinator = false, discover, shareMeeting } = {}) {
       refresh: async () => { calls.push('refresh'); }, tick: async () => { calls.push('tick'); },
       cancel: async () => { calls.push('cancel'); }, dispose: async () => { calls.push('dispose'); } }; return coordinator; },
     openExternal: async url => calls.push(url), openProduct: async name => calls.push(name),
-    openRecordings: async owner => calls.push(owner), shareMeeting,
+    openRecordings: async owner => calls.push(owner), openRecording: async file => calls.push(['play', file]), copyText: text => calls.push(['copy', text]), shareMeeting,
     onState: value => snapshots.push(value) });
   return { service, auth, store, coordinator, settings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
     changeOwner(value) { profile = value; notify(); }, status(value) { status = value; statusNotify(value); } };
 }
+test('local playback and transcript copy are restricted to the active recording owner', async () => {
+  const f = fixture(), id = 'a'.repeat(32);
+  f.store.getShareRecord = async request => request.ownerUserID === 'owner-a' && request.id === id ? { path: '/private/meeting.mp4' } : null;
+  f.store.getProcessing = request => request.ownerUserID === 'owner-a' && request.id === id ? { transcriptComplete: true, text: 'Meeting transcript' } : null;
+  await f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' });
+  await f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-a' });
+  assert.deepEqual(f.calls.filter(value => Array.isArray(value)), [['play', '/private/meeting.mp4'], ['copy', 'Meeting transcript']]);
+  await assert.rejects(f.service.action('playRecording', { id, expectedOwnerUserID: 'another-owner' }));
+  await assert.rejects(f.service.action('copyTranscript', { id: '../escape', expectedOwnerUserID: 'owner-a' }));
+  f.changeOwner({ userID: 'owner-b', email: 'b@northwind.example', calendarConnected: true });
+  await assert.rejects(f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' }));
+  await assert.rejects(f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-b' }));
+});
+
 test('calendar remains visible with auto-join off; renderer snapshot omits private transport data', async () => {
   const f = fixture(); await f.service.pulse();
   const state = f.service.state();

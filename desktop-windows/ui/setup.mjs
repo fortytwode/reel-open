@@ -122,6 +122,12 @@ function renderRecordings() {
     const duration=Number.isFinite(recording.durationSeconds)?`${Math.floor(recording.durationSeconds/60)} min`:'';
     left.append(node('div','recording-meta',[formatDate(recording.createdAt),duration].filter(Boolean).join(' · ')));
     if(recording.processing) {
+      const play=node('button','','Play recording');
+      play.type='button'; play.dataset.action='playRecording'; play.dataset.recordingId=recording.id; left.append(play);
+      if(recording.processing.transcriptReady) {
+        const transcript=node('button','','Copy transcript');
+        transcript.type='button'; transcript.dataset.action='copyTranscript'; transcript.dataset.recordingId=recording.id; left.append(transcript);
+      }
       const labels={pending:'Waiting to process',transcribing:'Transcribing',summarizing:'Creating notes',delivering:'Delivering notes',completed:'Notes delivered',failed:'Processing failed'};
       left.append(node('div','recording-meta', recording.processing.noSpeech ? 'No speech detected' : (labels[recording.processing.phase] ?? 'Processing')));
       if(recording.processing.error) left.append(node('div','recording-meta',recording.processing.error));
@@ -235,6 +241,7 @@ document.addEventListener('click', event=>{
   const target=event.target.closest('[data-action]'); if(!target || target.disabled) return;
   const action=target.dataset.action;
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if(action==='playRecording'||action==='copyTranscript') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='shareRecording') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID,...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{})}); return; }
   perform(action);
 });

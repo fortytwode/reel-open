@@ -44,7 +44,7 @@ export function desktopBrowserAppArguments(action, org) {
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,copyText,processor,shareMeeting,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
@@ -204,6 +204,20 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(payload?.expectedOwnerUserID);
         if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');
         void processor?.process({ownerUserID:id,id:payload.id}).catch(()=>{});
+      } else if(name==='playRecording') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof openRecording !== 'function') throw Error('Recording is unavailable.');
+        const recording=await store.getShareRecord({ownerUserID,id:payload.id});
+        requireOwner(ownerUserID);
+        if (!recording?.path) throw Error('Recording is unavailable.');
+        await openRecording(recording.path);
+      } else if(name==='copyTranscript') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof copyText !== 'function') throw Error('Transcript is unavailable.');
+        const processing=store.getProcessing({ownerUserID,id:payload.id});
+        if (processing?.transcriptComplete !== true || !processing.text?.trim()) throw Error('Transcript is unavailable.');
+        requireOwner(ownerUserID);
+        copyText(processing.text);
       } else if(name==='shareRecording') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (typeof payload?.id !== 'string' || !shareMeeting) throw Error('Meeting sharing is unavailable.');

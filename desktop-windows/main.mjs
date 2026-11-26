@@ -166,6 +166,8 @@ async function run() {
   service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,discover:discoverGoogleMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
+    openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },
+    copyText:value=>clipboard.writeText(value),
     openRecordings:async owner=>{
       const directory=path.join(storageRoot,createHash('sha256').update(owner).digest('hex'));
       await mkdir(directory,{recursive:true});const error=await shell.openPath(directory);
