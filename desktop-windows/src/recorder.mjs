@@ -118,7 +118,9 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
           queue_overflow: 'Recording storage cannot keep up.', encoder_failed: 'The recording encoder failed.',
           capture_failed: 'The meeting window could not be captured.',
           microphone_unavailable: 'The microphone could not be captured. Check Windows microphone permissions or turn off Include my microphone.' };
-        fail(capture, Error(reasons[message.reason] ?? 'The meeting recording failed.'));
+        const error = Error(reasons[message.reason] ?? 'The meeting recording failed.');
+        if (message.reason === 'microphone_unavailable') error.code = message.reason;
+        fail(capture, error);
       } else throw Error('Unexpected capture status');
       return { ok: true };
     } catch (error) { fail(capture, error); throw error; }

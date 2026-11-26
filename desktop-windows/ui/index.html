@@ -29,8 +29,24 @@
         <div class="step-copy"><p class="eyebrow" id="stepEyebrow">STEP 1</p><h2 id="stepTitle">Sign in to Reel</h2><p id="stepDescription">Use your Reel account to keep meetings and recordings tied to you.</p></div>
         <div id="stepContent"></div>
       </section>
-      <p class="footnote">Your meeting capture stays on this computer. Reel never turns on your microphone or camera.</p>
+      <p class="footnote">Your meeting capture stays on this computer. Reel keeps your camera off. The microphone is optional when you start a meeting yourself.</p>
     </section>
+    <details id="manualMeeting" class="manual-meeting hidden">
+      <summary>Use a meeting link</summary>
+      <form id="meetingLinkForm">
+        <label class="meeting-link-label" for="meetingLink">Direct Google Meet, Zoom or Teams link</label>
+        <input id="meetingLink" type="url" maxlength="8192" required autocomplete="off" spellcheck="false">
+        <label class="setting"><input id="meetingLinkConsent" type="checkbox" required> <span>Participants have agreed to recording the meeting window and all computer sound</span></label>
+        <label class="setting"><input id="meetingLinkMicrophone" type="checkbox"> <span>Include my microphone</span></label>
+        <p class="meeting-meta">The recap goes only to your signed-in account.</p>
+        <button id="joinMeetingLink" class="outline" type="submit">Join &amp; record</button>
+      </form>
+    </details>
+    <div id="manualMeetingStatus" class="manual-meeting hidden">
+      <p id="manualMeetingMessage" class="meeting-meta" role="status"></p>
+      <button id="manualCancel" class="outline hidden" type="button" data-action="cancelJoin">Cancel join</button>
+      <button id="manualStop" class="danger hidden" type="button" data-action="stopRecording">Stop and save recording</button>
+    </div>
     <section id="dashboard" class="dashboard hidden">
       <div class="dashboard-heading"><div><p class="eyebrow">YOUR MEETING COMPANION</p><h1>You're all set.</h1><p id="welcome" class="lede"></p></div><button class="outline" type="button" data-action="refresh">Refresh calendar</button></div>
       <div class="grid">
@@ -40,9 +56,9 @@
         <section class="card status-card"><p class="eyebrow">REEL STATUS</p><h2 id="statusTitle">Waiting for your next meeting</h2><p id="statusMessage" class="muted"></p><button id="cancelJoinButton" class="outline hidden" type="button" data-action="cancelJoin">Cancel join</button><button id="stopButton" class="danger hidden" type="button" data-action="stopRecording">Stop and save recording</button></section>
       </div>
       <section class="card meetings-card"><div class="card-heading"><div><p class="eyebrow">UP NEXT</p><h2>Upcoming meetings</h2></div></div><div id="meetingsList" class="meeting-list"></div></section>
-      <section class="card recordings-card"><div class="card-heading"><div><p class="eyebrow">RECENT</p><h2>Latest recordings</h2></div><button class="text-button" type="button" data-action="openRecordings">Open recordings folder ↗</button></div><p class="share-disclosure">Anyone with the link can watch the shared video. Choose “Share video and transcript” to include the finished transcript. The attendee list and meeting notes stay private.</p><div id="recordingsList" class="recording-list"></div></section>
-      <div class="account-row"><span id="accountLabel"></span><button class="text-button" type="button" data-action="signOut">Sign out</button><button class="text-button" type="button" data-action="disconnectCalendar">Disconnect calendar</button></div>
     </section>
+      <section id="recordingsCard" class="card recordings-card hidden"><div class="card-heading"><div><p class="eyebrow">RECENT</p><h2>Latest recordings</h2></div><button class="text-button" type="button" data-action="openRecordings">Open recordings folder ↗</button></div><p class="share-disclosure">Anyone with the link can watch the shared video. Choose “Share video and transcript” to include the finished transcript. The attendee list and meeting notes stay private.</p><div id="recordingsList" class="recording-list"></div></section>
+      <div id="accountRow" class="account-row hidden"><span id="accountLabel"></span><button class="text-button" type="button" data-action="signOut">Sign out</button><button class="text-button" id="disconnectCalendarButton" type="button" data-action="disconnectCalendar">Disconnect calendar</button></div>
   </main>
 </body>
 </html>

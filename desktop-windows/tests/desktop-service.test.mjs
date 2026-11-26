@@ -285,7 +285,7 @@ test('a manual join accepts only an owner and opaque calendar ID and rechecks cl
   await service.pulse();
   assert.equal(service.state().meetings[0].id, meeting.id);
   const selection = { id: meeting.id, expectedOwnerUserID: profile.userID };
-  await assert.rejects(service.action('joinMeeting', { ...selection, url: meeting.joinURL }), /Choose a meeting/);
+  await assert.rejects(service.action('joinMeeting', { ...selection, url: meeting.joinURL }), /Invalid meeting request/);
   await assert.rejects(service.action('joinMeeting', { id: meeting.id }), /account changed/);
   cloudOwned = true;
   await assert.rejects(service.action('joinMeeting', selection), /no longer available/);
@@ -295,5 +295,63 @@ test('a manual join accepts only an owner and opaque calendar ID and rechecks cl
   assert.equal(joins.length, 1);
   assert.equal(joins[0].url, meeting.joinURL);
   assert.equal(service.state().status.phase, 'failed');
+  await service.dispose();
+});
+
+test('pasted meeting links can record without a calendar, recertify cloud routing, and never carry invitees', async () => {
+  const joins = [], capture = [], saved = [];
+  let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: false };
+  const authListeners = [];
+  let cloudOwned = true, routingGate;
+  const orgMeet = 'https://meet.google.com/aaa-bbbb-ccc';
+  const instant = '2026-11-06T14:50:00Z';
+  const auth = { getProfile: () => profile, getIdToken: async () => 'fixture-token',
+    onStateChange: fn => { authListeners.push(fn); return () => {}; }, cancelSignIn() {} };
+  const service = createDesktopService({ org, auth,
+    store: { getSettings: owner => initial(owner), list: () => [], hasCompleted: () => false,
+      markCompleted: data => { saved.push(data); } },
+    discover: async () => assert.fail('A pasted link needs no local calendar connection'),
+    fetch: async (_, options) => {
+      assert.equal(options.signal instanceof AbortSignal, true);
+      if (routingGate) await routingGate.promise;
+      return Response.json({ events: [], cloud_providers: [], cloud_events: cloudOwned
+        ? [{ join_url: orgMeet + '?authuser=1', start: '2026-11-06T14:40:00Z', end: '2026-11-06T15:00:00Z' }] : [] });
+    },
+    createCoordinator: options => createMeetingCoordinator({ ...options,
+      native: { join: async args => { joins.push(args); return { ok: true, state: 'joined', sessionId: 'a'.repeat(32), hwnd: '40', pid: 123 }; },
+        inspect: async () => ({ ok: true, state: 'in_call' }), close: async () => ({ ok: true, state: 'closed' }) },
+      recorder: { start: async args => { capture.push(args); return {}; },
+        stop: async () => ({ path: 'local-recording.mp4', playable: true }) },
+      now: () => new Date(instant) })
+  });
+  const request = { url: 'https://meet.google.com/meet/aaa-bbbb-ccc/', expectedOwnerUserID: 'owner-a', participantsConfirmed: true };
+  await assert.rejects(service.action('joinMeetingLink', { ...request, participantsConfirmed: false }), /confirm/);
+  await assert.rejects(service.action('joinMeetingLink', { ...request, url: 'https://example.com/meet' }), /Use a direct/);
+  await assert.rejects(service.action('joinMeetingLink', request), /unavailable/);
+  assert.deepEqual(joins, []);
+
+  cloudOwned = false;
+  await service.action('joinMeetingLink', { ...request, includeMicrophone: true });
+  assert.equal(joins.length, 1);
+  assert.equal(capture[0].ownerUserID, 'owner-a');
+  assert.equal(capture[0].microphone, true);
+  assert.equal(capture[0].meeting.calendar, null);
+  assert.deepEqual(capture[0].meeting.attendeeEmails, []);
+  assert.equal(JSON.stringify(service.state()).includes(orgMeet), false);
+  await service.pulse();
+  assert.equal(service.state().status.phase, 'capturing');
+  await service.action('stopRecording');
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].ownerUserID, 'owner-a');
+
+  routingGate = deferred();
+  const joining = service.action('joinMeetingLink', request);
+  const rejected = assert.rejects(joining, /account or recording settings changed/);
+  await settle();
+  profile = { ...profile, userID: 'owner-b', email: 'b@northwind.example' };
+  for (const listener of authListeners) listener();
+  routingGate.resolve();
+  await rejected;
+  assert.equal(joins.length, 1);
   await service.dispose();
 });

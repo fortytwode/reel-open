@@ -39,6 +39,15 @@ export function parseMeetingURL(value) {
   return { url: parsed.toString(), platform };
 }
 
+// Provider aliases and query credentials do not change the room a pasted link opens.
+export function meetingRoomIdentity(link) {
+  const url = new URL(link.url);
+  const path = url.pathname.replace(/\/$/, '');
+  if (link.platform === 'google_meet') return url.hostname + path.replace(/^\/meet\//, '/');
+  if (link.platform === 'zoom') return url.hostname + path.replace(/^\/wc\/([0-9]+)\/join$/, '/j/$1');
+  return url.hostname + path;
+}
+
 // Owner-bound policy is deliberately refreshed independently of cached Google data.
 const routingKey = (url, start) => {
   const link = parseMeetingURL(url);
@@ -50,14 +59,15 @@ const routingKey = (url, start) => {
 };
 
 /** Main-process only: never let an unavailable cloud policy fall back to local Meet or Teams. */
-export async function routeGoogleMeetings({ auth, snapshot, routingURL, fetch: fetcher = globalThis.fetch, signal } = {}) {
+export async function routeGoogleMeetings({ auth, snapshot, routingURL, fetch: fetcher = globalThis.fetch, signal, pastedLink, now = new Date() } = {}) {
   const owner = auth.getProfile();
   const controller = new AbortController();
   const guard = () => {
     if (signal?.aborted) throw cancelled();
     const current = auth.getProfile();
     if (!owner?.userID || snapshot.ownerUserID !== owner.userID || current?.userID !== owner.userID
-      || current?.email !== owner.email || current?.calendarConnected !== true)
+      || current?.email !== owner.email || current?.calendarConnected !== owner.calendarConnected
+      || (!pastedLink && current?.calendarConnected !== true))
       throw failure('owner', 'The signed-in account changed. Refresh Google Calendar again.');
   };
   const abort = () => controller.abort();
@@ -87,17 +97,26 @@ export async function routeGoogleMeetings({ auth, snapshot, routingURL, fetch: f
       || !Array.isArray(body.cloud_providers) || body.cloud_providers.length > 20
       || body.cloud_providers.some(provider => !validText(provider, 100)))) throw unavailable();
     const owned = new Set();
+    const pastedRoom = pastedLink && meetingRoomIdentity(pastedLink);
+    let pastedLinkAllowed = !legacy || (body.desktop_claims !== true
+      && body.events.every(event => event && (event.capture_provider === undefined || event.capture_provider === 'desktop')));
+    if (pastedRoom && !Number.isFinite(now.getTime())) throw unavailable();
     for (const event of legacy ? [] : body.cloud_events) {
       const key = routingKey(event?.join_url, event?.start);
       if (!key) throw unavailable();
       owned.add(key);
+      if (pastedRoom && meetingRoomIdentity(parseMeetingURL(event.join_url)) === pastedRoom) {
+        const start = Date.parse(event.start), end = Date.parse(event.end);
+        if (!Number.isFinite(end) || end <= start || (start <= now.getTime() && now.getTime() < end))
+          pastedLinkAllowed = false;
+      }
     }
     return { ...snapshot, meetings: snapshot.meetings.filter(meeting => !owned.has(routingKey(meeting.joinURL, meeting.start))),
-      routingUnavailable: false };
+      routingUnavailable: false, ...(pastedRoom ? { pastedLinkAllowed } : {}) };
   } catch {
     guard();
     return { ...snapshot, meetings: snapshot.meetings.filter(meeting => !['google_meet', 'teams'].includes(parseMeetingURL(meeting.joinURL)?.platform)),
-      routingUnavailable: true };
+      routingUnavailable: true, ...(pastedLink ? { pastedLinkAllowed: pastedLink.platform === 'zoom' } : {}) };
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);

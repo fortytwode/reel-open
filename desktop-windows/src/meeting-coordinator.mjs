@@ -1,7 +1,8 @@
-import { createHash } from 'node:crypto';
-import { parseMeetingURL } from './google-calendar.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { meetingRoomIdentity, parseMeetingURL } from './google-calendar.mjs';
 
 const MAX_LATENESS_MS = 5 * 60_000;
+const PASTED_LINK_LIMIT_MS = 3 * 60 * 60_000;
 const RETRY_DELAY_MS = 30_000;
 const MAX_ATTEMPTS = 3;
 const RETRYABLE = new Set(['busy', 'timed_out', 'chrome_unavailable', 'dedicated_window_unavailable']);
@@ -24,7 +25,7 @@ const entryKey = (ownerUserID, occurrenceKey) => `${Buffer.byteLength(ownerUserI
  * - calendar: discover({auth,selection,now,signal}) -> owner-bound snapshot
  * - native: join({url,consentConfirmed:true,signal}), inspect(sessionId), close(sessionId)
  *   (join bridge must map AbortSignal to the native cancel operation)
- * - recorder: start({hwnd,pid,meeting,ownerUserID,systemAudio:true,microphone:false,signal})
+ * - recorder: start({hwnd,pid,meeting,ownerUserID,systemAudio:true,microphone,signal})
  *   -> opaque handle; stop(handle) -> {path,playable:true}. The adapter must
  *   release tracks immediately on abort even if start has not resolved.
  * - getSettings() -> {ownerUserID,autoJoin,participantConsent,
@@ -32,9 +33,10 @@ const entryKey = (ownerUserID, occurrenceKey) => `${Buffer.byteLength(ownerUserI
  * - hasCompleted({ownerUserID,occurrenceKey}) and
  *   markCompleted({ownerUserID,occurrenceKey,recording}) persistence callbacks.
  *
- * Only calendar discovery supplies meeting URLs and only native join supplies
- * the HWND. The public state never contains either. `capturing` follows a
- * successful recorder start; `completed` follows stop/save and persistence.
+ * Scheduled joins consume calendar URLs. Pasted links require explicit consent
+ * and an owner-bound routing check. Only native join supplies the HWND. The
+ * public state omits URLs and HWNDs. `capturing` follows recorder startup and
+ * `completed` follows persistence of the saved recording.
  */
 export function createMeetingCoordinator({ auth, calendar, native, recorder, getSettings,
   hasCompleted, markCompleted, now = () => new Date() } = {}) {
@@ -53,6 +55,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
   let stopPromise = null;
   let tickPromise = null;
   let manualJoinPromise = null;
+  let pastedMeeting = null;
   let generation = 0;
   let refreshSequence = 0;
   let disposed = false;
@@ -82,13 +85,13 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
       participantConsent: settings.participantConsent, systemAudioConsent: settings.systemAudioConsent,
       selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)].sort() } });
   }
-  function eligibility() {
+  function eligibility(pasted = false) {
     let profile, settings;
     try { profile = auth.getProfile(); settings = getSettings(); } catch { return null; }
     const key = settingsKey(settings);
-    if (!profile?.userID || !profile.email || profile.calendarConnected !== true || !key
-      || settings.ownerUserID !== profile.userID
-      || !settings.participantConsent || !settings.systemAudioConsent) return null;
+    if (!profile?.userID || !profile.email || !key || settings.ownerUserID !== profile.userID) return null;
+    if (!pasted && (profile.calendarConnected !== true || !settings.participantConsent || !settings.systemAudioConsent))
+      return null;
     return { ownerUserID: profile.userID, email: profile.email.toLowerCase(), settings, key };
   }
   function occurrence(meeting) {
@@ -102,12 +105,15 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     const key = createHash('sha256').update(`${url.hostname}${url.pathname}:${start / 1000}`).digest('hex');
     return { meeting, link, key, start, end };
   }
-  function stillEligible(owner, key, occurrenceKey = null) {
-    const current = eligibility();
+  function currentOccurrence(key, pasted) {
+    if (pasted) return snapshot?.pasted?.key === key ? snapshot.pasted : null;
+    return snapshot?.meetings.map(occurrence).find(item => item?.key === key);
+  }
+  function stillEligible(owner, key, occurrenceKey, pasted) {
+    const current = eligibility(pasted);
     if (!current || current.ownerUserID !== owner || current.key !== key) return false;
     if (!snapshot || snapshot.ownerUserID !== owner || snapshot.ownerEmail !== current.email || snapshot.settingsKey !== key) return false;
-    if (!occurrenceKey) return true;
-    const meeting = snapshot.meetings.map(occurrence).find(item => item?.key === occurrenceKey);
+    const meeting = currentOccurrence(occurrenceKey, pasted);
     return !!meeting && clock() < meeting.end;
   }
   async function closeNative(sessionId) {
@@ -131,6 +137,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     refreshController?.abort();
     joinController?.abort();
     snapshot = null;
+    pastedMeeting = null;
     if (active) return stopActive(reason);
     if (!joinController) emit({ phase: 'idle', ownerUserID: null, meetingId: null, reason });
     return Promise.resolve();
@@ -165,18 +172,22 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
         attempts: entry.attempts, reason });
     })();
     try { await stopPromise; }
-    finally { active = null; stopPromise = null; }
+    finally {
+      active = null;
+      stopPromise = null;
+      if (capture.pasted) pastedMeeting = null;
+    }
   }
 
   async function refresh({ manual = false } = {}) {
     if (disposed) return;
-    let eligible = eligibility();
+    let eligible = eligibility(Boolean(pastedMeeting));
     if (!eligible) { await invalidate('not_enabled'); return; }
     if (!eligible.settings.autoJoin && !manual && !active && !joinController && !manualJoinPromise) return;
     if (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID || snapshot.ownerEmail !== eligible.email
       || snapshot.settingsKey !== eligible.key)) {
       await invalidate('settings_changed');
-      eligible = eligibility();
+      eligible = eligibility(Boolean(pastedMeeting));
       if (!eligible) return;
     }
     const refreshVersion = ++refreshSequence;
@@ -185,17 +196,20 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     const controller = new AbortController();
     refreshController = controller;
     const { ownerUserID, email, settings, key } = eligible;
+    const pasted = pastedMeeting;
     let result;
-    try { result = await calendar.discover({ auth, selection: settings.selection, now: new Date(clock()), signal: controller.signal }); }
+    try { result = await calendar.discover({ auth, selection: settings.selection, now: new Date(clock()),
+      signal: controller.signal, ...(pasted ? { pastedLink: pasted.link } : {}) }); }
     catch {
-      if (refreshController !== controller || disposed) return;
+      if (refreshController !== controller || disposed || controller.signal.aborted
+        || refreshVersion !== refreshSequence || cancellationVersion !== generation) return;
       await invalidate('calendar_unavailable');
       emit({ phase: active ? 'saving' : 'calendar_unavailable', ownerUserID, reason: 'calendar_unavailable' });
       throw new Error('Could not refresh eligible calendar meetings.');
     }
     if (refreshController !== controller || disposed || controller.signal.aborted
       || refreshVersion !== refreshSequence || cancellationVersion !== generation) return;
-    const current = eligibility();
+    const current = eligibility(Boolean(pasted));
     if (!current || current.ownerUserID !== ownerUserID || current.email !== email || current.key !== key
       || result?.ownerUserID !== ownerUserID || !Array.isArray(result.meetings)) {
       await invalidate('account_changed');
@@ -204,16 +218,17 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     const meetings = result.meetings.filter(item => occurrence(item));
     const failedKey = ['failed', 'save_failed'].includes(state.phase) && state.ownerUserID === ownerUserID
       ? occurrence(snapshot?.meetings.find(item => item.id === state.meetingId))?.key : null;
-    snapshot = { ownerUserID, ownerEmail: email, settingsKey: key, meetings };
+    snapshot = { ownerUserID, ownerEmail: email, settingsKey: key, meetings,
+      pasted: pasted && pastedMeeting === pasted && result.pastedLinkAllowed === true ? pasted : null };
     if (active) {
-      const current = meetings.map(occurrence).find(item => item?.key === active.key);
+      const current = currentOccurrence(active.key, active.pasted);
       if (!current) await stopActive('calendar_ineligible');
       else {
         active.end = current.end;
         if (clock() >= active.end) await stopActive('meeting_deadline');
       }
     }
-    if (joinController && !meetings.some(item => occurrence(item)?.key === joinController.occurrenceKey)) joinController.abort();
+    if (joinController && !currentOccurrence(joinController.occurrenceKey, joinController.pasted)) joinController.abort();
     // A refresh must not advertise readiness for an occurrence that already
     // failed and will not be retried. Keep its actionable status until it ends
     // or disappears; tick can still start a different eligible meeting.
@@ -223,14 +238,15 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
       meetingId: null, attempts: 0, reason: null });
   }
 
-  async function attempt(item, eligible, manual = false) {
-    const { meeting, link, key, start, end } = item;
+  async function attempt(item, eligible, { manual = false, microphone = false } = {}) {
+    const { meeting, link, key, pasted, end } = item;
     const scopedKey = entryKey(eligible.ownerUserID, key);
     const entry = entries.get(scopedKey) ?? { attempts: 0, retryAfter: 0, terminal: false, completed: false };
     entry.attempts++;
     entries.set(scopedKey, entry);
     const controller = new AbortController();
     controller.occurrenceKey = key;
+    controller.pasted = pasted;
     joinController = controller;
     const version = generation;
     emit({ phase: 'joining', ownerUserID: eligible.ownerUserID, meetingId: meeting.id, attempts: entry.attempts, reason: null });
@@ -246,7 +262,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
       }
       const sessionId = result?.sessionId;
       if (SESSION_ID.test(sessionId ?? '')) nativeSessionId = sessionId;
-      if (controller.signal.aborted || generation !== version || !stillEligible(eligible.ownerUserID, eligible.key, key)) {
+      if (controller.signal.aborted || generation !== version || !stillEligible(eligible.ownerUserID, eligible.key, key, pasted)) {
         await closeNative(nativeSessionId);
         if (state.phase === 'joining' && state.ownerUserID === eligible.ownerUserID)
           emit({ phase: 'cancelled', reason: 'eligibility_changed' });
@@ -264,7 +280,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
         return;
       }
       const startOperation = Promise.resolve().then(() => recorder.start({ hwnd: String(result.hwnd), pid: result.pid, meeting,
-        ownerUserID: eligible.ownerUserID, systemAudio: true, microphone: false, signal: controller.signal }));
+        ownerUserID: eligible.ownerUserID, systemAudio: true, microphone: manual && microphone, signal: controller.signal }));
       let abortListener;
       const aborted = new Promise(resolve => {
         abortListener = () => resolve({ cancelled: true });
@@ -297,7 +313,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
       if (outcome.cause) throw outcome.cause;
       captureHandle = outcome.handle;
       if (!captureHandle) throw Error('No capture handle');
-      if (controller.signal.aborted || generation !== version || !stillEligible(eligible.ownerUserID, eligible.key, key)) {
+      if (controller.signal.aborted || generation !== version || !stillEligible(eligible.ownerUserID, eligible.key, key, pasted)) {
         try {
           const recording = await recorder.stop(captureHandle);
           if (recording?.playable === true && typeof recording.path === 'string' && recording.path)
@@ -309,16 +325,20 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
           emit({ phase: 'cancelled', reason: 'eligibility_changed' });
         return;
       }
-      active = { handle: captureHandle, sessionId: nativeSessionId, ownerUserID: eligible.ownerUserID, key, meeting, end };
+      active = { handle: captureHandle, sessionId: nativeSessionId, ownerUserID: eligible.ownerUserID, key, meeting, end, pasted };
       emit({ phase: 'capturing', reason: null });
-    } catch {
+    } catch (error) {
       if (captureHandle) { try { await recorder.stop(captureHandle); } catch { /* no completion claim */ } }
       await closeNative(nativeSessionId);
       if (controller.signal.aborted || generation !== version) {
         if (state.phase === 'joining' && state.ownerUserID === eligible.ownerUserID)
           emit({ phase: 'cancelled', reason: 'eligibility_changed' });
       }
-      else { entry.terminal = true; emit({ phase: 'failed', reason: 'join_or_capture_failed' }); }
+      else {
+        entry.terminal = true;
+        const reason = error?.code === 'microphone_unavailable' ? error.code : 'join_or_capture_failed';
+        emit({ phase: 'failed', reason });
+      }
     } finally {
       if (joinController === controller) joinController = null;
     }
@@ -336,19 +356,21 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
       return;
     }
     if (disposed) return;
-    const eligible = eligibility();
+    const eligible = eligibility(Boolean(pastedMeeting));
     if (!eligible || (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID
       || snapshot.ownerEmail !== eligible.email || snapshot.settingsKey !== eligible.key))) {
       await invalidate('eligibility_changed'); return;
     }
     if (active) {
-      if (!snapshot || !snapshot.meetings.some(item => occurrence(item)?.key === active.key)) {
+      if (!currentOccurrence(active.key, active.pasted)) {
         await stopActive('calendar_ineligible'); return;
       }
       if (clock() >= active.end) { await stopActive('meeting_deadline'); return; }
+      const capture = active;
       let inspected;
-      try { inspected = await native.inspect(active.sessionId); } catch { inspected = null; }
-      if (!stillEligible(active.ownerUserID, snapshot.settingsKey, active.key)
+      try { inspected = await native.inspect(capture.sessionId); } catch { inspected = null; }
+      if (active !== capture || stopPromise) return;
+      if (!stillEligible(capture.ownerUserID, snapshot?.settingsKey, capture.key, capture.pasted)
         || inspected?.ok !== true || inspected.state !== 'in_call')
         await stopActive(inspected?.state === 'left' ? 'meeting_left' : 'meeting_uncertain');
       return;
@@ -378,27 +400,56 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     tickPromise = tickImpl();
     return tickPromise.finally(() => { tickPromise = null; });
   }
-  async function joinMeeting({ meetingId, ownerUserID }) {
-    const eligible = eligibility();
-    if (!eligible || eligible.ownerUserID !== ownerUserID) throw Error('Connect your calendar and confirm recording permissions before joining.');
+  async function joinMeeting({ meetingId, ownerUserID, url, participantsConfirmed, microphone = false }) {
+    const isPasted = url !== undefined;
+    const eligible = eligibility(isPasted);
+    if (!eligible || eligible.ownerUserID !== ownerUserID)
+      throw Error(isPasted ? 'Sign in to record a meeting from a link.' : 'Connect your calendar and confirm recording permissions before joining.');
     if (disposed || active || joinController || manualJoinPromise || stopPromise || unresolvedSessions.size)
       throw Error('Finish the current meeting action before joining another meeting.');
+    if (isPasted) {
+      if (participantsConfirmed !== true) throw Error('Confirm that participants agreed to record this meeting.');
+      const link = parseMeetingURL(typeof url === 'string' ? url.trim() : url);
+      if (!link) throw Error('Use a direct Google Meet, Zoom or Teams meeting link.');
+      const instant = clock();
+      pastedMeeting = { ...occurrence({ id: randomUUID(), calendarID: 'manual', title: 'Meeting',
+        start: new Date(instant).toISOString(), end: new Date(instant + PASTED_LINK_LIMIT_MS).toISOString(),
+        joinURL: link.url, platform: link.platform, attendeeEmails: [], calendar: null }), pasted: true,
+        ownerUserID: eligible.ownerUserID, ownerEmail: eligible.email };
+    }
     const version = generation;
     const previous = snapshot;
     const operation = (async () => {
       // Recheck the selected calendar and cloud ownership before opening Chrome.
       await refresh({ manual: true });
       if (generation !== version) throw Error('Your account or recording settings changed. Refresh and try again.');
-      const item = snapshot?.meetings.map(occurrence).find(candidate => candidate?.meeting.id === meetingId);
-      if (snapshot === previous || !item || !stillEligible(ownerUserID, eligible.key, item.key))
+      if (snapshot === previous) throw Error('Could not verify meeting availability. Refresh and try again.');
+      let item;
+      if (isPasted) {
+        item = snapshot?.pasted;
+        if (!item) throw Error('This meeting link is unavailable for local recording. Check Reel Notetaker or try again.');
+        const room = meetingRoomIdentity(item.link), instant = clock();
+        const listed = snapshot.meetings.map(occurrence).filter(candidate => candidate
+          && candidate.start <= instant && instant < candidate.end && meetingRoomIdentity(candidate.link) === room);
+        if (listed.length === 1) {
+          // Both entry points identify one calendar occurrence. A pasted link still delivers only to its owner.
+          item = { ...item, key: listed[0].key, end: listed[0].end };
+          pastedMeeting = item;
+          snapshot.pasted = item;
+        }
+      } else item = snapshot?.meetings.map(occurrence).find(candidate => candidate?.meeting.id === meetingId);
+      if (!item || !stillEligible(ownerUserID, eligible.key, item.key, item.pasted))
         throw Error('This meeting is no longer available for local recording. Refresh your meetings.');
       if (hasCompleted({ ownerUserID, occurrenceKey: item.key }) !== false)
         throw Error('This meeting has already been recorded.');
-      await attempt(item, eligible, true);
+      await attempt(item, eligible, { manual: true, microphone: microphone === true });
     })();
     manualJoinPromise = operation;
     try { await operation; }
-    finally { manualJoinPromise = null; }
+    finally {
+      manualJoinPromise = null;
+      if (!active?.pasted) pastedMeeting = null;
+    }
   }
   async function cancel() {
     await invalidate('cancelled');
@@ -417,10 +468,12 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     return () => listeners.delete(listener);
   }
   const unsubscribe = auth.onStateChange(() => {
-    const eligible = eligibility();
-    if (!eligible || (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID
-      || snapshot.ownerEmail !== eligible.email || snapshot.settingsKey !== eligible.key)))
+    const eligible = eligibility(Boolean(pastedMeeting));
+    if (!eligible || (pastedMeeting && (pastedMeeting.ownerUserID !== eligible.ownerUserID || pastedMeeting.ownerEmail !== eligible.email))
+      || (snapshot && (snapshot.ownerUserID !== eligible.ownerUserID
+        || snapshot.ownerEmail !== eligible.email || snapshot.settingsKey !== eligible.key))) {
       void invalidate('account_changed');
+    }
   });
   async function dispose() {
     disposed = true;

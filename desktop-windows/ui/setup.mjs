@@ -9,6 +9,7 @@ let renderGeneration = 0;
 let currentOwner = null;
 let pendingSignIn = null;
 let pendingJoin = false;
+let microphoneMeetingId = null;
 let actionError = null;
 
 function node(tag, className, text) {
@@ -74,7 +75,7 @@ function consentControls(settings, dashboard) {
   const system=node('label','setting');
   const sbox=node('input'); sbox.type='checkbox'; sbox.dataset.setting='systemAudioConsent'; sbox.checked=settings.systemAudioConsent;
   const stext=node('span'); stext.append(node('strong','','Record meeting window video and all computer sound'));
-  stext.append(node('small','','Reel captures the meeting window and all sound playing on this computer. Microphone and camera stay off. Recordings are saved locally and are not shared automatically.'));
+  stext.append(node('small','','Reel captures the meeting window and all sound playing on this computer. The microphone is optional when you start a meeting yourself. The camera stays off. Recordings are saved locally and are not shared automatically.'));
   system.append(sbox,stext); wrap.append(system);
   if (dashboard) {
     const divider=node('div','divider'); wrap.append(divider);
@@ -99,7 +100,6 @@ function calendarCheckbox(label, checked, value) {
 function renderDashboard() {
   byId('setupView').classList.add('hidden'); byId('dashboard').classList.remove('hidden'); byId('settingsShortcut').classList.remove('hidden');
   byId('welcome').textContent = snapshot.profile?.displayName ? `Signed in as ${snapshot.profile.displayName}.` : snapshot.profile?.email ?? '';
-  byId('accountLabel').textContent = snapshot.profile?.email ?? '';
   const settings=byId('settingsContent'); clear(settings); settings.append(consentControls(currentSettings(),true));
   const phase=snapshot.status?.phase ?? 'idle'; byId('statusTitle').textContent=phaseLabel(phase);
   byId('statusMessage').textContent=snapshot.status?.message ?? (snapshot.profile?.calendarConnected?'Reel is checking your calendar.':'Connect a calendar to see upcoming meetings.');
@@ -107,14 +107,17 @@ function renderDashboard() {
   byId('stopButton').classList.toggle('hidden',phase!=='capturing');
   byId('stopButton').disabled = phase !== 'capturing';
   byId('stopButton').textContent = phase === 'saving' ? 'Saving recording…' : 'Stop and save recording';
-  renderMeetings(); renderRecordings();
+  renderMeetings();
 }
 function phaseLabel(phase) { return ({capturing:'Recording your meeting',cancelled:'Meeting join cancelled',saving:'Saving your recording',close_required:'Close the meeting window manually to continue',completed:'Recording saved',joining:'Joining a meeting',scheduled:'Ready for your next meeting',calendar_unavailable:'Calendar needs attention',save_failed:'Could not save recording',failed:'Meeting could not start',retry_wait:'Retrying meeting connection',idle:'Waiting for your next meeting'})[phase] ?? 'Reel status'; }
 function formatDate(value) { const d=new Date(value); return Number.isNaN(d.getTime())?escText(value):new Intl.DateTimeFormat(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}).format(d); }
+function joinBusy() {
+  return pendingJoin || saving || ['joining', 'capturing', 'saving', 'close_required', 'retry_wait'].includes(snapshot?.status?.phase);
+}
 function renderMeetings() {
   const list=byId('meetingsList'); clear(list); const meetings=snapshot.meetings ?? [];
   if (!meetings.length) { list.append(node('p','empty','No upcoming meetings found.')); return; }
-  const busy = pendingJoin || ['joining', 'capturing', 'saving', 'close_required', 'retry_wait'].includes(snapshot.status?.phase);
+  const busy = joinBusy();
   for (const meeting of meetings) {
     const row = node('div', 'meeting-row');
     const details = node('div');
@@ -123,8 +126,17 @@ function renderMeetings() {
     const actions = node('div', 'meeting-actions');
     const join = button('Join & record', 'joinMeeting', false);
     join.dataset.meetingId = meeting.id;
-    join.disabled = busy || saving;
-    actions.append(node('div', 'meeting-time', formatDate(meeting.start)), join);
+    join.disabled = busy;
+    join.setAttribute('aria-label', `Join & record ${meeting.title || 'meeting'}`);
+    const micLabel = node('label', 'setting');
+    const mic = node('input');
+    mic.type = 'checkbox';
+    mic.dataset.microphoneMeetingId = meeting.id;
+    mic.checked = microphoneMeetingId === meeting.id;
+    mic.disabled = busy;
+    mic.setAttribute('aria-label', `Include my microphone for ${meeting.title || 'this meeting'}`);
+    micLabel.append(mic, node('span', '', 'Include my microphone'));
+    actions.append(node('div', 'meeting-time', formatDate(meeting.start)), micLabel, join);
     row.append(details, actions);
     list.append(row);
   }
@@ -162,7 +174,23 @@ function render() {
   if (snapshot?.configured === false && !snapshot.profile) { snapshot.profile=null; }
   const settings=snapshot?.settings;
   const consented=settings?.participantConsent === true && settings?.systemAudioConsent === true;
-  if (snapshot?.configured !== false && snapshot?.profile?.calendarConnected && consented) renderDashboard(); else onboarding();
+  const signedIn = snapshot?.configured !== false && Boolean(snapshot?.profile?.userID);
+  const dashboard = signedIn && snapshot.profile.calendarConnected && consented;
+  const phase = snapshot?.status?.phase;
+  byId('manualMeeting').classList.toggle('hidden', !signedIn);
+  byId('joinMeetingLink').disabled = joinBusy();
+  byId('manualMeetingStatus').classList.toggle('hidden', !signedIn || dashboard || !phase || phase === 'idle');
+  byId('manualMeetingMessage').textContent = snapshot?.status?.message ?? '';
+  byId('manualCancel').classList.toggle('hidden', phase !== 'joining');
+  byId('manualStop').classList.toggle('hidden', phase !== 'capturing');
+  if (dashboard) renderDashboard(); else onboarding();
+  const showRecordings = signedIn && (dashboard || snapshot.recordings?.length > 0);
+  byId('recordingsCard').classList.toggle('hidden', !showRecordings);
+  if (showRecordings) renderRecordings();
+  else clear(byId('recordingsList'));
+  byId('accountRow').classList.toggle('hidden', !signedIn);
+  byId('accountLabel').textContent = snapshot?.profile?.email ?? '';
+  byId('disconnectCalendarButton').classList.toggle('hidden', !snapshot?.profile?.calendarConnected);
 }
 function applySnapshot(next, expectedGeneration = null) {
   if (!next || (expectedGeneration !== null && expectedGeneration !== renderGeneration)) return;
@@ -171,6 +199,8 @@ function applySnapshot(next, expectedGeneration = null) {
     clearTimeout(saveTimer); saveTimer=null; saving=false; localSettings=null; renderGeneration++;
     pendingSignIn=null;
     pendingJoin=false;
+    microphoneMeetingId=null;
+    clearMeetingLink();
     actionError=null;
     currentOwner=owner;
   }
@@ -234,6 +264,7 @@ function collectSettings() {
 }
 function scheduleSave() {
   if (snapshot?.configured === false || !snapshot?.profile?.calendarConnected) return;
+  microphoneMeetingId=null;
   localSettings=collectSettings();
   if (!localSettings.participantConsent || !localSettings.systemAudioConsent) localSettings.autoJoin=false;
   byId('saveState').textContent='Saving…'; saving=true; clearTimeout(saveTimer);
@@ -251,15 +282,8 @@ document.addEventListener('click', event=>{
   const action=target.dataset.action;
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if (action === 'joinMeeting') {
-    if (pendingJoin || saving || !snapshot?.profile?.userID) return;
-    pendingJoin = true;
-    render();
-    const generation = renderGeneration;
-    void perform(action, {id:target.dataset.meetingId,expectedOwnerUserID:snapshot.profile.userID}).finally(() => {
-      if (generation !== renderGeneration) return;
-      pendingJoin = false;
-      render();
-    });
+    const id = target.dataset.meetingId;
+    void startMeeting(action, { id, includeMicrophone: microphoneMeetingId === id });
     return;
   }
   if (action === 'cancelJoin') {
@@ -269,6 +293,44 @@ document.addEventListener('click', event=>{
   if(action==='shareRecording') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID,...(target.dataset.includeTranscript==='true'?{includeTranscript:true}:{})}); return; }
   perform(action);
 });
-document.addEventListener('change', event=>{ if(event.target.matches('[data-setting],[data-calendar]')) scheduleSave(); });
+function clearMeetingLink() {
+  byId('meetingLink').value = '';
+  byId('meetingLinkConsent').checked = false;
+  byId('meetingLinkMicrophone').checked = false;
+  byId('manualMeeting').open = false;
+}
+async function startMeeting(action, payload) {
+  if (joinBusy() || !snapshot?.profile?.userID) return;
+  if (action === 'joinMeeting' && (!snapshot.settings?.participantConsent || !snapshot.settings?.systemAudioConsent)) return;
+  microphoneMeetingId = null;
+  clearMeetingLink();
+  pendingJoin = true;
+  render();
+  const generation = renderGeneration;
+  try { await perform(action, { ...payload, expectedOwnerUserID:snapshot.profile.userID }); }
+  finally {
+    if (generation === renderGeneration) {
+      pendingJoin = false;
+      render();
+    }
+  }
+}
+document.addEventListener('change', event => {
+  if (event.target.matches('[data-microphone-meeting-id]')) {
+    microphoneMeetingId = event.target.checked ? event.target.dataset.microphoneMeetingId : null;
+    for (const option of document.querySelectorAll('[data-microphone-meeting-id]')) {
+      option.checked = option.dataset.microphoneMeetingId === microphoneMeetingId;
+    }
+  }
+  if (event.target.matches('[data-setting],[data-calendar]')) scheduleSave();
+});
+document.addEventListener('submit', event => {
+  if (event.target.id !== 'meetingLinkForm') return;
+  event.preventDefault();
+  const url = byId('meetingLink').value.trim();
+  const participantsConfirmed = byId('meetingLinkConsent').checked;
+  if (!url || !participantsConfirmed) return;
+  void startMeeting('joinMeetingLink', { url, participantsConfirmed, includeMicrophone: byId('meetingLinkMicrophone').checked });
+});
 if (api?.onState) api.onState(next=>applySnapshot(next));
 if (api?.state) { const initialGeneration=renderGeneration; api.state().then(next=>applySnapshot(next,initialGeneration)).catch(error=>showError(error?.message||'Reel could not load its current state.')); }

@@ -460,3 +460,21 @@ test('canceling an overlapping manual and scheduled join releases the owned wind
   await f.coordinator.tick();
   assert.equal(f.coordinator.getState().phase, 'scheduled');
 });
+
+test('each manual join chooses its own microphone and a denied mic never silently starts capture', async () => {
+  const inputs = [];
+  const f = fixture({ start: async args => {
+    inputs.push(args);
+    if (args.microphone) throw Object.assign(Error('Permission denied'), { code: 'microphone_unavailable' });
+    return {};
+  } });
+  f.setSettings({ autoJoin: false });
+  const selection = { meetingId: 'meeting-1', ownerUserID: 'firebase-owner' };
+  await f.coordinator.joinMeeting({ ...selection, microphone: true });
+  assert.equal(f.coordinator.getState().reason, 'microphone_unavailable');
+  assert.equal(f.calls.close.length, 1);
+  await f.coordinator.joinMeeting(selection);
+  assert.equal(f.coordinator.getState().phase, 'capturing');
+  assert.deepEqual(inputs.map(input => input.microphone), [true, false]);
+  await f.coordinator.cancel();
+});
