@@ -19,15 +19,25 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     throw 'The disposable runner must be an administrator to install and remove ephemeral MSIX test trust.'
 }
 
+$publisher = 'CN=Reel Ephemeral CI Test ' + [guid]::NewGuid().ToString('N')
+$identity = 'RocketShipHQ.Reel'
+if (Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue) {
+    throw 'Refusing to run while any Reel package is already installed in the test account.'
+}
+foreach ($store in @('Cert:\CurrentUser\My', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\TrustedPeople')) {
+    if (Get-ChildItem $store -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq $publisher }) {
+        throw 'Refusing to reuse an existing test signing certificate.'
+    }
+}
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('reel-msix-update-' + [guid]::NewGuid().ToString('N'))
 $serveRoot = Join-Path $tempRoot 'feed'
 New-Item -ItemType Directory -Path $serveRoot | Out-Null
-$publisher = 'CN=Reel Ephemeral CI Test ' + [guid]::NewGuid().ToString('N')
-$identity = 'RocketShipHQ.Reel'
 $certificate = $null
 $trustedCertificate = $null
 $rootCertificate = $null
 $server = $null
+$testPackageFullName = $null
+$testPackageInstallPath = $null
 
 function Find-SignTool {
     $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
@@ -46,14 +56,6 @@ function Sign-TestPackage([string]$path, [string]$tool, [string]$thumbprint) {
 }
 
 try {
-    if (Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue) {
-        throw 'Refusing to replace an existing Reel package in the test account.'
-    }
-    foreach ($store in @('Cert:\CurrentUser\My', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\TrustedPeople')) {
-        if (Get-ChildItem $store -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq $publisher }) {
-            throw 'Refusing to reuse an existing test signing certificate.'
-        }
-    }
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
     $listener.Start()
     $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
@@ -106,6 +108,8 @@ try {
     if ($null -eq $installed -or $installed.Version.ToString() -ne $Version) {
         throw 'App Installer did not install the initial package version.'
     }
+    $testPackageFullName = $installed.PackageFullName
+    $testPackageInstallPath = [IO.Path]::GetFullPath($installed.InstallLocation)
 
     # Publish the newer feed at the same URI registered by the initial install.
     Write-Output 'Publishing the newer feed at the registered update URI.'
@@ -126,8 +130,14 @@ try {
     Write-Output "MSIX App Installer install/upgrade passed: $Version -> $NextVersion ($Architecture)."
 } finally {
     Write-Output 'Removing the test package, local server, and per-run trust certificate.'
-    Get-Process -Name Reel -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue
+    if ($testPackageInstallPath) {
+        Get-CimInstance Win32_Process -Filter "Name = 'Reel.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq (Join-Path $testPackageInstallPath 'Reel.exe') } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    }
+    if ($testPackageFullName) {
+        Remove-AppxPackage -Package $testPackageFullName -ErrorAction SilentlyContinue
+    }
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     if ($trustedCertificate) {
         Remove-Item -LiteralPath "Cert:\LocalMachine\TrustedPeople\$($trustedCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
