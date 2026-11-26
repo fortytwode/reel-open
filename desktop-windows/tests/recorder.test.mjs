@@ -187,6 +187,16 @@ test('rejects missing and ambiguous owned sources without a fallback window', as
   }
 });
 
+test('capture startup diagnostics preserve only allowlisted browser error names', async () => {
+  const known = fixture(); await settle();
+  await known.status({ type:'failed', reason:'capture_failed', errorName:'NotReadableError' });
+  await assert.rejects(known.start, error => error.captureErrorName === 'NotReadableError');
+
+  const unknown = fixture(); await settle();
+  await unknown.status({ type:'failed', reason:'capture_failed', errorName:'private diagnostic text' });
+  await assert.rejects(unknown.start, error => !Object.hasOwn(error, 'captureErrorName'));
+});
+
 test('rejects wrong frames, URLs and tokens without disturbing the owned capture', async () => {
   const f = fixture(); await settle();
   const window = f.windows[0];

@@ -315,6 +315,9 @@ jobs:
         run: |
           $out = Join-Path $env:RUNNER_TEMP 'manual-capture-smoke'
           $executable = Join-Path $env:RUNNER_TEMP 'demo-package/Reel.exe'
+          $sessionId = (Get-Process -Id $PID).SessionId
+          $soundDeviceCount = @(Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue).Count
+          Write-Host "Windows session ID=$sessionId; sound device count=$soundDeviceCount"
           $process = Start-Process -FilePath $executable -ArgumentList @('--manual-picker', "--out=$out") -Wait -PassThru -NoNewWindow
           if ($process.ExitCode) { throw "Packaged manual capture smoke exited with $($process.ExitCode)" }
           node desktop-windows/probe/adapter-verify.mjs --manual-picker "--out=$out"

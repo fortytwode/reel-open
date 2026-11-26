@@ -19,6 +19,7 @@ const manualPicker = process.argv.includes('--manual-picker');
 const ownerUserID = 'synthetic-probe';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
+let captureDiagnostics = {};
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 // Keep the process alive after the last fixture window closes so finish() can
@@ -111,6 +112,9 @@ async function run() {
     const beganAt = Date.now();
     let pickerChoice;
     if (manualPicker) {
+      bridge = createNativeBridge({ executable: path.join(here, '../native/ReelNativeJoin.exe') });
+      let systemAudioOutputPresent = false;
+      try { systemAudioOutputPresent = Boolean(await bridge.defaultRenderEndpoint()); } catch { /* Report only device presence. */ }
       manualController = createManualWindowCapture({ desktopCapturer, recorder,
         getProfile: () => ({ userID: ownerUserID }),
         getExcludedWindowHandles: () => BrowserWindow.getAllWindows()
@@ -119,6 +123,7 @@ async function run() {
       const matches = choices.filter(choice => choice.title.includes('REEL CAPTURE FIXTURE 9C41'));
       if (matches.length !== 1) throw Error('The manual picker did not expose exactly one synthetic fixture window');
       [pickerChoice] = matches;
+      captureDiagnostics = { systemAudioOutputPresent, pickerChoiceFound: true };
       await manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true });
       activeCapture = true;
     } else {
@@ -197,4 +202,6 @@ async function finish(result) {
   app.exit(result.ok ? 0 : 1);
 }
 app.whenReady().then(run).then(finish).catch(error => finish({ ok: false,
-  error: { name: error?.name || 'Error', message: String(error?.message || error) }, failures }));
+  error: { name: error?.name || 'Error', message: String(error?.message || error),
+    ...(error?.captureErrorName ? { captureErrorName: error.captureErrorName } : {}) },
+  diagnostics: captureDiagnostics, failures }));

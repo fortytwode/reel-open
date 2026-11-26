@@ -41,12 +41,12 @@ function audioBlock(value) {
 }
 const pending = new Set();
 function releaseTracks() { stream?.getTracks().forEach(track => track.stop()); microphone?.getTracks().forEach(track => track.stop()); }
-function fail(reason) {
+function fail(reason, diagnosticName = null) {
   if (failed) return;
   failed = true; releaseTracks();
   status.textContent = 'The meeting recording stopped.';
   if (capture) void capture.cancel().catch(() => {});
-  void api.failed(reason).catch(() => {});
+  void api.failed(reason, diagnosticName).catch(() => {});
 }
 function sourceEnded() {
   if (failed || stopping || sourceEnding) return;
@@ -135,7 +135,7 @@ async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled
     await api.ready(info);
     if (failed || stopping) { releaseTracks(); return; }
     capture.begin(); status.textContent = 'Recording the meeting locally. All computer sound is included.';
-  } catch { fail('capture_failed'); }
+  } catch (error) { fail('capture_failed', error?.name); }
 }
 function stop() {
   if (stopPromise) return stopPromise;

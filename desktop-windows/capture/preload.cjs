@@ -27,5 +27,6 @@ contextBridge.exposeInMainWorld('reelCapture', Object.freeze({
   appendFragment: (index, duration, bytes) => ipcRenderer.invoke('reel-capture:packet', { token, kind: 'fragment', index, duration, bytes }),
   done: info => status({ type: 'done', duration: info.duration, segments: info.segments }),
   sourceEnded: () => status({ type: 'source_ended' }),
-  failed: reason => status({ type: 'failed', reason }),
+  failed: (reason, errorName) => status({ type: 'failed', reason,
+    ...(reason === 'capture_failed' && typeof errorName === 'string' ? { errorName } : {}) }),
 }));

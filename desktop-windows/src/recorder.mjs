@@ -120,6 +120,8 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
           microphone_unavailable: 'The microphone could not be captured. Check Windows microphone permissions or turn off Include my microphone.' };
         const error = Error(reasons[message.reason] ?? 'The meeting recording failed.');
         if (message.reason === 'microphone_unavailable') error.code = message.reason;
+        if (message.reason === 'capture_failed' && ['AbortError', 'NotAllowedError', 'NotFoundError', 'NotReadableError',
+          'OverconstrainedError', 'TypeError', 'UnknownError'].includes(message.errorName)) error.captureErrorName = message.errorName;
         fail(capture, error);
       } else throw Error('Unexpected capture status');
       return { ok: true };
