@@ -4,6 +4,8 @@ The experimental Windows companion uses Electron for account setup, calendar dis
 
 The Windows installer adds three entries to Start. **Reel Recorder** opens your organization’s screen recorder in its own browser app window. Use it to record a walkthrough and share the link. **Reel Notetaker** opens calendar preferences and meeting notes. **Reel Companion** connects Reel to your Google calendar, captures scheduled meetings and lists locally saved recordings. Recorder and Notetaker also support installation from Chrome or Edge.
 
+To capture one app window locally, open **Reel Companion** and find **Record a window**. Select the window, check its preview and choose whether to include your microphone or highlight clicks. Reel saves computer audio with the video and omits paused intervals. After you stop, choose **Transcribe recording** for local or cloud transcription. A local transcript also offers **Generate on-device AI summary**. You can review the recording and transcript before sharing them.
+
 ## Build for Windows
 
 Render your [organization configuration](../docs/organization-configuration.md) from the repository root. Configure a Google Desktop OAuth client for the same organization and enable the Google Calendar API. Build on Windows using the official Electron distribution, the .NET Framework compiler and the parameters in [Packaging](PACKAGING.md). Keep the downloaded Google installed-app credential file outside the repository.
