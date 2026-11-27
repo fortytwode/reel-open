@@ -153,10 +153,12 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const preflight=workflow.slice(workflow.indexOf('- name: Parse reminder helper'),workflow.indexOf('- name: Install pinned local Whisper browser runtime'));
   assert.doesNotMatch(preflight,/System\.Web\.Extensions|JavaScriptSerializer|ConvertFrom-Json/,
     'The early helper preflight does not depend on PowerShell JSON assemblies or cmdlets.');
-  assert.match(preflight,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*-ValidateLaunchConfig -LaunchConfigPath[\s\S]*Windows PowerShell 5\.1 rejected reminder config/,
+  assert.match(preflight,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*Invoke-ReminderConfigValidation \$configPath \$true/,
     'Windows PowerShell 5.1 invokes the full helper validator for production and diagnostic portable/MSIX configs.');
-  assert.match(preflight,/duplicate-key[\s\S]*unknown-key[\s\S]*invalid-base64[\s\S]*accepted invalid reminder config/,
+  assert.match(preflight,/duplicate-key[\s\S]*unknown-key[\s\S]*invalid-base64[\s\S]*Invoke-ReminderConfigValidation \$configPath \$false/,
     'Windows CI verifies malformed, duplicate and unknown config fields fail closed.');
+  assert.match(preflight,/function Invoke-ReminderConfigValidation[\s\S]*Start-Process[\s\S]*-Wait -PassThru[\s\S]*\$process\.ExitCode/,
+    'Expected parser failures are checked through the child process exit code without pwsh treating them as failing native commands.');
   assert.ok(workflow.includes('Snapshot runner after packaged local Whisper inference')
     && workflow.includes('Sanitized Whisper cache directories remaining')
     && workflow.includes('Remove-Item -LiteralPath $cache.FullName -Recurse -Force'),

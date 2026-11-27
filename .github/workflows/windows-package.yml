@@ -46,6 +46,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The reminder helper failed Windows PowerShell 5.1 parsing.' }
           $helperPath = (Resolve-Path 'desktop-windows/src/windows-reminder-tasks.ps1').Path
           $diagnosticsPath = [IO.Path]::Combine($env:RUNNER_TEMP, 'reminder-config-preflight.log')
+          function Invoke-ReminderConfigValidation([string]$configPath, [bool]$expectedSuccess) {
+            $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $helperPath + '"'),
+              '-ValidateLaunchConfig', '-LaunchConfigPath', ('"' + $configPath + '"'), '-Diagnostic')
+            $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+            if ($expectedSuccess -and $process.ExitCode -ne 0) { throw "Windows PowerShell 5.1 rejected reminder config $configPath." }
+            if (-not $expectedSuccess -and $process.ExitCode -eq 0) { throw "Windows PowerShell 5.1 accepted invalid reminder config $configPath." }
+          }
           function Encode-LaunchValue([string]$value) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value)) }
           $portableExe = Encode-LaunchValue 'C:\Program Files\Reel.exe'
           $probeArgument = Encode-LaunchValue '--probe'
@@ -59,8 +66,7 @@ jobs:
           foreach ($config in $configs) {
             $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ($config.name + '.conf'))
             [IO.File]::WriteAllText($configPath, $config.text, [Text.UTF8Encoding]::new($false))
-            & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helperPath -ValidateLaunchConfig -LaunchConfigPath $configPath -Diagnostic
-            if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell 5.1 rejected reminder config $($config.name)." }
+            Invoke-ReminderConfigValidation $configPath $true
           }
           $invalidConfigs = @(
             @{ name='duplicate-key'; text="version=2`nmode=msix`nmode=portable`n" },
@@ -70,8 +76,7 @@ jobs:
           foreach ($config in $invalidConfigs) {
             $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ('invalid-' + $config.name + '.conf'))
             [IO.File]::WriteAllText($configPath, $config.text, [Text.UTF8Encoding]::new($false))
-            & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helperPath -ValidateLaunchConfig -LaunchConfigPath $configPath -Diagnostic
-            if ($LASTEXITCODE -eq 0) { throw "Windows PowerShell 5.1 accepted invalid reminder config $($config.name)." }
+            Invoke-ReminderConfigValidation $configPath $false
           }
       - name: Install pinned local Whisper browser runtime
         run: npm ci --ignore-scripts --prefix desktop-windows
