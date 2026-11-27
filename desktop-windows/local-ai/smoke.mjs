@@ -23,10 +23,12 @@ let currentRun='startup',currentPhase='bootstrap',onPhase=()=>{};
 const safeRequestClasses=new Set(['method_options','method_other','non_https_request','hub_model_file',
   'hub_model_file_query','hub_model_other_path','hub_model_cache_path','hub_other_path','pinned_cdn_blob',
   'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied']);
-function log(phase,progress,requestClass){
+function log(phase,progress,requestClass,loadErrorCode,loadFailureClass){
   const item={time:new Date().toISOString(),run:currentRun,phase};
   if(Number.isFinite(progress))item.progress=Math.round(Math.max(0,Math.min(1,progress))*100)/100;
   if(safeRequestClasses.has(requestClass))item.requestClass=requestClass;
+  if(Number.isInteger(loadErrorCode)&&loadErrorCode>=-10_000&&loadErrorCode<=0)item.loadErrorCode=loadErrorCode;
+  if(['Error','TypeError','AbortError'].includes(loadFailureClass))item.loadFailureClass=loadFailureClass;
   const line=JSON.stringify(item);
   appendFileSync(logPath,line+'\n');
   process.stdout.write(line+'\n');
@@ -37,7 +39,6 @@ const windows=[];
 class SmokeWindow extends BrowserWindow{constructor(options){super(options);windows.push(this);
   this.webContents.on('dom-ready',()=>log('renderer_dom_ready'));
   this.webContents.on('did-finish-load',()=>log('renderer_load_complete'));
-  this.webContents.on('did-fail-load',()=>log('renderer_load_failed'));
   this.webContents.on('render-process-gone',(_event,details)=>log('renderer_process_gone'));
 }}
 let assets,local,exitCode=0,modelNetworkBlocked=false,blockedRemoteRequests=0;
@@ -50,6 +51,7 @@ async function bounded(phase,operation,timeoutMs){
 const phaseLimits={
   window_create_requested:30_000,window_reused:30_000,renderer_load_started:30_000,renderer_dom_ready:30_000,
   renderer_load_complete:30_000,renderer_document_loaded:30_000,renderer_script_started:15_000,
+  renderer_load_failed:5_000,renderer_load_rejected:5_000,
   renderer_script_ready:15_000,worker_creation_started:15_000,worker_created:15_000,worker_script_ready:15_000,
   renderer_ready:15_000,renderer_startup_timeout:5_000,renderer_probe_sent:5_000,renderer_probe_received:5_000,
   renderer_probe_timeout:5_000,renderer_task_received:10_000,task_sent:15_000,worker_message_sent:15_000,
@@ -64,10 +66,10 @@ function reportProgress(event){
   if(Number.isFinite(event.progress)){
     const bucket=Math.floor(Math.max(0,Math.min(1,event.progress))*20);
     if(!loggedPhases.has(key)||bucket>(lastProgressBucket.get(key)??-1)){
-      log(event.phase,event.progress,event.requestClass);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
+      log(event.phase,event.progress,event.requestClass,event.loadErrorCode,event.loadFailureClass);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
     }
   }else if(!loggedPhases.has(key)){
-    log(event.phase,undefined,event.requestClass);loggedPhases.add(key);
+    log(event.phase,undefined,event.requestClass,event.loadErrorCode,event.loadFailureClass);loggedPhases.add(key);
   }
   if(!phaseLimits[event.phase])return;
   if(event.phase===currentPhase)return;
@@ -147,6 +149,9 @@ async function runSmoke(){
       allowRemoteModelRequest:()=>{if(modelNetworkBlocked){blockedRemoteRequests++;return false;}return true;}});
     if(startupOnly){
       await bounded('renderer_task_handoff_probe',()=>local.probeRenderer(),20_000);
+      windows.at(-1).destroy();
+      await bounded('renderer_recreation_probe',()=>local.probeRenderer(),20_000);
+      log('renderer_recreation_probe_passed');
       await bounded('renderer_model_pin_probe',probePinnedModelRequest,10_000);
       log('smoke_startup_preflight_passed');
       return;
@@ -164,6 +169,8 @@ async function runSmoke(){
       windows.at(-1).destroy();
       return new Promise(resolve=>setImmediate(resolve));
     },5_000);
+    await bounded('offline_renderer_recreation_probe',()=>local.probeRenderer(),20_000);
+    log('offline_renderer_recreation_probe_passed');
     const second=await transcribeWithBounds('offline',samples,12*60_000);
     assert.equal(second.engine,'Whisper large-v3-turbo q8');
     assert.ok(/local|meeting|privacy|transcription|device/iu.test(second.text),`Offline cached inference failed: ${second.text.slice(0,180)}`);

@@ -115,7 +115,7 @@ jobs:
             $process.Refresh()
             if (Test-Path $log) { Get-Content -LiteralPath $log }
             if ($process.ExitCode) { throw "Packaged smoke startup preflight exited with $($process.ExitCode)" }
-            foreach ($phase in @('smoke_start','electron_ready','preload_bridge_present','renderer_script_started','renderer_script_ready','worker_script_ready','renderer_probe_received','renderer_model_pin_probe_passed','smoke_startup_preflight_passed')) {
+            foreach ($phase in @('smoke_start','electron_ready','preload_bridge_present','renderer_script_started','renderer_script_ready','worker_script_ready','renderer_probe_received','renderer_recreation_probe_passed','renderer_model_pin_probe_passed','smoke_startup_preflight_passed')) {
               if (-not (Select-String -LiteralPath $log -Pattern ('"phase":"' + $phase + '"') -Quiet)) {
                 throw "Packaged smoke startup preflight exited without $phase diagnostic."
               }

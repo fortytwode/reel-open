@@ -92,9 +92,11 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   let window=null,loading=null,active=null,disposed=false,rendererStartup=null;
   const pendingProbes=new Map();
   const pageURL=origin+'/';
-  const diagnostic=(phase,progress,requestClass)=>{
+  const diagnostic=(phase,progress,requestClass,loadErrorCode,loadFailureClass)=>{
     try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{}),
-      ...(SAFE_REMOTE_REQUEST_CLASSES.has(requestClass)?{requestClass}:{})});}catch{}
+      ...(SAFE_REMOTE_REQUEST_CLASSES.has(requestClass)?{requestClass}:{}),
+      ...(Number.isInteger(loadErrorCode)&&loadErrorCode>=-10_000&&loadErrorCode<=0?{loadErrorCode}:{}),
+      ...(['Error','TypeError','AbortError'].includes(loadFailureClass)?{loadFailureClass}:{})});}catch{}
   };
   function currentWindow(event){return window&&!window.isDestroyed()&&event.sender===window.webContents&&event.senderFrame===window.webContents.mainFrame&&event.senderFrame?.url===pageURL;}
   function rejectRendererStartup(contents,phase,message){
@@ -141,10 +143,11 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   function createWindow(){
     if(window&&!window.isDestroyed())return Promise.resolve(window);
     if(loading)return loading;
-    window=new BrowserWindow({width:520,height:300,minWidth:420,minHeight:260,show:false,title:'Local meeting transcription',
+    const createdWindow=new BrowserWindow({width:520,height:300,minWidth:420,minHeight:260,show:false,title:'Local meeting transcription',
       webPreferences:{preload:fileURLToPath(new URL('../local-ai/preload.cjs',import.meta.url)),sandbox:true,contextIsolation:true,nodeIntegration:false,
         partition:'persist:reel-local-ai',backgroundThrottling:false}});
-    const contents=window.webContents;
+    window=createdWindow;
+    const contents=createdWindow.webContents;
     contents.on('dom-ready',()=>diagnostic('renderer_dom_ready'));
     contents.on('did-finish-load',()=>{
       diagnostic('renderer_load_complete');
@@ -153,7 +156,9 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
         else rejectRendererStartup(contents,'preload_bridge_missing','Local transcription preload did not expose its restricted bridge.');
       }).catch(()=>rejectRendererStartup(contents,'preload_bridge_probe_failed','Local transcription preload bridge could not be checked.'));
     });
-    contents.on('did-fail-load',()=>diagnostic('renderer_load_failed'));
+    contents.on('did-fail-load',(_event,errorCode,_description,failedURL,isMainFrame)=>{
+      if(isMainFrame===true&&failedURL===pageURL)diagnostic('renderer_load_failed',undefined,undefined,errorCode);
+    });
     contents.on('preload-error',()=>diagnostic('preload_error'));
     contents.on('console-message',details=>{if(details?.level==='error')diagnostic('renderer_console_error');});
     contents.on('render-process-gone',()=>diagnostic('renderer_process_gone'));
@@ -195,8 +200,8 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     contents.setWindowOpenHandler(()=>({action:'deny'}));
     contents.on('will-navigate',event=>{if(contents.getURL()!==pageURL)event.preventDefault();});
     contents.on('will-redirect',event=>event.preventDefault());
-    window.on('closed',()=>{
-      window=null;cancelActive();
+    createdWindow.on('closed',()=>{
+      if(window===createdWindow){window=null;cancelActive();}
       rejectRendererStartup(contents,'renderer_closed_before_ready','Local transcription window closed before initialization.');
     });
     let startupResolve,startupReject;
@@ -213,7 +218,8 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       return window;
     }).catch(cause=>{
       if(rendererStartup?.contents===contents){clearTimeout(rendererStartup.timer);rendererStartup=null;}
-      diagnostic('renderer_load_failed');window?.destroy();window=null;
+      diagnostic('renderer_load_rejected',undefined,undefined,undefined,cause?.name);
+      if(window===createdWindow){createdWindow.destroy();window=null;}
       throw Error(`Local transcription window could not start: ${cause.message}`);
     }).finally(()=>{loading=null;});
     return loading;

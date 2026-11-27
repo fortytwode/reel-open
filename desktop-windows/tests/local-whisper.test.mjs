@@ -21,6 +21,7 @@ class FakeWindow extends EventEmitter {
   focus(){}
   hide(){}
   destroy(){this.destroyed=true;this.emit('closed');}
+  destroyDeferred(){this.destroyed=true;setImmediate(()=>this.emit('closed'));}
 }
 function setup({allowRemoteModelRequest,onDiagnostic,origin='http://127.0.0.1:4321'}={}){const ipcMain=new EventEmitter();let owner='owner-a';FakeWindow.onLoad=contents=>{const event={sender:contents,senderFrame:contents.mainFrame};ipcMain.emit('reel-local-ai:progress',event,{phase:'renderer_script_ready'});ipcMain.emit('reel-local-ai:progress',event,{phase:'worker_script_ready'});};const bridge=createLocalWhisper({BrowserWindow:FakeWindow,ipcMain,origin,ownerID:()=>owner,...(allowRemoteModelRequest?{allowRemoteModelRequest}:{}),...(onDiagnostic?{onDiagnostic}:{})});return{ipcMain,bridge,owner:value=>{owner=value;},complete(value,sender=FakeWindow.last.webContents){ipcMain.emit('reel-local-ai:complete',{sender,senderFrame:sender.mainFrame},value);}};}
 const samples=new Float32Array([0,.1,-.1]);
@@ -146,6 +147,32 @@ test('offline model denial is reinstalled after the isolated window is recreated
   f.bridge.dispose();
 });
 
+test('late close from the prior local window cannot invalidate a recreated offline renderer',async()=>{
+  let offline=false,denied=0;
+  const f=setup({allowRemoteModelRequest:()=>{if(offline){denied++;return false;}return true;}});
+  const first=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  const firstWindow=FakeWindow.last;
+  f.complete({requestID:firstWindow.webContents.messages[0].value.requestID,ok:true,result:{text:'first',chunks:[]}});
+  await first;
+  firstWindow.destroyDeferred();
+  offline=true;
+  const second=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  const secondWindow=FakeWindow.last;
+  assert.notEqual(secondWindow,firstWindow);
+  const requestID=secondWindow.webContents.messages[0].value.requestID;
+  let result;
+  secondWindow.webContents.session.webRequest.before({
+    url:'https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json',method:'GET',
+  },value=>{result=value;});
+  assert.deepEqual(result,{cancel:true});
+  assert.equal(denied,1);
+  f.complete({requestID,ok:true,result:{text:'cached offline',chunks:[]}},secondWindow.webContents);
+  await second;
+  f.bridge.dispose();
+});
+
 test('diagnostics accept only the current renderer request and bounded stage fields',async()=>{
   const diagnostics=[];
   const f=setup({onDiagnostic:value=>diagnostics.push(value)});
@@ -161,6 +188,19 @@ test('diagnostics accept only the current renderer request and bounded stage fie
   f.complete({requestID,ok:true,result:{text:'ok',chunks:[]}});
   await operation;
   f.bridge.dispose();
+});
+
+test('renderer navigation diagnostics keep only a bounded network error code',async()=>{
+  const diagnostics=[];const f=setup({onDiagnostic:value=>diagnostics.push(value)});
+  const operation=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  const view=FakeWindow.last;
+  view.webContents.emit('did-fail-load',{},-105,'private URL data',view.webContents.url,true);
+  assert.ok(diagnostics.some(value=>value.phase==='renderer_load_failed'&&value.loadErrorCode===-105));
+  assert.doesNotMatch(JSON.stringify(diagnostics),/private URL data/);
+  const requestID=view.webContents.messages[0].value.requestID;
+  f.complete({requestID,ok:true,result:{text:'ok',chunks:[]}});
+  await operation;f.bridge.dispose();
 });
 
 test('renderer startup waits for worker module and task channel probe without starting inference',async()=>{
