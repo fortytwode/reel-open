@@ -1,0 +1,99 @@
+name: Temporary Windows summary artifact QA
+
+on:
+  push:
+    branches: ['qa/windows-local-summary-proof-20261127']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  summary-artifact-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, arch: x64 }
+          - { runner: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download the exact demo package from run 45957975472
+        uses: actions/download-artifact@v4
+        with:
+          name: manual-capture-qa-kit-${{ matrix.arch }}
+          github-token: ${{ github.token }}
+          repository: rocketshiphq/reel-open
+          run-id: 45957975472
+          path: ${{ runner.temp }}/summary-qa-kit
+      - name: Verify and unpack the unmodified package artifact
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'summary-qa-kit'
+          $manifest = Get-Content -LiteralPath (Join-Path $kit 'manifest.json') -Raw | ConvertFrom-Json
+          if ($manifest.sourceCommit -ne '01b0632f159b9ee4b22243268e8121cea3a8f0f3' -or $manifest.architecture -ne $env:REEL_ARCH) {
+            throw 'The downloaded demo kit does not match the requested architecture and source commit.'
+          }
+          $zip = Join-Path $kit $manifest.package.file
+          $digest = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne $manifest.package.sha256) { throw 'The demo package SHA-256 does not match its uploaded manifest.' }
+          $package = Join-Path $env:RUNNER_TEMP "summary-artifact-$env:REEL_ARCH"
+          Expand-Archive -LiteralPath $zip -DestinationPath $package
+          $appRoot = Join-Path $package 'resources/app'
+          $packageJson = Join-Path $appRoot 'package.json'
+          if (-not (Test-Path $packageJson) -or -not (Test-Path (Join-Path $package 'Reel.exe'))) {
+            throw 'The demo artifact does not contain the expected packaged Reel application.'
+          }
+      - name: Run only the corrected synthetic local summary smoke
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP "summary-artifact-$env:REEL_ARCH"
+          $appRoot = Join-Path $package 'resources/app'
+          $packageJson = Join-Path $appRoot 'package.json'
+          $manifest = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'summary-qa-kit/manifest.json') -Raw | ConvertFrom-Json
+          $zip = Join-Path (Join-Path $env:RUNNER_TEMP 'summary-qa-kit') $manifest.package.file
+          $originalPackage = [IO.File]::ReadAllText($packageJson)
+          $log = Join-Path $env:RUNNER_TEMP "summary-artifact-$env:REEL_ARCH.log"
+          try {
+            # Overlay only the corrected QA entry point and helper into this temporary extracted copy.
+            $smoke = Join-Path $appRoot 'desktop-windows/local-ai/smoke.mjs'
+            $helper = Join-Path $appRoot 'desktop-windows/src/smoke-timeout.mjs'
+            Copy-Item -LiteralPath 'desktop-windows/local-ai/smoke.mjs' -Destination $smoke
+            Copy-Item -LiteralPath 'desktop-windows/src/smoke-timeout.mjs' -Destination $helper
+            $packageData = $originalPackage | ConvertFrom-Json
+            $packageData.main = 'desktop-windows/local-ai/smoke.mjs'
+            [IO.File]::WriteAllText($packageJson, ($packageData | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+            $env:REEL_LOCAL_SUMMARY_SMOKE = '1'
+            $env:REEL_WHISPER_SMOKE_ROOT = $appRoot
+            $env:REEL_WHISPER_SMOKE_ARCH = $env:REEL_ARCH
+            $env:REEL_WHISPER_SMOKE_LOG = $log
+            $process = Start-Process -FilePath (Join-Path $package 'Reel.exe') -PassThru -NoNewWindow -WorkingDirectory $package
+            if (-not $process.WaitForExit(18 * 60 * 1000)) {
+              if (-not $process.HasExited) { $process.Kill($true) }
+              throw 'Synthetic local summary inference exceeded its 18 minute bound.'
+            }
+            if (Test-Path $log) { Get-Content -LiteralPath $log }
+            $process.Refresh()
+            if ($process.ExitCode -or -not (Select-String -LiteralPath $log -Pattern '"phase":"summary_smoke_passed"' -Quiet)) {
+              throw "Synthetic local summary inference/offline reuse failed on $env:REEL_ARCH."
+            }
+          } finally {
+            [IO.File]::WriteAllText($packageJson, $originalPackage, (New-Object Text.UTF8Encoding($false)))
+            Remove-Item Env:REEL_LOCAL_SUMMARY_SMOKE,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_LOG -ErrorAction SilentlyContinue
+          }
+      - name: Upload temporary summary diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-artifact-${{ matrix.arch }}-diagnostics
+          path: ${{ runner.temp }}/summary-artifact-${{ matrix.arch }}.log
+          if-no-files-found: warn
+          retention-days: 3
