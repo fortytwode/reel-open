@@ -3,12 +3,15 @@ let token = null;
 let listener = null;
 let pending = null;
 ipcRenderer.on('reel-capture:command', (_event, message) => {
-  if (!message || !['start', 'stop', 'pause', 'resume', 'refresh-audio'].includes(message.type)) return;
+  if (!message || !['start', 'stop', 'pause', 'resume', 'refresh-audio', 'click-sampling'].includes(message.type)) return;
   if (message.type === 'start') {
     if (token || !/^[0-9a-f]{32}$/.test(message.token ?? '')) return;
     token = message.token;
   } else if (message.token !== token) return;
-  const command = message.type === 'start' ? { type: 'start', sourceId: message.sourceId, canRefreshAudio: message.canRefreshAudio === true, microphone: message.microphone === true } : { type: message.type, request: message.request, deadline: message.deadline };
+  const command = message.type === 'start' ? { type: 'start', sourceId: message.sourceId, canRefreshAudio: message.canRefreshAudio === true,
+    microphone: message.microphone === true, ...(typeof message.selectedHwnd === 'string' && /^[1-9]\d{0,19}$/.test(message.selectedHwnd) ? { selectedHwnd: message.selectedHwnd } : {}) }
+    : message.type === 'click-sampling' ? { type: message.type, enabled: message.enabled === true }
+    : { type: message.type, request: message.request, deadline: message.deadline };
   if (listener) listener(command); else pending = command;
 });
 const status = message => ipcRenderer.invoke('reel-capture:status', { token, ...message });
@@ -19,6 +22,7 @@ contextBridge.exposeInMainWorld('reelCapture', Object.freeze({
     if (pending) { const command = pending; pending = null; callback(command); }
   },
   ready: info => status({ type: 'ready', info: { video: info.video, audio: info.audio } }),
+  samplePrimaryClick: () => ipcRenderer.invoke('reel-capture:click', { token }),
   appendAudio: bytes => ipcRenderer.invoke('reel-capture:audio', { token, bytes }),
   pauseChanged: paused => status({ type: 'pause_changed', paused }),
   audioEnded: () => status({ type: 'audio_ended' }),

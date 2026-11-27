@@ -37,7 +37,8 @@ function fixture(options = {}) {
     desktopCapturer: { getSources: async query => { calls.push(['sources', query]); return options.sources ?? [{ id: 'window:999:0' }, { id: 'window:123:0' }]; } },
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     store: { begin: async metadata => { calls.push(['begin', metadata]); return options.beginGate ? options.beginGate.promise : writer; } },
-    origin: 'http://127.0.0.1:45123', defaultRenderEndpoint: options.defaultRenderEndpoint, onFailure: error => failures.push(error),
+    origin: 'http://127.0.0.1:45123', defaultRenderEndpoint: options.defaultRenderEndpoint, samplePrimaryClick: options.samplePrimaryClick,
+    onFailure: error => failures.push(error),
     onSourceEnded: () => { sourceEnds.push('ended'); return options.onSourceEnded?.(); } });
   const controller = new AbortController();
   const requestArgs = options.requestArgs ? options.requestArgs(controller.signal)
@@ -66,6 +67,38 @@ test('manual window captures save a pending transcript checkpoint without starti
   const handle=await running(f), stop=f.recorder.stop(handle);
   await f.status({type:'done',duration:4,segments:1});
   await stop;
+});
+
+test('click sampling is bound to the active consented manual window and stops before saving', async () => {
+  const samples=[];
+  const f=fixture({sources:[{id:'window:123:0',name:'Chrome'}],samplePrimaryClick:async hwnd=>{samples.push(hwnd);return {x:0.25,y:0.75};},
+    requestArgs:signal=>({hwnd:'123',manual:true,title:'Chrome',sourceName:'Chrome',meeting:{manual:true},ownerUserID:'owner',systemAudio:true,microphone:false,signal})});
+  await settle(); await f.ready(); await f.init(); await f.fragment(1);
+  const handle=await f.start, window=f.windows[0];
+  assert.equal(window.command.selectedHwnd,'123');
+  const click=await f.invoke('reel-capture:click',{});
+  assert.deepEqual(click,{x:0.25,y:0.75}); assert.deepEqual(samples,['123']);
+  const stop=f.recorder.stop(handle);
+  await assert.rejects(f.invoke('reel-capture:click',{}),/click indicators/i);
+  await f.status({type:'done',duration:4,segments:1}); await stop;
+
+  const automatic=fixture({samplePrimaryClick:async()=>{throw Error('must not sample');}});
+  const automaticHandle=await running(automatic);
+  await assert.rejects(automatic.invoke('reel-capture:click',{}),/click indicators/i);
+  const saving=automatic.recorder.stop(automaticHandle);
+  await automatic.status({type:'done',duration:4,segments:1}); await saving;
+});
+
+test('optional click helper failure disables highlights without stopping a manual recording', async () => {
+  const f=fixture({sources:[{id:'window:123:0',name:'Chrome'}],samplePrimaryClick:async()=>{throw Error('helper unavailable');},
+    requestArgs:signal=>({hwnd:'123',manual:true,title:'Chrome',sourceName:'Chrome',meeting:{manual:true},ownerUserID:'owner',systemAudio:true,microphone:false,signal})});
+  const handle=await running(f), window=f.windows[0];
+  assert.equal(await f.invoke('reel-capture:click',{}),null);
+  assert.equal(window.command.type,'click-sampling');
+  assert.equal(window.command.enabled,false);
+  assert.equal(f.failures.length,0);
+  const stop=f.recorder.stop(handle);
+  await f.status({type:'done',duration:4,segments:1}); await stop;
 });
 
 test('selects exact HWND and starts only after AAC readiness and a durable first fragment', async () => {
@@ -333,7 +366,7 @@ function rendererFixture(options = {}) {
     done: async () => { calls.push(['done']); }, sourceEnded: async () => { calls.push(['source_ended']); },
     failed: async reason => { calls.push(['failed', reason]); },
   };
-  vm.runInNewContext(rendererSource, { TestCaptureSession: CaptureSession, Uint8Array,
+  vm.runInNewContext(rendererSource, { TestCaptureSession: CaptureSession, Uint8Array, setInterval, clearInterval,
     window: { reelCapture: api, addEventListener: (name, callback) => { events[name] = callback; } },
     document: { querySelector: () => ({ textContent: '' }) },
     navigator: { mediaDevices: { getUserMedia: constraints => { calls.push(['acquire', constraints]); return constraints.video === false ? micAcquire.promise : acquire.promise; } } },
@@ -450,14 +483,26 @@ test('renderer carries mixed PCM across block boundaries and waits for storage b
 });
 
 test('manual pause waits for the renderer and encoder before confirming, and can stop while paused',async()=>{
-  const f=fixture({sources:[{id:'window:123:0',name:'Demo'}],requestArgs:signal=>({hwnd:'123',manual:true,title:'Demo',sourceName:'Demo',meeting:{manual:true},ownerUserID:'owner',systemAudio:true,microphone:true,signal})});
+  const samples=[];
+  const f=fixture({sources:[{id:'window:123:0',name:'Demo'}],samplePrimaryClick:async hwnd=>{samples.push(hwnd);return null;},
+    requestArgs:signal=>({hwnd:'123',manual:true,title:'Demo',sourceName:'Demo',meeting:{manual:true},ownerUserID:'owner',systemAudio:true,microphone:true,signal})});
   const handle=await running(f);
+  await f.invoke('reel-capture:click',{});
+  assert.deepEqual(samples,['123']);
   let confirmed=false;
   const paused=f.recorder.setPaused(handle,true).then(()=>{confirmed=true;});
   assert.equal(f.windows[0].command.type,'pause');
+  await assert.rejects(f.invoke('reel-capture:click',{}),/click indicators/i);
   await f.status({type:'pause_changed',paused:false});
   assert.equal(confirmed,false);
   await f.status({type:'pause_changed',paused:true}); await paused;
+  await assert.rejects(f.invoke('reel-capture:click',{}),/click indicators/i);
+  const resumed=f.recorder.setPaused(handle,false);
+  assert.equal(f.windows[0].command.type,'resume');
+  await assert.rejects(f.invoke('reel-capture:click',{}),/click indicators/i);
+  await f.status({type:'pause_changed',paused:false}); await resumed;
+  await f.invoke('reel-capture:click',{});
+  assert.deepEqual(samples,['123','123']);
   const finish=f.recorder.stop(handle);
   await f.status({type:'done',duration:4,segments:1});
   assert.equal((await finish).durationSeconds,4);

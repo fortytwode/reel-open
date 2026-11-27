@@ -103,8 +103,8 @@ try {
     & npm run build:local-ai --prefix desktop-windows
     if ($LASTEXITCODE -ne 0) { throw 'Bundling the pinned local AI worker runtime failed.' }
 } finally { Pop-Location }
-$nativeInputs = @('Core.cs', 'WinJoin.cs', 'OutlookCalendar.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs',
-    'MediaTrim.cs', 'MediaTrimProgram.cs', 'MediaTrimTests.cs', 'build.cmd', 'build-media-trim.ps1')
+$nativeInputs = @('Core.cs', 'ClickSampling.cs', 'WinJoin.cs', 'OutlookCalendar.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs',
+    'ClickSamplingTests.cs', 'MediaTrim.cs', 'MediaTrimProgram.cs', 'MediaTrimTests.cs', 'build.cmd', 'build-fixture.cmd', 'build-media-trim.ps1', 'test-click-sampling.cmd')
 $sourceHashes = [ordered]@{}
 foreach ($relative in $productFiles) {
     $sourceHashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $repo $relative) -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -36,11 +36,12 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
     publish({ phase: state.phase, ownerUserID, sources: options });
     return options;
   }
-  async function runStart({ ownerUserID, sourceID, consentConfirmed, includeMicrophone = false } = {}) {
+  async function runStart({ ownerUserID, sourceID, consentConfirmed, includeMicrophone = false, highlightClicks = true } = {}) {
     owner(ownerUserID);
     check(consentConfirmed === true, 'Confirm that you have permission to record this window.');
     check(!isActive(), 'A window recording is already active.');
     check(typeof includeMicrophone === 'boolean', 'Choose whether to include the microphone.');
+    check(typeof highlightClicks === 'boolean', 'Choose whether to highlight clicks.');
     const selected = choices.get(sourceID);
     choices.clear();
     publish({ phase: state.phase, ownerUserID, sources: [] });
@@ -57,7 +58,7 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
       check(match, 'That window cannot be captured.');
       const handle = await recorder.start({
         ownerUserID, hwnd: match[1], manual: true, title: capture.title, sourceName: selected.sourceName, meeting: { manual: true },
-        systemAudio: true, microphone: includeMicrophone, signal: capture.controller.signal,
+        systemAudio: true, microphone: includeMicrophone, highlightClicks, signal: capture.controller.signal,
       });
       if (active !== capture || !current(capture)) {
         try { await recorder.stop(handle); } catch {}

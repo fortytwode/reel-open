@@ -350,3 +350,14 @@ jobs:
           if ($process.ExitCode) { throw "Packaged manual capture smoke exited with $($process.ExitCode)" }
           node desktop-windows/probe/adapter-verify.mjs --manual-picker --test-missing-output "--out=$out"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  click-sampling-fixture:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify selected-window click hit testing and coordinates
+        shell: cmd
+        run: desktop-windows\native\test-click-sampling.cmd
