@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$Sync,
+    [switch]$Diagnostic,
     [string]$PlanPath,
     [string]$Token,
     [string]$Scope
@@ -29,6 +30,17 @@ function Quote-CommandLineArgument([string]$value) {
     return '"' + $escaped + '"'
 }
 
+function ConvertTo-UtcDateTimeOffset($value) {
+    if ($value -is [DateTimeOffset]) { return $value.ToUniversalTime() }
+    if ($value -is [DateTime]) {
+        $date = $value
+        if ($date.Kind -eq [DateTimeKind]::Unspecified) { $date = [DateTime]::SpecifyKind($date, [DateTimeKind]::Utc) }
+        return [DateTimeOffset]::new($date.ToUniversalTime())
+    }
+    return [DateTimeOffset]::Parse([string]$value, [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::AssumeUniversal).ToUniversalTime()
+}
+
 function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     if (-not [IO.Path]::IsPathRooted($planPath) -or -not (Test-Path -LiteralPath $planPath -PathType Leaf)) {
         throw 'Reminder task plan is unavailable.'
@@ -40,18 +52,18 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     $wanted = @{}
     foreach ($item in $plan) {
         if ($item.token -notmatch '^[a-f0-9]{32}$') { throw 'Invalid reminder task entry.' }
-        try { $wanted[$item.token] = [DateTimeOffset]::Parse([string]$item.start).ToUniversalTime() }
+        try { $wanted[$item.token] = ConvertTo-UtcDateTimeOffset $item.start }
         catch { throw 'Invalid reminder task entry.' }
         $isRetry = $item.PSObject.Properties.Name -contains 'retry' -and $item.retry -eq $true
         if ($isRetry) {
-            try { $end = [DateTimeOffset]::Parse([string]$item.end).ToUniversalTime() }
+            try { $end = ConvertTo-UtcDateTimeOffset $item.end }
             catch { throw 'Invalid reminder retry entry.' }
             if ($end -le $wanted[$item.token]) { $null = $wanted.Remove($item.token); continue }
             $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$end; retry=$true }
         } else {
             $end = $null
             if ($item.PSObject.Properties.Name -contains 'end') {
-                try { $end = [DateTimeOffset]::Parse([string]$item.end).ToUniversalTime() }
+                try { $end = ConvertTo-UtcDateTimeOffset $item.end }
                 catch { throw 'Invalid reminder end time.' }
                 if ($end -le $wanted[$item.token]) { throw 'Invalid reminder end time.' }
             }
@@ -73,20 +85,38 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     $rearmedCount = 0
     $skippedAtEndCount = 0
     $skippedPastCount = 0
+    $timingDiagnostics = [System.Collections.Generic.List[object]]::new()
     foreach ($token in $wanted.Keys) {
         $entry = $wanted[$token]
+        $planStartUtcMs = $entry.start.ToUnixTimeMilliseconds()
+        $planEndUtcMs = $null
+        if ($null -ne $entry.end) { $planEndUtcMs = $entry.end.ToUnixTimeMilliseconds() }
         $start = $entry.start
+        $syncNow = [DateTimeOffset]::UtcNow
         if ($start -le [DateTimeOffset]::UtcNow) {
-            $start = [DateTimeOffset]::UtcNow.AddSeconds(15)
+            $syncNow = [DateTimeOffset]::UtcNow
+            $start = $syncNow.AddSeconds(15)
             $rearmedCount++
-            if ($null -eq $entry.end -or $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); $skippedAtEndCount++; continue }
+            if ($null -eq $entry.end -or $start -ge $entry.end) {
+                $folder.DeleteTask($prefix + $token, 0); $skippedAtEndCount++
+                if ($Diagnostic) { $timingDiagnostics.Add([pscustomobject]@{ planStartUtcMs=$planStartUtcMs; planEndUtcMs=$planEndUtcMs; syncNowUtcMs=$syncNow.ToUnixTimeMilliseconds(); candidateUtcMs=$start.ToUnixTimeMilliseconds(); decision='end-before-round' }) }
+                continue
+            }
         }
         $ticksWithinSecond = $start.Ticks % [TimeSpan]::TicksPerSecond
         if ($ticksWithinSecond -ne 0) {
             $start = $start.AddTicks([TimeSpan]::TicksPerSecond - $ticksWithinSecond)
         }
-        if ($null -ne $entry.end -and $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); $skippedAtEndCount++; continue }
-        if ($start -le [DateTimeOffset]::UtcNow) { $skippedPastCount++; continue }
+        if ($null -ne $entry.end -and $start -ge $entry.end) {
+            $folder.DeleteTask($prefix + $token, 0); $skippedAtEndCount++
+            if ($Diagnostic) { $timingDiagnostics.Add([pscustomobject]@{ planStartUtcMs=$planStartUtcMs; planEndUtcMs=$planEndUtcMs; syncNowUtcMs=$syncNow.ToUnixTimeMilliseconds(); candidateUtcMs=$start.ToUnixTimeMilliseconds(); decision='end-after-round' }) }
+            continue
+        }
+        if ($start -le [DateTimeOffset]::UtcNow) {
+            $skippedPastCount++
+            if ($Diagnostic) { $timingDiagnostics.Add([pscustomobject]@{ planStartUtcMs=$planStartUtcMs; planEndUtcMs=$planEndUtcMs; syncNowUtcMs=$syncNow.ToUnixTimeMilliseconds(); candidateUtcMs=$start.ToUnixTimeMilliseconds(); decision='past' }) }
+            continue
+        }
         $task = $service.NewTask(0)
         $task.RegistrationInfo.Description = 'Local opt-in Reel meeting reminder.'
         $task.Principal.UserId = $currentSid
@@ -106,8 +136,11 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         $taskName = $prefix + $token
         $null = $folder.RegisterTaskDefinition($taskName, $task, 6, $currentName, $null, 3, $null) # CREATE_OR_UPDATE, INTERACTIVE_TOKEN
         $registeredCount++
+        if ($Diagnostic) { $timingDiagnostics.Add([pscustomobject]@{ planStartUtcMs=$planStartUtcMs; planEndUtcMs=$planEndUtcMs; syncNowUtcMs=$syncNow.ToUnixTimeMilliseconds(); candidateUtcMs=$start.ToUnixTimeMilliseconds(); decision='registered' }) }
     }
-    [pscustomobject]@{ registered=$registeredCount; rearmed=$rearmedCount; skippedAtEnd=$skippedAtEndCount; skippedPast=$skippedPastCount } | ConvertTo-Json -Compress
+    $summary = [ordered]@{ registered=$registeredCount; rearmed=$rearmedCount; skippedAtEnd=$skippedAtEndCount; skippedPast=$skippedPastCount }
+    if ($Diagnostic) { $summary['timing'] = @($timingDiagnostics.ToArray()) }
+    [pscustomobject]$summary | ConvertTo-Json -Compress -Depth 4
 }
 
 function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
@@ -141,7 +174,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
 }
 
 try {
-    if ($Sync) { Sync-ReminderTasks $PlanPath $Scope }
+    if ($Sync) { Sync-ReminderTasks $PlanPath $Scope $Diagnostic }
     else { Deliver-ReminderTrigger $Token $Scope }
 } catch {
     [Console]::Error.WriteLine('Reel meeting reminder task failed.')

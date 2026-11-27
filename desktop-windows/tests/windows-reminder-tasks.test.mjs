@@ -59,6 +59,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'A sync that arrives after meeting start retries soon only while the meeting is still active.');
   assert.match(taskHelper,/ToString\("yyyy-MM-dd'T'HH:mm:ss'Z'"/,
     'Task Scheduler receives whole-second boundaries after they are safely rounded upward.');
+  assert.match(taskHelper,/ConvertTo-UtcDateTimeOffset\(\$value\)[\s\S]*\$value -is \[DateTime\][\s\S]*\$date\.Kind[\s\S]*ToUniversalTime/,
+    'PowerShell preserves UTC DateTime kind instead of stringifying JSON timestamps in the runner timezone.');
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');

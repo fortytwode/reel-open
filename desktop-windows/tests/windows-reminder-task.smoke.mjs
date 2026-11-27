@@ -18,11 +18,12 @@ let lastSyncSummary = null;
 const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: powershell,
   launchArguments: mode === 'portable' ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', receiver] : [],
   exec:(file,args,options)=>{
-    const output=execFileSync(file,args,options);
+    const output=execFileSync(file,[...args,'-Diagnostic'],options);
     lastSyncSummary=JSON.parse(output.toString('utf8').trim());
     console.log(`Windows reminder sync summary: ${JSON.stringify(lastSyncSummary)}`);
     return output;
   }});
+const syncCounts = () => { const {timing,...counts}=lastSyncSummary ?? {}; return counts; };
 const command = (phase,script,timeout=15_000) => {
   console.log(`Windows reminder smoke: ${phase} (Node ${process.arch}).`);
   const started=Date.now();
@@ -63,7 +64,7 @@ try {
   console.log('Windows reminder smoke: register current-user task.');
   manager.sync([{token,start:taskStart,end:taskEnd}]);
   console.log('Windows reminder smoke: Task Scheduler registration returned.');
-  assert.deepEqual(lastSyncSummary,{registered:1,rearmed:0,skippedAtEnd:0,skippedPast:0},
+  assert.deepEqual(syncCounts(),{registered:1,rearmed:0,skippedAtEnd:0,skippedPast:0},
     'The helper reports that its eligible task was registered.');
   let info = taskQuery(taskName);
   const security=taskSecurity(taskName);
@@ -78,10 +79,17 @@ try {
   assert.ok(!security.args.includes('private calendar title') && !security.args.includes('private-event-id'));
   const retryEnd=new Date(Date.now()+60_000).toISOString();
   const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
+  console.log(`Retry fixture UTC milliseconds: ${JSON.stringify({start:Date.parse(alreadyDueRetry),end:Date.parse(retryEnd),created:Date.now()})}`);
   manager.sync([{token,start:alreadyDueRetry,retry:true,end:retryEnd}]);
   console.log('Windows reminder smoke: retry task update returned.');
-  assert.deepEqual(lastSyncSummary,{registered:1,rearmed:1,skippedAtEnd:0,skippedPast:0},
+  assert.deepEqual(syncCounts(),{registered:1,rearmed:1,skippedAtEnd:0,skippedPast:0},
     'The helper reports that the due retry was re-armed and registered.');
+  const retryTiming=lastSyncSummary.timing?.[0];
+  assert.equal(retryTiming?.decision,'registered');
+  assert.ok(retryTiming.planEndUtcMs-retryTiming.syncNowUtcMs>50_000,
+    'The UTC event end survives PowerShell JSON parsing as a future bound.');
+  assert.ok(retryTiming.candidateUtcMs>retryTiming.syncNowUtcMs+14_000
+    && retryTiming.candidateUtcMs<retryTiming.planEndUtcMs,'The UTC retry candidate remains between the safe delay and meeting end.');
   const retried=taskQuery(taskName);
   const retriedSecurity=taskSecurity(taskName);
   assert.equal(retried.name,taskName,'Rearming replaces the existing one-shot task instead of leaving a consumed task.');
@@ -100,12 +108,12 @@ try {
   }
   assert.equal(completed,true,'The registered task runs its trigger action.');
   manager.sync([{token,start:new Date(Date.now()-10_000).toISOString(),retry:true,end:new Date(Date.now()+2_000).toISOString()}]);
-  assert.deepEqual(lastSyncSummary,{registered:0,rearmed:1,skippedAtEnd:1,skippedPast:0},
+  assert.deepEqual(syncCounts(),{registered:0,rearmed:1,skippedAtEnd:1,skippedPast:0},
     'The helper reports the retry was suppressed because its safe delay reached meeting end.');
   assert.equal(taskCount(),0,'No retry task remains when its safe delay would reach the meeting end.');
   const delayedSyncEnd=new Date(Date.now()+60_000).toISOString();
   manager.sync([{token,start:new Date(Date.now()-1_000).toISOString(),end:delayedSyncEnd}]);
-  assert.deepEqual(lastSyncSummary,{registered:1,rearmed:1,skippedAtEnd:0,skippedPast:0},
+  assert.deepEqual(syncCounts(),{registered:1,rearmed:1,skippedAtEnd:0,skippedPast:0},
     'The helper reports that a late regular sync was re-armed and registered.');
   const delayedTask=taskQuery(taskName), delayedSecurity=taskSecurity(taskName);
   assert.equal(delayedTask.name,taskName,'A regular meeting task is re-armed if sync finishes after its start boundary.');
@@ -113,7 +121,7 @@ try {
   assert.ok(Date.parse(delayedSecurity.start)<Date.parse(delayedSyncEnd),'A delayed sync does not schedule past the meeting end.');
   const endBoundary=Math.ceil((Date.now()+60_001)/1000)*1000;
   manager.sync([{token,start:new Date(endBoundary-1).toISOString(),end:new Date(endBoundary).toISOString()}]);
-  assert.deepEqual(lastSyncSummary,{registered:0,rearmed:0,skippedAtEnd:1,skippedPast:0},
+  assert.deepEqual(syncCounts(),{registered:0,rearmed:0,skippedAtEnd:1,skippedPast:0},
     'The helper reports that rounding would move the reminder to meeting end.');
   assert.equal(taskCount(),0,'Rounding a fractional start to the next second removes a reminder that would start at its meeting end.');
   if (mode==='msix') {
