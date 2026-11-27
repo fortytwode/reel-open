@@ -65,7 +65,7 @@ const taskStatus = name => JSON.parse(command('read task action result and regis
   `$identity=[Security.Principal.WindowsIdentity]::GetCurrent(); $principal=[string]$t.Definition.Principal.UserId; $taskSid=$principal; `+
   `if (-not $taskSid.StartsWith('S-1-')) { $account=$principal; if (-not $principal.Contains([string][char]92)) { $account=$env:USERDOMAIN+[char]92+$principal }; `+
   `$taskSid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
-  `[pscustomobject]@{state=[int]$t.State;lastTaskResult=[uint32]$t.LastTaskResult;lastRunUtc=$t.LastRunTime.ToUniversalTime().ToString('o'); `+
+  `[pscustomobject]@{state=[int]$t.State;lastTaskResult=[int]$t.LastTaskResult;lastRunUtc=$t.LastRunTime.ToUniversalTime().ToString('o'); `+
   `principalMatchesCurrent=($taskSid -eq $identity.User.Value);logonType=[int]$t.Definition.Principal.LogonType; `+
   `sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`));
 let completed = false;
@@ -99,30 +99,8 @@ try {
   assert.match(security.args, new RegExp(token),'The registered task action carries its opaque meeting token.');
   assert.equal(Date.parse(security.start),taskBoundary,'Task Scheduler start time is rounded up to the next whole second, never earlier than the meeting.');
   assert.ok(!security.args.includes('private calendar title') && !security.args.includes('private-event-id'));
-  const retryEnd=new Date(Date.now()+60_000).toISOString();
-  const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
-  console.log(`Retry fixture UTC milliseconds: ${JSON.stringify({start:Date.parse(alreadyDueRetry),end:Date.parse(retryEnd),created:Date.now()})}`);
-  manager.sync([{token,start:alreadyDueRetry,retry:true,end:retryEnd}]);
-  console.log('Windows reminder smoke: retry task update returned.');
-  assert.deepEqual(syncCounts(),{registered:1,rearmed:1,skippedAtEnd:0,skippedPast:0},
-    'The helper reports that the due retry was re-armed and registered.');
-  const retryTiming=lastSyncSummary.timing?.[0];
-  assert.equal(retryTiming?.decision,'registered');
-  assert.equal(retryTiming.planEndUtcMs,Date.parse(retryEnd),'PowerShell preserved the retry end instant exactly.');
-  assert.ok(retryTiming.planEndUtcMs-retryTiming.syncNowUtcMs>50_000,
-    'The UTC event end survives PowerShell JSON parsing as a future bound.');
-  assert.ok(retryTiming.candidateUtcMs>retryTiming.syncNowUtcMs+14_000
-    && retryTiming.candidateUtcMs<retryTiming.planEndUtcMs,'The UTC retry candidate remains between the safe delay and meeting end.');
-  const retried=taskQuery(taskName);
-  const retriedSecurity=taskSecurity(taskName);
-  assert.equal(retriedSecurity.name,taskName,'The exact-name schtasks XML query confirms the rearmed task exists.');
-  assert.equal(taskCount(),1,'Rearming updates the existing one-shot task without leaving a duplicate.');
-  assert.equal(retried.userSid,retried.currentSid,'The rearmed task still belongs to the current Windows user SID.');
-  assert.equal(retriedSecurity.logonType,'InteractiveToken','The rearmed task still uses the current interactive token.');
-  assert.ok(['<missing>','LeastPrivilege'].includes(retriedSecurity.runLevel),
-    'The rearmed task remains at least-privileged.');
-  assert.ok(Date.parse(retriedSecurity.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
-  assert.ok(Date.parse(retriedSecurity.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
+  // Exercise the real registered action while its initial trigger is safely far in the future.
+  // ARM64 CI can take long enough to run the action that a due-retry trigger would overlap it.
   command('run registered task through Task Scheduler COM',
     `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${taskName}'); $null=$t.Run($null)`);
   const immediateStatus=taskStatus(taskName);
@@ -151,6 +129,30 @@ try {
   assert.equal(finalStatus.principalMatchesCurrent,true,'The registered trigger action principal is the current Windows user.');
   assert.equal(finalStatus.logonType,3,'The registered trigger action uses an interactive token.');
   assert.equal(finalStatus.sessionId,runtime.sessionId,'The task status probe is running in the same interactive Windows session as the smoke process.');
+  const retryEnd=new Date(Date.now()+60_000).toISOString();
+  const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
+  console.log(`Retry fixture UTC milliseconds: ${JSON.stringify({start:Date.parse(alreadyDueRetry),end:Date.parse(retryEnd),created:Date.now()})}`);
+  manager.sync([{token,start:alreadyDueRetry,retry:true,end:retryEnd}]);
+  console.log('Windows reminder smoke: retry task update returned.');
+  assert.deepEqual(syncCounts(),{registered:1,rearmed:1,skippedAtEnd:0,skippedPast:0},
+    'The helper reports that the due retry was re-armed and registered.');
+  const retryTiming=lastSyncSummary.timing?.[0];
+  assert.equal(retryTiming?.decision,'registered');
+  assert.equal(retryTiming.planEndUtcMs,Date.parse(retryEnd),'PowerShell preserved the retry end instant exactly.');
+  assert.ok(retryTiming.planEndUtcMs-retryTiming.syncNowUtcMs>50_000,
+    'The UTC event end survives PowerShell JSON parsing as a future bound.');
+  assert.ok(retryTiming.candidateUtcMs>retryTiming.syncNowUtcMs+14_000
+    && retryTiming.candidateUtcMs<retryTiming.planEndUtcMs,'The UTC retry candidate remains between the safe delay and meeting end.');
+  const retried=taskQuery(taskName);
+  const retriedSecurity=taskSecurity(taskName);
+  assert.equal(retriedSecurity.name,taskName,'The exact-name schtasks XML query confirms the rearmed task exists.');
+  assert.equal(taskCount(),1,'Rearming updates the existing one-shot task without leaving a duplicate.');
+  assert.equal(retried.userSid,retried.currentSid,'The rearmed task still belongs to the current Windows user SID.');
+  assert.equal(retriedSecurity.logonType,'InteractiveToken','The rearmed task still uses the current interactive token.');
+  assert.ok(['<missing>','LeastPrivilege'].includes(retriedSecurity.runLevel),
+    'The rearmed task remains at least-privileged.');
+  assert.ok(Date.parse(retriedSecurity.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
+  assert.ok(Date.parse(retriedSecurity.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
   manager.sync([{token,start:new Date(Date.now()-10_000).toISOString(),retry:true,end:new Date(Date.now()+2_000).toISOString()}]);
   assert.deepEqual(syncCounts(),{registered:0,rearmed:1,skippedAtEnd:1,skippedPast:0},
     'The helper reports the retry was suppressed because its safe delay reached meeting end.');

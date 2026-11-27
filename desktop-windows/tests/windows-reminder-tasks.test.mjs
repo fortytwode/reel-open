@@ -69,12 +69,15 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Both regular and retry plans parse their required UTC end bound directly.');
   assert.match(smoke,/GetTask\('\$\{taskName\}'\)/,
     'The trigger run uses the exact validated task name instead of a COM-serialized name field.');
-  assert.match(smoke,/lastTaskResult=\[uint32\]\$t\.LastTaskResult[\s\S]*principalMatchesCurrent[\s\S]*logonType=/,
+  assert.match(smoke,/lastTaskResult=\[int\]\$t\.LastTaskResult[\s\S]*principalMatchesCurrent[\s\S]*logonType=/,
     'The Windows smoke reports the real registered action result and verifies its current-user interactive principal.');
   assert.match(smoke,/\$null=\$t\.Run\(\$null\)[\s\S]*lastTaskResult,0/,
     'The Windows smoke runs the registered task and checks its action result.');
   assert.match(smoke,/const deadline = Date\.now\(\)\+15_000[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
     'Trigger delivery is required alongside a completed, non-running scheduler action within a bounded wait.');
+  assert.ok(smoke.indexOf("command('run registered task through Task Scheduler COM'")
+    < smoke.indexOf('manager.sync([{token,start:alreadyDueRetry'),
+    'The actual task action runs before the due-retry fixture can create an overlapping scheduled trigger.');
   assert.match(smoke,/receiver\.mjs[\s\S]*process\.argv\.find\(argument => \/\^--meeting-reminder-trigger=/,
     'The portable task smoke receiver accepts the same argv trigger flag as the Electron app.');
   assert.doesNotMatch(smoke,/\b(?:info|retried|delayedTask)\.name\b/,
