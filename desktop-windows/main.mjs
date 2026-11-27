@@ -283,7 +283,7 @@ async function run({triggerOnly=false,triggerToken=null}={}) {
       catch { return []; }
     }),
     onState:()=>{if(window && !window.isDestroyed() && service) window.webContents.send('reel-desktop:state',service.state());}}) : null;
-  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,reminderScheduler:reminders,manualCapture,discover:discoverGoogleMeetings,discoverOutlook:discoverOutlookMeetings,
+  service=createDesktopService({auth,org,store,processor,localSummarize:localWhisper?.summarize,shareMeeting:meetingShare,reminderScheduler:reminders,manualCapture,discover:discoverGoogleMeetings,discoverOutlook:discoverOutlookMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
     openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },

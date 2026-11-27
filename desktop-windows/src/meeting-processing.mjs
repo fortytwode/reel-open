@@ -151,8 +151,9 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
       if(transcriptionMode==='local')check(typeof localTranscribe==='function','Local transcription is unavailable in this build.');
       const calendar = calendarContext(meeting);
       const onlyRecipient = calendar ? null : auth.getProfile()?.email?.toLowerCase();
-      check(calendar || internalEmail(onlyRecipient, allowedEmailDomain), 'Sign in with your team account to deliver your recap.');
-      if (receiptOK(processing.receipt, allowedEmailDomain, onlyRecipient)) return processing;
+      if(transcriptionMode==='cloud')
+        check(calendar || internalEmail(onlyRecipient, allowedEmailDomain), 'Sign in with your team account to process or deliver your recap.');
+      if (processing.receipt && receiptOK(processing.receipt, allowedEmailDomain, onlyRecipient)) return processing;
       const attendees = calendar ? [...new Set((meeting.attendees ?? meeting.attendeeEmails ?? []).filter(x => typeof x === 'string'))] : [];
       check(Number.isFinite(Date.parse(processing.createdAt)), 'Meeting start time is missing.');
       if (!processing.transcriptComplete) {

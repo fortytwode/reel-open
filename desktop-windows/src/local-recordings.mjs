@@ -11,7 +11,7 @@ const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantCons
   systemAudioConsent: false, meetingReminders: false, localTranscription: false, selection: { useAll: true, ids: [] } });
 function localSummaryMetadata(recording) {
   const processing=recording.processing;
-  if(processing?.localOnly!==true||processing.summaryEngine!=='extractive-local')return null;
+  if(processing?.localOnly!==true||!['extractive-local','flan-t5-small-local'].includes(processing.summaryEngine))return null;
   const plainText=(value,max)=>typeof value==='string'?Array.from(value.replace(/\s+/gu,' ').trim()).slice(0,max).join(''):null;
   const titleSuggestion=plainText(processing.suggestedTitle,90);
   const summary=plainText(processing.summary,700);
@@ -22,7 +22,7 @@ function localSummaryMetadata(recording) {
     .slice(0,8).map(chapter=>({start:Math.round(chapter.start*10)/10,title:plainText(chapter.title,60)}))
     .filter(chapter=>chapter.title);
   if(!titleSuggestion&&!summary&&!chapters.length)return null;
-  return {suggestedTitle:titleSuggestion,summary,chapters};
+  return {suggestedTitle:titleSuggestion,summary,chapters,source:processing.summaryEngine==='flan-t5-small-local'?'on-device-ai':'extractive'};
 }
 const metadata = recording => {
   const localSummary=localSummaryMetadata(recording);

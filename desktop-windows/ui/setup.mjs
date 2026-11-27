@@ -244,6 +244,11 @@ function renderRecordings() {
         openTranscript.type='button'; openTranscript.dataset.action='openTranscript'; openTranscript.dataset.recordingId=recording.id; left.append(openTranscript);
         const transcript=node('button','','Copy transcript');
         transcript.type='button'; transcript.dataset.action='copyTranscript'; transcript.dataset.recordingId=recording.id; left.append(transcript);
+        if(recording.processing.localOnly===true) {
+          const summarize=node('button','',recording.processing.localSummary?.source==='on-device-ai'?'Regenerate on-device AI summary…':'Generate on-device AI summary…');
+          summarize.type='button';summarize.dataset.action='generateLocalSummary';summarize.dataset.recordingId=recording.id;
+          left.append(summarize);
+        }
       }
       const labels=recording.manualRecording
         ? {pending:'Saved on this computer. Transcribe when ready.',transcribing:recording.processing.transcriptionMode==='local'?'Transcribing locally':'Transcribing',completed:recording.processing.noSpeech?'No speech detected':'Transcript saved. No recap or email was created.',failed:'Transcription failed'}
@@ -252,7 +257,7 @@ function renderRecordings() {
       const localSummary=recording.processing.localOnly?recording.processing.localSummary:null;
       if(localSummary) {
         const details=node('details','local-extractive-summary');
-        details.append(node('summary','','Local extractive notes (not AI-generated)'));
+        details.append(node('summary','',localSummary.source==='on-device-ai'?'On-device AI summary':'Local extractive notes (not AI-generated)'));
         if(localSummary.suggestedTitle) details.append(node('div','recording-meta',`Suggested title (not applied): ${localSummary.suggestedTitle}`));
         if(localSummary.summary) details.append(node('p','recording-summary',localSummary.summary));
         if(localSummary.chapters?.length) {
@@ -504,6 +509,13 @@ document.addEventListener('click', event=>{
     void perform('transcribeManualRecording',{id:request.id,transcriptionConfirmed:true,transcriptionMode,expectedOwnerUserID:ownerUserID}); return;
   }
   if(action==='openTranscript') { void openTranscript(target.dataset.recordingId,snapshot?.profile?.userID); return; }
+  if(action==='generateLocalSummary') {
+    const recording=(snapshot?.recordings??[]).find(item=>item.id===target.dataset.recordingId);
+    const ownerUserID=snapshot?.profile?.userID;
+    if(!recording||recording.processing?.localOnly!==true||recording.processing?.transcriptReady!==true||!ownerUserID) return;
+    if(!window.confirm('Generate a summary with a small AI model on this computer? The first use downloads about 90 MB. Your transcript stays on this device. If the model is unavailable, Reel keeps its extractive notes.')) return;
+    void perform('generateLocalSummary',{id:recording.id,summaryConfirmed:true,expectedOwnerUserID:ownerUserID});return;
+  }
   if(action==='closeTranscript') { byId('transcriptDialog').close(); return; }
   if(action==='setCompanionStartup') { perform(action,{enabled:target.dataset.enabled==='true'}); return; }
   if(action==='listCaptureWindows') { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
