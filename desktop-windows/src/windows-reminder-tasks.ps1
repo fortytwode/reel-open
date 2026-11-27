@@ -53,10 +53,11 @@ function Write-TaskDiagnostic([string]$filePath, [string]$phase) {
 function Read-ReminderLaunchConfiguration([string]$json, [string]$diagnosticsPath) {
     if ($json.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
     Write-TaskDiagnostic $diagnosticsPath 'launch-parser-assembly-load-before'
-    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    $parserAssembly = [Reflection.Assembly]::Load('System.Web.Extensions')
     Write-TaskDiagnostic $diagnosticsPath 'launch-parser-assembly-load-after'
+    $serializerType = $parserAssembly.GetType('System.Web.Script.Serialization.JavaScriptSerializer', $true)
     Write-TaskDiagnostic $diagnosticsPath 'launch-parser-create-before'
-    $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
+    $serializer = [Activator]::CreateInstance($serializerType)
     Write-TaskDiagnostic $diagnosticsPath 'launch-parser-create-after'
     $serializer.MaxJsonLength = 65536
     $serializer.RecursionLimit = 8

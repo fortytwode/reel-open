@@ -41,8 +41,9 @@ jobs:
             foreach ($parseError in $parseErrors) { [Console]::Error.WriteLine($parseError.Message) }
             exit 1
           }
-          Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-          $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
+          $parserAssembly = [Reflection.Assembly]::Load('System.Web.Extensions')
+          $serializerType = $parserAssembly.GetType('System.Web.Script.Serialization.JavaScriptSerializer', $true)
+          $serializer = [Activator]::CreateInstance($serializerType)
           $serializer.MaxJsonLength = 65536
           $serializer.RecursionLimit = 8
           $portable = $serializer.DeserializeObject('{"mode":"portable","executable":"C:\\Program Files\\Reel.exe","arguments":["--probe"]}')

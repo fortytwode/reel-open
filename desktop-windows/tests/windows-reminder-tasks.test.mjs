@@ -92,8 +92,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The trigger path uses .NET path/file APIs and separately marks config existence, read and JSON parse.');
   assert.match(deliveryFunction,/\$launch = Read-ReminderLaunchConfiguration \$launchJson \$DiagnosticPath[\s\S]*\$launchMode = \$launch\['mode'\][\s\S]*if \(\$launchMode -eq 'msix'\)[\s\S]*elseif \(\$launchMode -eq 'portable'/,
     'Delivery binds the validated mode in the caller scope before dispatching to the portable or MSIX launch path.');
-  assert.match(launchParserFunction,/System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*MaxJsonLength = 65536[\s\S]*RecursionLimit = 8[\s\S]*DeserializeObject\(\$json\)/,
-    'Cold-path JSON parsing uses the bounded .NET Framework parser available to Windows PowerShell 5.1.');
+  assert.match(launchParserFunction,/Reflection\.Assembly\]::Load\('System\.Web\.Extensions'\)[\s\S]*GetType\('System\.Web\.Script\.Serialization\.JavaScriptSerializer', \$true\)[\s\S]*Activator\]::CreateInstance\(\$serializerType\)[\s\S]*MaxJsonLength = 65536[\s\S]*RecursionLimit = 8[\s\S]*DeserializeObject\(\$json\)/,
+    'Cold-path JSON parsing uses direct .NET assembly/type loading and bounded parsing without Add-Type.');
   assert.match(launchParserFunction,/\$launch -isnot \[System\.Collections\.Generic\.Dictionary\[string,object\]\][\s\S]*ContainsKey\('mode'\)[\s\S]*\$allowedKeys[\s\S]*-notin \$allowedKeys[\s\S]*diagnosticsFile/,
     'The launch parser requires an object and rejects fields outside the portable/MSIX schema.');
   assert.doesNotMatch(launchParserFunction,/\.Contains\(/,
@@ -102,7 +102,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The validated generic dictionary is returned as one object instead of being enumerated into entries.');
   assert.doesNotMatch(launchParserFunction,/ConvertFrom-Json/,
     'Scheduled delivery does not invoke the slow PowerShell JSON cmdlet on the ARM cold path.');
-  assert.match(launchParserFunction,/launch-parser-assembly-load-before[\s\S]*Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*launch-parser-assembly-load-after[\s\S]*launch-parser-create-before[\s\S]*launch-parser-create-after[\s\S]*launch-json-deserialize-before[\s\S]*launch-json-deserialize-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,
+  assert.match(launchParserFunction,/launch-parser-assembly-load-before[\s\S]*Reflection\.Assembly\]::Load[\s\S]*launch-parser-assembly-load-after[\s\S]*launch-parser-create-before[\s\S]*launch-parser-create-after[\s\S]*launch-json-deserialize-before[\s\S]*launch-json-deserialize-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,
     'The scheduled smoke can distinguish parser assembly load, serializer construction, JSON parse and schema validation.');
   assert.ok(launchParserFunction.includes("'launch-json-deserialize-error:'")
     && launchParserFunction.includes('$exception.GetType().FullName')
@@ -136,7 +136,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The installed MSIX update test exercises actual scheduled-task delivery through its MSIX launch path.');
   assert.match(workflow,/\[System\.Management\.Automation\.Language\.Parser\]::ParseFile\([\s\S]*\$parseErrors\.Count/,
     'The early PowerShell preflight uses the PowerShell AST parser and fails on syntax errors.');
-  assert.match(workflow,/Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*DeserializeObject[\s\S]*\$portable[\s\S]*\$msix/,
+  assert.match(workflow,/Reflection\.Assembly\]::Load\('System\.Web\.Extensions'\)[\s\S]*GetType\('System\.Web\.Script\.Serialization\.JavaScriptSerializer'[\s\S]*Activator\]::CreateInstance[\s\S]*DeserializeObject[\s\S]*\$portable[\s\S]*\$msix/,
     'The early Windows PowerShell 5.1 preflight verifies the parser assembly and both production launch JSON shapes.');
   assert.match(workflow,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*-ValidateLaunchConfig -LaunchConfigPath[\s\S]*Windows PowerShell 5\.1 rejected reminder config/,
     'Windows PowerShell 5.1 invokes the full helper validator for production and diagnostic portable/MSIX JSON.');
