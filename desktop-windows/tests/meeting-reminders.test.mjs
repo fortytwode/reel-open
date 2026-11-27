@@ -95,8 +95,8 @@ test('persistent schedules store opaque task tokens and fire only for the opted-
   assert.equal(records.length,1);
   assert.equal(records[0].meetingID,'private-event-id');
   assert.match(records[0].token,/^[a-f0-9]{32}$/);
-  assert.deepEqual(plans.at(-1),[{token:records[0].token,start:new Date(start).toISOString()}],
-    'Task Scheduler receives only an opaque token and event time, never the meeting ID or title.');
+  assert.deepEqual(plans.at(-1),[{token:records[0].token,start:new Date(start).toISOString(),end:new Date(start+30*60_000).toISOString()}],
+    'Task Scheduler receives only an opaque token and event time bounds, never the meeting ID or title.');
   const token=records[0].token;
   assert.equal(scheduler.fire(token,{owner:'owner-b',reminders:true,at:new Date(start)}),false,
     'A task from a different signed-in account is discarded without a toast.');
@@ -165,7 +165,7 @@ test('refreshing an unchanged event ID and start updates title and shortened end
   scheduler.update({owner:'owner-a',reminders:true,meetings:[{...meeting('same-event'),title:'Updated title',end:new Date(start+10*60_000).toISOString()}]});
   assert.equal(records[0].title,'Updated title');
   assert.equal(records[0].end,new Date(start+10*60_000).toISOString());
-  assert.deepEqual(plan,[{token,start:new Date(start).toISOString()}]);
+  assert.deepEqual(plan,[{token,start:new Date(start).toISOString(),end:new Date(start+10*60_000).toISOString()}]);
   assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(start+11*60_000)}),false,
     'A shortened event cannot notify after its refreshed end.');
   assert.equal(records.length,0);

@@ -56,7 +56,7 @@ export function createMeetingReminders({ Notification, activate = () => {}, now 
       persistence.sync(records.filter(record => !record.fired).flatMap(record => {
         if (record.retryStart) return Date.parse(record.retryStart) < Date.parse(record.end)
           ? [{ token: record.token, start: record.retryStart, retry: true, end: record.end }] : [];
-        return [{ token: record.token, start: record.start }];
+        return [{ token: record.token, start: record.start, end: record.end }];
       }));
       lastError = null;
       needsSync = false;

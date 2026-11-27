@@ -49,7 +49,13 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
             if ($end -le $wanted[$item.token]) { $null = $wanted.Remove($item.token); continue }
             $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$end; retry=$true }
         } else {
-            $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$null; retry=$false }
+            $end = $null
+            if ($item.PSObject.Properties.Name -contains 'end') {
+                try { $end = [DateTimeOffset]::Parse([string]$item.end).ToUniversalTime() }
+                catch { throw 'Invalid reminder end time.' }
+                if ($end -le $wanted[$item.token]) { throw 'Invalid reminder end time.' }
+            }
+            $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$end; retry=$false }
         }
     }
     $service = New-TaskService
@@ -70,6 +76,11 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
             $start = [DateTimeOffset]::UtcNow.AddSeconds(15)
             if ($start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); continue }
         }
+        $ticksWithinSecond = $start.Ticks % [TimeSpan]::TicksPerSecond
+        if ($ticksWithinSecond -ne 0) {
+            $start = $start.AddTicks([TimeSpan]::TicksPerSecond - $ticksWithinSecond)
+        }
+        if ($null -ne $entry.end -and $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); continue }
         if ($start -le [DateTimeOffset]::UtcNow) { continue }
         $task = $service.NewTask(0)
         $task.RegistrationInfo.Description = 'Local opt-in Reel meeting reminder.'
@@ -83,7 +94,7 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         $task.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
         $task.Settings.ExecutionTimeLimit = 'PT2M'
         $trigger = $task.Triggers.Create(1) # TASK_TRIGGER_TIME
-        $trigger.StartBoundary = $start.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        $trigger.StartBoundary = $start.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
         $action = $task.Actions.Create(0) # TASK_ACTION_EXEC
         $action.Path = $powershell
         $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSCommandPath + '" -Token ' + $token + ' -Scope ' + $scopeValue

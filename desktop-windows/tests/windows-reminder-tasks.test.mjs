@@ -6,21 +6,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createEncryptedReminderStore, createWindowsReminderTaskManager } from '../src/windows-reminder-tasks.mjs';
 
-const scope='a'.repeat(64), token='b'.repeat(32), start='2026-11-26T10:00:00.000Z';
+const scope='a'.repeat(64), token='b'.repeat(32), start='2026-11-26T10:00:00.250Z', end='2026-11-26T10:30:00.000Z';
 function temp() { return mkdtempSync(path.join(os.tmpdir(),'reel-reminder-test-')); }
 
-test('task registration input contains only opaque tokens and UTC start times', () => {
+test('task registration input contains only opaque tokens and UTC event bounds', () => {
   const root=temp(), calls=[];let plan;
   try {
     const executable=path.join(root,'Program Files','Reel.exe');
     const manager=createWindowsReminderTaskManager({stateRoot:root,scope,executable,
       exec:(...args)=>{calls.push(args);const planPath=args[1][args[1].indexOf('-PlanPath')+1];plan=JSON.parse(readFileSync(planPath,'utf8'));}});
-    manager.sync([{token,start}]);
+    manager.sync([{token,start,end}]);
     assert.equal(calls.length,1);
     const command=calls[0];
     assert.equal(command[0],'powershell.exe');
     assert.equal(JSON.parse(readFileSync(manager.launchPath,'utf8')).executable,executable);
-    assert.deepEqual(plan,[{token,start}]);
+    assert.deepEqual(plan,[{token,start,end}]);
     assert.equal(JSON.stringify(plan).includes('private calendar title'),false);
     assert.equal(command[1].includes('-ExecutionPolicy'),true);
     assert.equal(command[2].windowsHide,true);
@@ -50,9 +50,13 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const allowlist=build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/)?.[1] ?? '';
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.ps1/);
-  assert.match(readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8'),/HH:mm:ss\.fff/,
-    'Task Scheduler must keep fractional-second meeting starts.');
   const taskHelper=readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8');
+  assert.match(taskHelper,/ticksWithinSecond[\s\S]*AddTicks\(/,
+    'Fractional meeting starts are rounded upward before Task Scheduler registration.');
+  assert.match(taskHelper,/\$null -ne \$entry\.end -and \$start -ge \$entry\.end/,
+    'A rounded boundary at or after meeting end is not registered.');
+  assert.match(taskHelper,/ToString\("yyyy-MM-dd'T'HH:mm:ss'Z'"/,
+    'Task Scheduler receives whole-second boundaries after they are safely rounded upward.');
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');

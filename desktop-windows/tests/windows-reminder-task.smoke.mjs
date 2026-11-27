@@ -51,8 +51,10 @@ try {
   const sidHash=createHash('sha256').update(runtime.sid,'utf8').digest('hex');
   const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
+  const taskEnd=new Date(Date.parse(taskStart)+30*60_000).toISOString();
+  const taskBoundary=Math.ceil(Date.parse(taskStart)/1000)*1000;
   console.log('Windows reminder smoke: register current-user task.');
-  manager.sync([{token,start:taskStart}]);
+  manager.sync([{token,start:taskStart,end:taskEnd}]);
   console.log('Windows reminder smoke: Task Scheduler registration returned.');
   let info = taskQuery(taskName);
   const security=taskSecurity(taskName);
@@ -63,7 +65,7 @@ try {
   assert.ok(['<missing>','LeastPrivilege'].includes(security.runLevel),
     'The task uses least privilege; Task Scheduler omits RunLevel from its XML when its least-privilege default applies.');
   assert.match(security.args, new RegExp(token),'The registered task action carries its opaque meeting token.');
-  assert.equal(Date.parse(security.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
+  assert.equal(Date.parse(security.start),taskBoundary,'Task Scheduler start time is rounded up to the next whole second, never earlier than the meeting.');
   assert.ok(!security.args.includes('private calendar title') && !security.args.includes('private-event-id'));
   const retryEnd=new Date(Date.now()+60_000).toISOString();
   const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
@@ -88,6 +90,9 @@ try {
   assert.equal(completed,true,'The registered task runs its trigger action.');
   manager.sync([{token,start:new Date(Date.now()-10_000).toISOString(),retry:true,end:new Date(Date.now()+2_000).toISOString()}]);
   assert.equal(taskCount(),0,'No retry task remains when its safe delay would reach the meeting end.');
+  const endBoundary=Math.ceil((Date.now()+60_001)/1000)*1000;
+  manager.sync([{token,start:new Date(endBoundary-1).toISOString(),end:new Date(endBoundary).toISOString()}]);
+  assert.equal(taskCount(),0,'Rounding a fractional start to the next second removes a reminder that would start at its meeting end.');
   if (mode==='msix') {
     assert.match(readFileSync(manager.launchPath,'utf8'),/"mode":"msix"/);
     assert.ok(command('resolve installed MSIX identity',"Get-AppxPackage -Name 'RocketShipHQ.Reel' | Select-Object -First 1 -ExpandProperty PackageFamilyName"),
