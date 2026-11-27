@@ -513,7 +513,7 @@ document.addEventListener('click', event=>{
     const recording=(snapshot?.recordings??[]).find(item=>item.id===target.dataset.recordingId);
     const ownerUserID=snapshot?.profile?.userID;
     if(!recording||recording.processing?.localOnly!==true||recording.processing?.transcriptReady!==true||!ownerUserID) return;
-    if(!window.confirm('Generate a summary with a small AI model on this computer? The first use downloads about 90 MB. Your transcript stays on this device. If the model is unavailable, Reel keeps its extractive notes.')) return;
+    if(!window.confirm('Generate a summary with an on-device AI model? The first use downloads about 270 MB. Your transcript stays on this device. If the model is unavailable, Reel keeps its extractive notes.')) return;
     void perform('generateLocalSummary',{id:recording.id,summaryConfirmed:true,expectedOwnerUserID:ownerUserID});return;
   }
   if(action==='closeTranscript') { byId('transcriptDialog').close(); return; }

@@ -328,14 +328,14 @@ test('on-device summary requires an owner-matched local transcript and never del
   let processing={phase:'completed',localOnly:true,transcriptComplete:true,text:'A walkthrough of filtering the sales dashboard by region, then exporting the quarterly revenue report.',
     segments:[{start:0,end:8,text:'A walkthrough of filtering the sales dashboard by region, then exporting the quarterly revenue report.'}]};
   let inferenceInput;const f=fixture({localSummarize:async value=>{
-    inferenceInput=value;return{text:generated,engine:'Flan-T5-small q8'};
+    inferenceInput=value;return{text:generated,engine:'T5-CNN-25K q8'};
   }});f.recordings.push({id,title:'Walkthrough',durationSeconds:8});
   f.store.getProcessing=args=>args.ownerUserID==='owner-a'&&args.id===id?structuredClone(processing):null;
   f.store.saveProcessing=async args=>{assert.equal(args.ownerUserID,'owner-a');assert.equal(args.id,id);processing=structuredClone(args.processing);};
   await f.service.action('generateLocalSummary',{id,summaryConfirmed:true,expectedOwnerUserID:'owner-a'});
   assert.equal(inferenceInput.ownerUserID,'owner-a');assert.equal(inferenceInput.id,id);
   assert.match(inferenceInput.text,/\[0:00\] A walkthrough of filtering the sales dashboard/u);
-  assert.equal(processing.summary,generated);assert.equal(processing.summaryEngine,'flan-t5-small-local');
+  assert.equal(processing.summary,generated);assert.equal(processing.summaryEngine,'t5-cnn-25k-local');
   assert.equal(processing.phase,'completed');assert.equal(processing.localOnly,true);
   assert.deepEqual(f.calls,[],'Summary generation must not trigger cloud service or delivery calls.');
   await assert.rejects(f.service.action('generateLocalSummary',{id,summaryConfirmed:true,expectedOwnerUserID:'owner-b'}),/account changed/i);
