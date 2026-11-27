@@ -174,7 +174,7 @@ try {
 } catch {
     if ($Diagnostic) {
         $exception = $_.Exception
-        $hresult = '0x{0:X8}' -f [uint32]$exception.HResult
+        $hresult = '0x' + ([int]$exception.HResult).ToString('X8')
         [Console]::Error.WriteLine(('Reminder task diagnostic: exception={0}; hresult={1}; line={2}' -f
             $exception.GetType().FullName, $hresult, $_.InvocationInfo.ScriptLineNumber))
     }

@@ -80,8 +80,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');
-  assert.match(taskHelper,/if \(\$Diagnostic\)[\s\S]*Reminder task diagnostic: exception=.*hresult=.*line=/,
-    'The Windows smoke can report sanitized exception type, HRESULT and source line for task-manager failures.');
+  assert.match(taskHelper,/\[int\]\$exception\.HResult\)\.ToString\('X8'\)[\s\S]*Reminder task diagnostic: exception=.*hresult=.*line=/,
+    'The Windows smoke can report negative HRESULTs safely with sanitized exception type and source line.');
   assert.match(smoke,/manager\.sync\(\[\]\)[\s\S]*taskCount\(\),0[\s\S]*Opt-out cleanup removes/,
     'The Windows scheduler smoke exercises empty-plan deletion and verifies no task remains.');
   assert.match(msix,/<desktop:ToastNotificationActivation ToastActivatorCLSID="\$toastActivatorClsid" \/>/);
