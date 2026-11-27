@@ -29,9 +29,10 @@ function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
 function showError(message = '') {
   const banner = byId('banner'); banner.textContent = escText(message); banner.classList.toggle('hidden', !message);
 }
+function calendarReady() { return snapshot?.calendarAvailable ?? snapshot?.profile?.calendarConnected; }
 function currentSettings() {
   const s = localSettings ?? snapshot?.settings ?? {};
-  return { autoJoin: s.autoJoin === true, participantConsent: s.participantConsent === true,
+  return { ...(s.calendarSource==='outlook'?{calendarSource:'outlook'}:{}), autoJoin: s.autoJoin === true, participantConsent: s.participantConsent === true,
     systemAudioConsent: s.systemAudioConsent === true, meetingReminders: s.meetingReminders === true,
     localTranscription: s.localTranscription === true,
     selection: { useAll: s.selection?.useAll === true, ids: Array.isArray(s.selection?.ids) ? [...s.selection.ids] : [] } };
@@ -40,7 +41,7 @@ function onboarding() {
   byId('setupView').classList.remove('hidden'); byId('dashboard').classList.add('hidden');
   byId('settingsShortcut').classList.add('hidden');
   const profile = snapshot?.profile;
-  const step = !profile ? 1 : profile.calendarConnected ? 3 : 2;
+  const step = !profile ? 1 : calendarReady() ? 3 : 2;
   document.querySelectorAll('.steps li').forEach((el, i) => { el.classList.toggle('active', i + 1 === step); el.classList.toggle('done', i + 1 < step); });
   byId('stepEyebrow').textContent = `STEP ${step}`;
   byId('stepTitle').textContent = step === 1 ? 'Sign in with Google' : step === 2 ? 'Connect Google Calendar' : 'Confirm your choices';
@@ -93,7 +94,7 @@ function consentControls(settings, dashboard) {
     const selected=new Set(settings.selection.ids);
     for (const cal of (snapshot?.calendars ?? [])) group.append(calendarCheckbox(cal.title || cal.id, selected.has(cal.id), cal.id));
     wrap.append(group);
-    const enabled=!!snapshot?.profile?.calendarConnected && settings.participantConsent && settings.systemAudioConsent;
+    const enabled=calendarReady() && settings.participantConsent && settings.systemAudioConsent;
     const auto=node('label','setting'); const box=node('input'); box.type='checkbox'; box.dataset.setting='autoJoin'; box.checked=settings.autoJoin; box.disabled=!enabled;
     const text=node('span'); text.append(node('strong','','Automatically join and record eligible meetings'));
     text.append(node('small','',enabled?'Reel joins selected upcoming meetings and starts local capture.':'Connect your calendar and confirm both permissions to enable auto-join.'));
@@ -130,7 +131,7 @@ function renderDashboard() {
   byId('welcome').textContent = snapshot.profile?.displayName ? `Signed in as ${snapshot.profile.displayName}.` : snapshot.profile?.email ?? '';
   const settings=byId('settingsContent'); clear(settings); settings.append(consentControls(currentSettings(),true));
   const phase=snapshot.status?.phase ?? 'idle'; byId('statusTitle').textContent=phaseLabel(phase);
-  byId('statusMessage').textContent=snapshot.status?.message ?? (snapshot.profile?.calendarConnected?'Reel is checking your calendar.':'Connect a calendar to see upcoming meetings.');
+  byId('statusMessage').textContent=snapshot.status?.message ?? (calendarReady()?'Reel is checking your calendar.':'Connect a calendar to see upcoming meetings.');
   byId('cancelJoinButton').classList.toggle('hidden', phase !== 'joining');
   byId('stopButton').classList.toggle('hidden',phase!=='capturing');
   byId('stopButton').disabled = phase !== 'capturing';
@@ -335,7 +336,7 @@ function render() {
   const settings=snapshot?.settings;
   const consented=settings?.participantConsent === true && settings?.systemAudioConsent === true;
   const signedIn = snapshot?.configured !== false && Boolean(snapshot?.profile?.userID);
-  const dashboard = signedIn && snapshot.profile.calendarConnected && consented;
+  const dashboard = signedIn && calendarReady() && consented;
   const phase = snapshot?.status?.phase;
   byId('manualMeeting').classList.toggle('hidden', !signedIn);
   byId('joinMeetingLink').disabled = joinBusy();
@@ -345,13 +346,17 @@ function render() {
   byId('manualStop').classList.toggle('hidden', phase !== 'capturing');
   renderManualWindowCapture(signedIn);
   if (dashboard) renderDashboard(); else onboarding();
+  const source=byId('switchCalendarSource');
+  const outlook=snapshot?.settings?.calendarSource==='outlook';
+  source.textContent=outlook?'Use Google Calendar':'Use work calendar from classic Outlook';
+  source.classList.toggle('hidden',!signedIn || !snapshot?.outlookAvailable);
   const showRecordings = signedIn && (dashboard || snapshot.recordings?.length > 0);
   byId('recordingsCard').classList.toggle('hidden', !showRecordings);
   if (showRecordings) renderRecordings();
   else clear(byId('recordingsList'));
   byId('accountRow').classList.toggle('hidden', !signedIn);
   byId('accountLabel').textContent = snapshot?.profile?.email ?? '';
-  byId('disconnectCalendarButton').classList.toggle('hidden', !snapshot?.profile?.calendarConnected);
+  byId('disconnectCalendarButton').classList.toggle('hidden', outlook || !snapshot?.profile?.calendarConnected);
 }
 function applySnapshot(next, expectedGeneration = null) {
   if (!next || (expectedGeneration !== null && expectedGeneration !== renderGeneration)) return;
@@ -453,7 +458,7 @@ function collectSettings() {
   return settings;
 }
 function scheduleSave() {
-  if (snapshot?.configured === false || !snapshot?.profile?.calendarConnected) return;
+  if (snapshot?.configured === false || !calendarReady()) return;
   microphoneMeetingId=null;
   localSettings=collectSettings();
   if (!localSettings.participantConsent || !localSettings.systemAudioConsent) localSettings.autoJoin=false;
@@ -470,6 +475,10 @@ document.addEventListener('click', event=>{
   const scroller=event.target.closest('[data-scroll]'); if(scroller) { document.querySelector(`.${scroller.dataset.scroll}`)?.scrollIntoView({behavior:'smooth'}); return; }
   const target=event.target.closest('[data-action]'); if(!target || target.disabled) return;
   const action=target.dataset.action;
+  if(action==='setCalendarSource') {
+    clearTimeout(saveTimer); saving=false; localSettings=null;
+    perform(action,{expectedOwnerUserID:snapshot?.profile?.userID,source:snapshot?.settings?.calendarSource==='outlook'?'google':'outlook'}); return;
+  }
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='playRecording'||action==='revealRecording'||action==='copyTranscript') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='transcribeManualRecording') {

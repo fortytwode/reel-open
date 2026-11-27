@@ -63,7 +63,7 @@ test('MSIX product launch arguments select the configured Recorder and Notetaker
   assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
 });
 
-function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler, exportTrimmedCopy, manualCapture, processor } = {}) {
+function fixture({ realCoordinator = false, discover, discoverOutlook, shareMeeting, reminderScheduler, exportTrimmedCopy, manualCapture, processor } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
   const settings = new Map(), recordings = [], calls = [], writes = [], snapshots = [], listeners = new Set();
@@ -75,7 +75,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting, reminderSche
     markCompleted: async () => {}, saveSettings: async value => { writes.push(value); settings.set(value.ownerUserID, value); return value; } };
   store.rename=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');const item=recordings.find(recording=>recording.id===args.id);if(!item)throw Error('unavailable');item.title=args.title.trim();};
   store.deleteRecording=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');if(args.localOnlyConfirmed!==true)throw Error('confirm local only');const index=recordings.findIndex(recording=>recording.id===args.id);if(index<0)throw Error('unavailable');recordings.splice(index,1);};
-  const service = createDesktopService({org, auth, store, fetch:async () => Response.json({events:[]}),
+  const service = createDesktopService({org, auth, store, discoverOutlook, fetch:async () => Response.json({events:[]}),
     reminderScheduler, manualCapture, processor,
     discover: discover ?? (async ({auth}) => ({ ownerUserID: auth.getProfile().userID, calendars: [{id:'cal',title:'Work'}], meetings: [
       { id:'one', title:'QA', start:'2026-11-06T15:00:00Z',end:'2026-11-06T16:00:00Z',platform:'google_meet',joinURL:'https://meet.google.com/aaa-bbbb-ccc',attendeeEmails:['private@example.com'] } ] })),
@@ -557,4 +557,20 @@ test('pasted meeting links can record without a calendar, recertify cloud routin
   await rejected;
   assert.equal(joins.length, 1);
   await service.dispose();
+});
+
+test('switching calendar sources requires fresh consent and holds back old settings writes',async()=>{
+  const f=fixture({discoverOutlook:async({auth})=>({ownerUserID:auth.getProfile().userID,
+    calendars:[{id:'outlook:default',title:'Outlook'}],meetings:[]})});
+  await f.service.action('disconnectCalendar');
+  const enabled=await f.service.action('setCalendarSource',{expectedOwnerUserID:'owner-a',source:'outlook'});
+  assert.equal(enabled.calendarAvailable,true);
+  assert.equal(enabled.profile.calendarConnected,false);
+  assert.equal(enabled.settings.autoJoin,false);
+  assert.equal(enabled.settings.participantConsent,false);
+  assert.equal(enabled.calendars[0].id,'outlook:default');
+  await assert.rejects(f.service.action('saveSettings',{...initial('owner-a'),expectedOwnerUserID:'owner-a'}),/source changed/);
+  const disabled=await f.service.action('setCalendarSource',{expectedOwnerUserID:'owner-a',source:'google'});
+  assert.equal(disabled.calendarAvailable,false);
+  assert.deepEqual(disabled.calendars,[]);
 });

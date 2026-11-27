@@ -9,7 +9,7 @@ set WPF=%FRAMEWORK%\WPF
 if not exist "%WPF%\UIAutomationClient.dll" set WPF=%WINDIR%\Microsoft.NET\FrameworkArm64\v4.0.30319\WPF
 if not exist "%WPF%\UIAutomationClient.dll" exit /b 2
 cd /d "%~dp0"
-"%CSC%" /nologo /target:exe /out:ReelNativeJoin.exe /r:"%WPF%\UIAutomationClient.dll" /r:"%WPF%\UIAutomationTypes.dll" /r:"%WPF%\WindowsBase.dll" /r:"%FRAMEWORK%\System.Web.Extensions.dll" Core.cs WinJoin.cs Program.cs
+"%CSC%" /nologo /target:exe /out:ReelNativeJoin.exe /r:"%WPF%\UIAutomationClient.dll" /r:"%WPF%\UIAutomationTypes.dll" /r:"%WPF%\WindowsBase.dll" /r:"%FRAMEWORK%\System.Web.Extensions.dll" /r:Microsoft.CSharp.dll Core.cs WinJoin.cs OutlookCalendar.cs Program.cs
 if errorlevel 1 exit /b 1
 "%CSC%" /nologo /target:exe /out:ProcessIsolationTests.exe /r:"%WPF%\UIAutomationClient.dll" /r:"%WPF%\UIAutomationTypes.dll" /r:"%WPF%\WindowsBase.dll" Core.cs WinJoin.cs ProcessIsolationTests.cs
 if errorlevel 1 exit /b 1

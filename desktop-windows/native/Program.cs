@@ -217,10 +217,17 @@ namespace ReelNative
             Send(Response(id, false, "invalid_request"));
         }
 
-        internal static int Main()
+        internal static int Main(string[] arguments)
         {
             Console.InputEncoding = Encoding.UTF8;
             Console.OutputEncoding = new UTF8Encoding(false);
+            if (arguments.Length == 1 && arguments[0] == "--outlook-calendar")
+            {
+                int result = 1;
+                Thread reader = new Thread(() => { result = OutlookCalendar.Read(); });
+                reader.SetApartmentState(ApartmentState.STA);
+                reader.Start(); reader.Join(); return result;
+            }
             while (true)
             {
                 string line = ReadBoundedLine();

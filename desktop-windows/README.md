@@ -10,6 +10,8 @@ Render your [organization configuration](../docs/organization-configuration.md) 
 
 The app performs the account flow in external Chrome and stores user tokens with Electron's Windows credential encryption. Use the Chrome profile with access to the meeting. Google sign-in and Calendar authorization are separate steps from joining a provider meeting. In Reel Companion, choose **Join & record** next to a meeting on the selected calendars to start it yourself, even with automatic joining off. **Cancel join** closes Reel’s dedicated window while it connects. Once capture starts, use **Stop and save recording** to finish early. **Use a meeting link** accepts a direct Google Meet, Zoom or Teams link after you sign in, even without Google Calendar connected. Confirm participant consent for that meeting. Reel sends the recap to your signed-in account only. Turn on **Include my microphone** for a meeting you start yourself to record your voice as well as system sound. The portable builder creates an unsigned ZIP for testing. For distribution, build the MSIX for each architecture, sign it with your trusted Windows publisher identity and publish its App Installer feed. See [Packaging](PACKAGING.md).
 
+To use the default work calendar in **classic Outlook**, open Outlook with the same email account you use for Reel. In Companion, choose **Use work calendar from classic Outlook**, then review your recording permissions. Reel reads upcoming meetings from that calendar while Outlook is open. Recaps for locally captured Outlook meetings go to your signed-in account. Choose **Use Google Calendar** to switch back.
+
 ## Run tests
 
 From the repository root:

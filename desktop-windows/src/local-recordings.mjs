@@ -415,13 +415,13 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     });
   }
   function getSettings(ownerUserID) { return structuredClone(owner(ownerUserID).state.settings); }
-  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription, selection } = {}) {
+  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription, selection, calendarSource } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The settings owner changed');
     check([autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription].every(flag => typeof flag === 'boolean')
       && typeof selection?.useAll === 'boolean' && Array.isArray(selection.ids) && selection.ids.length <= 250
       && selection.ids.every(id => text(id, 1024)), 'Invalid recording settings');
     check(!autoJoin || (participantConsent && systemAudioConsent), 'Automatic recording requires both permissions');
-    const settings = { ownerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription,
+    const settings = { ownerUserID, ...(calendarSource==='outlook'?{calendarSource}:{}), autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription,
       selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)] } };
     const state = await mutate(owner(ownerUserID), state => { state.settings = settings; return state; });
     return structuredClone(state.settings);
