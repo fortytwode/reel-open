@@ -42,6 +42,9 @@ const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore
   }});
 const diagnosticsFile=path.join(stateRoot,'scheduler-milestones.log');
 const launchConfig=JSON.parse(readFileSync(manager.launchPath,'utf8'));
+const productionLaunchConfig={...launchConfig};
+assert.equal(Object.hasOwn(productionLaunchConfig,'diagnosticsFile'),false,'The manager generated production config has no smoke diagnostic path.');
+assert.equal(Object.hasOwn(productionLaunchConfig,'waitForChildExit'),false,'The manager generated production config has no smoke child wait flag.');
 launchConfig.diagnosticsFile=diagnosticsFile;
 if(mode==='portable') launchConfig.waitForChildExit=true;
 writeFileSync(manager.launchPath,JSON.stringify(launchConfig));
@@ -235,6 +238,37 @@ try {
       assert.ok(launchMilestones.includes(milestone),`The portable trigger launch reached ${milestone}.`);
     }
   } else assert.ok(launchMilestones.includes('msix-shell-launch-returned'),'The MSIX shell activation was requested.');
+  // Exercise the generated production config, which has neither smoke-only diagnostic field.
+  // This catches StrictMode failures on absent optional JSON properties after trigger receipt.
+  writeFileSync(manager.launchPath,JSON.stringify(productionLaunchConfig));
+  const productionToken='9'.repeat(32);
+  const productionTaskName='ReelReminder_'+scope+'_'+sidHash+'_'+productionToken;
+  const productionStart=new Date(Date.now()+5*60_000).toISOString();
+  const productionEnd=new Date(Date.parse(productionStart)+30*60_000).toISOString();
+  manager.sync([{token:productionToken,start:productionStart,end:productionEnd}]);
+  assert.deepEqual(syncCounts(),{registered:1,rearmed:0,skippedAtEnd:0,skippedPast:0},
+    'The production-config task is eligible and registered.');
+  const productionSecurity=taskSecurity(productionTaskName);
+  const productionPrincipal=taskQuery(productionTaskName);
+  assert.equal(productionSecurity.name,productionTaskName,'The production-config task exists by its exact name.');
+  assert.equal(productionPrincipal.userSid,productionPrincipal.currentSid,'Production config remains bound to the current user.');
+  assert.equal(productionSecurity.logonType,'InteractiveToken','Production config uses an interactive token.');
+  console.log('Windows reminder smoke: run task with production launch config (no diagnostic fields).');
+  command('run production-config reminder task through Task Scheduler COM',
+    `$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$t=$s.GetFolder([string][char]92).GetTask('${productionTaskName}');$null=$t.Run($null)`);
+  let productionStatus=taskStatus(productionTaskName);
+  const productionDeadline=Date.now()+taskWaitMs;
+  const productionDelivered=()=>mode==='portable'
+    ? (()=>{try{return readFileSync(path.join(stateRoot,'delivered.txt'),'utf8')===`--meeting-reminder-trigger=${productionToken}`;}catch{return false;}})()
+    : manager.pending().includes(productionToken);
+  while(Date.now()<productionDeadline) {
+    if(productionDelivered()&&productionStatus.state!==4&&productionStatus.lastTaskResult!==267009) break;
+    await new Promise(resolve=>setTimeout(resolve,300));
+    productionStatus=taskStatus(productionTaskName);
+  }
+  assert.equal(productionDelivered(),true,'The production launch configuration delivers the reminder trigger.');
+  assert.notEqual(productionStatus.state,4,'The production-config task exits instead of remaining Running.');
+  assert.equal(productionStatus.lastTaskResult,0,'The production-config task completes successfully without smoke-only fields.');
   const retryEnd=new Date(Date.now()+60_000).toISOString();
   const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
   console.log(`Retry fixture UTC milliseconds: ${JSON.stringify({start:Date.parse(alreadyDueRetry),end:Date.parse(retryEnd),created:Date.now()})}`);

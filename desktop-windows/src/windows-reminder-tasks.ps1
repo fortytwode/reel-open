@@ -231,7 +231,9 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-called'
         $child = Start-Process -FilePath ([string]$launch.executable) -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-returned'
-        if ($launch.waitForChildExit -eq $true) {
+        $waitForChildExit = $false
+        if ($launch.PSObject.Properties.Name -contains 'waitForChildExit') { $waitForChildExit = $launch.waitForChildExit -eq $true }
+        if ($waitForChildExit) {
             $child.WaitForExit()
             $child.Refresh()
             Write-TaskDiagnostic $diagnosticsFile ('portable-child-exited:' + [int]$child.ExitCode)

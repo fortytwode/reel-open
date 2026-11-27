@@ -19,7 +19,10 @@ test('task registration input contains only opaque tokens and UTC event bounds',
     assert.equal(calls.length,1);
     const command=calls[0];
     assert.equal(command[0],'powershell.exe');
-    assert.equal(JSON.parse(readFileSync(manager.launchPath,'utf8')).executable,executable);
+    const launchConfig=JSON.parse(readFileSync(manager.launchPath,'utf8'));
+    assert.equal(launchConfig.executable,executable);
+    assert.deepEqual(Object.keys(launchConfig).sort(),['arguments','executable','mode'],
+      'Generated production launch config omits the diagnostic path and child-wait smoke options.');
     assert.deepEqual(plan,[{token,start,end}]);
     assert.throws(()=>manager.sync([{token,start}]),TypeError,'Every scheduled meeting must provide an end bound.');
     assert.equal(JSON.stringify(plan).includes('private calendar title'),false);
@@ -86,6 +89,10 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Smoke diagnostics bracket launch config existence, file read and JSON parse separately.');
   assert.match(taskHelper,/\$launch\.PSObject\.Properties\.Name -contains 'diagnosticsFile'/,
     'Production launch configuration safely omits the smoke-only diagnostic field under StrictMode.');
+  assert.match(taskHelper,/\$launch\.PSObject\.Properties\.Name -contains 'waitForChildExit'/,
+    'Production portable launch configuration safely omits the smoke-only child wait flag under StrictMode.');
+  assert.match(smoke,/Object\.hasOwn\(productionLaunchConfig,'diagnosticsFile'\),false[\s\S]*Object\.hasOwn\(productionLaunchConfig,'waitForChildExit'\),false[\s\S]*productionLaunchConfig[\s\S]*The production launch configuration delivers the reminder trigger[\s\S]*productionStatus\.lastTaskResult,0/,
+    'Windows CI runs and verifies an actual reminder task with production launch JSON and absent optional diagnostic properties.');
   assert.match(smoke,/security\.command\)\.toLowerCase\(\),\/\^powershell/,
     'The registered action executable is validated as Windows PowerShell.');
   assert.match(smoke,/const deadline = Date\.now\(\)\+taskWaitMs[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
