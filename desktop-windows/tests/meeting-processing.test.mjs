@@ -129,6 +129,24 @@ test('local mode transcribes locally, saves timestamps, and makes no service req
   assert.equal(decoded.length,16000);assert.ok(Math.abs(decoded[1]-f.samples.readInt16LE(2)/32768)<1e-7);
 });
 
+test('local manual transcription needs the signed-in owner but no recap recipient email',async t=>{
+  const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud must not be called.');},
+    localTranscribe:async()=>({text:'A saved window walkthrough transcript with a few concrete steps.',chunks:[],language:'en',engine:'Whisper large-v3-turbo q8'})});
+  f.set({phase:'pending',title:'Saved window',createdAt:'2026-11-10T09:00:00Z',meeting:{manual:true}});
+  f.changeOwner(ownerUserID); // same signed-in owner, with no email claim
+  const result=await f.processor.process({ownerUserID,id,transcriptionMode:'local'});
+  assert.equal(result.phase,'completed');assert.equal(result.localOnly,true);assert.equal(result.transcriptOnly,true);
+  assert.equal(result.receipt,undefined);assert.equal(f.calls.length,0);
+});
+
+test('manual cloud transcription checks the team account before sending audio',async t=>{
+  const f=await fixture(t);
+  f.set({phase:'pending',title:'Saved window',createdAt:'2026-11-10T09:00:00Z',meeting:{manual:true}});
+  f.changeOwner(ownerUserID); // matching signed-in owner, but no eligible team email
+  await assert.rejects(f.processor.process({ownerUserID,id,transcriptionMode:'cloud'}),/team account to process/u);
+  assert.equal(f.calls.length,0,'Unauthorized manual cloud transcription must not upload audio.');
+});
+
 test('empty local transcription completes without inventing a title or summary',async t=>{
   const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud request is forbidden in local mode.');},
     localTranscribe:async()=>({text:'',chunks:[],language:'en',engine:'Whisper large-v3-turbo q8'})});

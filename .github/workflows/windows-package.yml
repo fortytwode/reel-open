@@ -260,10 +260,23 @@ jobs:
             if (Test-Path $log) { Get-Content -LiteralPath $log }
             $process.Refresh()
             if ($process.ExitCode) { throw "Packaged local Whisper inference/offline cache smoke exited with $($process.ExitCode)" }
+            $summaryLog = Join-Path $env:RUNNER_TEMP "local-summary-$env:REEL_ARCH.log"
+            $env:REEL_LOCAL_SUMMARY_SMOKE = '1'
+            $env:REEL_WHISPER_SMOKE_LOG = $summaryLog
+            $summaryProcess = Start-Process -FilePath $electron -PassThru -NoNewWindow
+            if (-not $summaryProcess.WaitForExit(18 * 60 * 1000)) {
+              if (-not $summaryProcess.HasExited) { $summaryProcess.Kill($true) }
+              throw 'Packaged local summary smoke exceeded its 18 minute bound.'
+            }
+            if (Test-Path $summaryLog) { Get-Content -LiteralPath $summaryLog }
+            $summaryProcess.Refresh()
+            if ($summaryProcess.ExitCode -or -not (Select-String -LiteralPath $summaryLog -Pattern '"phase":"summary_smoke_passed"' -Quiet)) {
+              throw "Packaged local summary inference/offline cache smoke failed on $env:REEL_ARCH."
+            }
           } finally {
             [IO.File]::WriteAllText($packagePath, $originalPackage, (New-Object Text.UTF8Encoding($false)))
             Remove-Item -LiteralPath $smoke,$helper -Force -ErrorAction SilentlyContinue
-            Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_LOG,Env:REEL_LOCAL_SUMMARY_SMOKE -ErrorAction SilentlyContinue
           }
       - name: Print packaged local Whisper diagnostics
         if: always()
@@ -271,12 +284,16 @@ jobs:
         run: |
           $log = Join-Path $env:RUNNER_TEMP "whisper-smoke-${{ matrix.arch }}.log"
           if (Test-Path $log) { Get-Content -LiteralPath $log }
+          $summaryLog = Join-Path $env:RUNNER_TEMP "local-summary-${{ matrix.arch }}.log"
+          if (Test-Path $summaryLog) { Get-Content -LiteralPath $summaryLog }
       - name: Upload packaged local Whisper diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: local-whisper-${{ matrix.arch }}-diagnostics
-          path: ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
+          path: |
+            ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
+            ${{ runner.temp }}/local-summary-${{ matrix.arch }}.log
           if-no-files-found: warn
           retention-days: 7
       - name: Snapshot runner after packaged local Whisper inference

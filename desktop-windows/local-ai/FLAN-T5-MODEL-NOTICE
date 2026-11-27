@@ -1,0 +1,8 @@
+The on-device summary feature downloads and runs Xenova/flan-t5-small, revision
+311454e83bc784267fd7eef5940ee854144abbec, through Transformers.js and ONNX Runtime
+Web. The Hugging Face model card identifies the model as Apache-2.0 licensed:
+https://huggingface.co/Xenova/flan-t5-small/tree/311454e83bc784267fd7eef5940ee854144abbec
+
+The model is loaded only after the owner explicitly requests an on-device summary.
+No transcript text is sent to the model host; model assets are fetched from the
+revision-pinned public model repository and its allowlisted CDN redirects.

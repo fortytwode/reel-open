@@ -211,6 +211,10 @@ test('renderer metadata exposes bounded extractive summary only for its local re
   assert.equal(ownerView.localSummary.chapters[0].start,0);
   assert.equal(Object.hasOwn(ownerView,'text'),false,'Raw transcript text is never included in the renderer metadata.');
   assert.deepEqual(store.list('other'),[],'Owner scoped listing does not expose another user’s local summary.');
+  await store.saveProcessing({ownerUserID:'owner',id:recording.id,processing:{phase:'completed',transcriptionMode:'local',localOnly:true,
+    transcriptComplete:true,text:'Private full transcript never crosses the metadata projection.',summaryEngine:'flan-t5-small-local',
+    suggestedTitle:'Walkthrough',summary:'The walkthrough filters the inventory by warehouse and exports a restocking report.',chapters:[]}});
+  assert.equal(store.list('owner')[0].processing.localSummary.source,'on-device-ai');
   await assert.rejects(store.saveProcessing({ownerUserID:'other',id:recording.id,processing:{localOnly:true,summaryEngine:'extractive-local',summary:'private'}}),/Recording no longer exists/u);
 });
 

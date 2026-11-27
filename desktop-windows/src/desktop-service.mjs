@@ -1,5 +1,7 @@
 import { routeGoogleMeetings } from './google-calendar.mjs';
 import { normalizeTrimRange } from './trim-range.mjs';
+import { summarizeLocally } from './local-extractive-summary.mjs';
+import { cleanGeneratedSummary, localSummaryPrompt } from './local-generative-summary.mjs';
 
 const defaults = ownerUserID => ({ownerUserID, autoJoin:false, participantConsent:false,
   systemAudioConsent:false, meetingReminders:false, localTranscription:false, selection:{useAll:true,ids:[]}});
@@ -66,13 +68,14 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,discoverOutlook,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,manualCapture,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,discoverOutlook,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,localSummarize,shareMeeting,reminderScheduler,manualCapture,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let meetingStartPending=false, pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
   const activeShares=new Set();
   const activeRecordingOperations=new Map();
   const activeExports=new Map();
+  const activeLocalSummaries=new Set();
   let settingsTail=Promise.resolve(),disposePromise=null;
   let calendars=[],meetings=[],calendarOwner=null,routingUnavailable=false;
   const routingMessage='Cloud routing could not be checked. Local Meet and Teams joins are paused. Zoom can continue.';
@@ -345,6 +348,40 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
           throw Error('This recording already has a saved transcription mode. Retry with that mode.');
         await processor.process({ownerUserID:id,id:payload.id,transcriptionMode:payload.transcriptionMode});
         requireOwner(id);
+      } else if(name==='generateLocalSummary') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if(!payload||typeof payload!=='object'||Array.isArray(payload)
+          ||Object.keys(payload).some(key=>!['expectedOwnerUserID','id','summaryConfirmed'].includes(key))
+          ||!/^[0-9a-f]{32}$/.test(payload.id??'')||payload.summaryConfirmed!==true)
+          throw Error('Confirm on-device AI summarization for this saved recording.');
+        const recording=store.list(ownerUserID).find(item=>item.id===payload.id);
+        const processing=store.getProcessing({ownerUserID,id:payload.id});
+        if(!recording||processing?.localOnly!==true||processing.transcriptComplete!==true
+          ||!processing.text?.trim()||!Array.isArray(processing.segments)||!processing.segments.length)
+          throw Error('A completed local-only transcript is required for an on-device summary.');
+        const summaryKey=`${ownerUserID}:${payload.id}`;
+        if(activeLocalSummaries.has(summaryKey))throw Error('An on-device summary is already running for this recording.');
+        const duration=Number.isFinite(recording.durationSeconds)?recording.durationSeconds:
+          Math.max(0,...processing.segments.map(segment=>Number.isFinite(segment.end)?segment.end:0));
+        const fallback=summarizeLocally(processing.segments,duration);
+        let generated=null;
+        activeLocalSummaries.add(summaryKey);
+        try{
+          if(typeof localSummarize==='function'){
+            try{
+              const result=await localSummarize({ownerUserID,id:payload.id,text:localSummaryPrompt(processing.segments)});
+              if(result?.engine==='Flan-T5-small q8')generated=cleanGeneratedSummary(result.text);
+            }catch{}
+          }
+          requireOwner(ownerUserID);
+          const latest=store.getProcessing({ownerUserID,id:payload.id});
+          if(latest?.localOnly!==true||latest.transcriptComplete!==true||latest.text!==processing.text)
+            throw Error('The saved transcript changed. Refresh your recordings.');
+          await store.saveProcessing({ownerUserID,id:payload.id,processing:{...latest,phase:'completed',error:null,
+            summary:generated??fallback.summary,suggestedTitle:fallback.suggestedTitle,chapters:fallback.chapters,
+            summaryEngine:generated?'flan-t5-small-local':(fallback.summary||fallback.suggestedTitle||fallback.chapters.length?'extractive-local':null)}});
+          requireOwner(ownerUserID);
+        }finally{activeLocalSummaries.delete(summaryKey);}
       } else if(name==='playRecording') {
         const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof openRecording !== 'function') throw Error('Recording is unavailable.');
