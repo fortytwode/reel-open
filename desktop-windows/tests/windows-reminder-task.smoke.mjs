@@ -48,7 +48,7 @@ const taskQuery = name => command('read scheduled task through Task Scheduler CO
   `if ($sid -notmatch '^S-1-') { $account=$principal; if ($account -notmatch '\\\\') { $account=$env:USERDOMAIN+'\\'+$account }; `+
   `$sid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
   `$current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; `+
-  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current} | ConvertTo-Json -Compress`);
+  `[pscustomobject]@{user=$principal;userSid=$sid;currentSid=$current} | ConvertTo-Json -Compress`);
 const taskSecurity = name => {
   console.log('Windows reminder smoke: read task security from registered task XML.');
   const started=Date.now(), schtasks=path.join(process.env.SystemRoot || 'C:\\Windows','System32','schtasks.exe');
@@ -63,7 +63,7 @@ const taskCount = () => Number(command('count this scope’s scheduled tasks thr
 const taskStatus = name => JSON.parse(command('read task action result and registered principal',
   `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${name}'); `+
   `$identity=[Security.Principal.WindowsIdentity]::GetCurrent(); $principal=[string]$t.Definition.Principal.UserId; $taskSid=$principal; `+
-  `if ($taskSid -notmatch '^S-1-') { $account=$principal; if ($account -notmatch '\\') { $account=$env:USERDOMAIN+'\'+$account }; `+
+  `if (-not $taskSid.StartsWith('S-1-')) { $account=$principal; if (-not $principal.Contains([string][char]92)) { $account=$env:USERDOMAIN+[char]92+$principal }; `+
   `$taskSid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
   `[pscustomobject]@{state=[int]$t.State;lastTaskResult=[uint32]$t.LastTaskResult;lastRunUtc=$t.LastRunTime.ToUniversalTime().ToString('o'); `+
   `principalMatchesCurrent=($taskSid -eq $identity.User.Value);logonType=[int]$t.Definition.Principal.LogonType; `+
@@ -73,7 +73,7 @@ try {
   const runtime=JSON.parse(command('inspect Task Scheduler PowerShell host',
     `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`,30_000));
   assert.equal(runtime.is64Bit,true,'Task Scheduler COM is queried from a 64-bit PowerShell host.');
-  console.log(`Task Scheduler PowerShell host: ${JSON.stringify(runtime)}`);
+  console.log(`Task Scheduler host: ${JSON.stringify({architecture:runtime.architecture,is64Bit:runtime.is64Bit,sessionId:runtime.sessionId,sessionName:runtime.sessionName})}`);
   const sidHash=createHash('sha256').update(runtime.sid,'utf8').digest('hex');
   const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
@@ -89,7 +89,8 @@ try {
     'PowerShell preserved the task fixture end instant exactly.');
   let info = taskQuery(taskName);
   const security=taskSecurity(taskName);
-  console.log(`Sanitized task principal: ${JSON.stringify({user:info.user,userSid:info.userSid,currentSid:info.currentSid,...security})}`);
+  console.log(`Sanitized task registration: ${JSON.stringify({principalMatchesCurrent:info.userSid===info.currentSid,logonType:security.logonType,runLevel:security.runLevel,start:security.start})}`);
+  assert.equal(security.name,taskName,'The exact-name schtasks XML query confirms the task exists.');
   assert.equal(info.userSid, info.currentSid, `Task principal ${info.user} resolves to the current Windows user SID.`);
   assert.equal(security.logonType,'InteractiveToken','The task uses TASK_LOGON_INTERACTIVE_TOKEN and stores no password.');
   // Task Scheduler omits the optional XML RunLevel element when LUA is the default; an elevated task serializes HighestAvailable.
@@ -150,8 +151,9 @@ try {
   manager.sync([{token,start:new Date(Date.now()-1_000).toISOString(),end:delayedSyncEnd}]);
   assert.deepEqual(syncCounts(),{registered:1,rearmed:1,skippedAtEnd:0,skippedPast:0},
     'The helper reports that a late regular sync was re-armed and registered.');
-  const delayedTask=taskQuery(taskName), delayedSecurity=taskSecurity(taskName);
-  assert.equal(delayedTask.name,taskName,'A regular meeting task is re-armed if sync finishes after its start boundary.');
+  const delayedInfo=taskQuery(taskName), delayedSecurity=taskSecurity(taskName);
+  assert.equal(delayedSecurity.name,taskName,'The exact-name schtasks XML query confirms the delayed regular task exists.');
+  assert.equal(delayedInfo.userSid,delayedInfo.currentSid,'The delayed task still belongs to the current user.');
   assert.ok(Date.parse(delayedSecurity.start)>Date.now()+10_000,'A delayed sync moves an already-due start to a safe future boundary.');
   assert.ok(Date.parse(delayedSecurity.start)<Date.parse(delayedSyncEnd),'A delayed sync does not schedule past the meeting end.');
   const endBoundary=Math.ceil((Date.now()+60_001)/1000)*1000;

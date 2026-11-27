@@ -73,6 +73,10 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The Windows smoke runs the registered task and checks its action result.');
   assert.match(smoke,/receiver\.mjs[\s\S]*process\.argv\.find\(argument => \/\^--meeting-reminder-trigger=/,
     'The portable task smoke receiver accepts the same argv trigger flag as the Electron app.');
+  assert.doesNotMatch(smoke,/\b(?:info|retried|delayedTask)\.name\b/,
+    'The smoke does not depend on COM properties that PowerShell JSON serialization omits.');
+  assert.match(smoke,/const delayedInfo=taskQuery\(taskName\), delayedSecurity=taskSecurity\(taskName\)[\s\S]*delayedSecurity\.name,taskName/,
+    'Delayed registration is verified through an exact-name scheduler XML query.');
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');
