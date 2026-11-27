@@ -19,8 +19,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     env:
-      REEL_SOURCE_COMMIT: 0605d59089a3e518785cdb10373363140fd78d91
-      REEL_SOURCE_RUN_ID: 45953959227
+      REEL_SOURCE_COMMIT: 01b0632f159b9ee4b22243268e8121cea3a8f0f3
+      REEL_SOURCE_RUN_ID: 45957975472
       REEL_ARCH: ${{ matrix.arch }}
     steps:
       - name: Check out the one-time workflow branch
@@ -161,7 +161,7 @@ jobs:
           $verifyPath = Join-Path $env:RUNNER_TEMP "manual-capture-verification-$env:REEL_ARCH.json"
           node $env:RUNNER_TEMP/adapter-verify.mjs --manual-picker "--out=$out" | Tee-Object -FilePath $verifyPath
           if ($LASTEXITCODE) { throw 'Manual capture MP4/PCM verification failed.' }
-      - name: Diagnose x64 with native tone, changing marker, and WASAPI render meter
+      - name: Diagnose x64 with native tone, changing marker, and direct VB-CABLE input capture
         if: ${{ failure() && steps.baseline_capture.outcome == 'failure' && matrix.arch == 'x64' }}
         shell: pwsh
         run: |
@@ -169,6 +169,14 @@ jobs:
           $sessionId = (Get-Process -Id $PID).SessionId
           $sessionList = (quser 2>&1 | Out-String).Trim()
           Write-Host ("Windows session id=$sessionId; sessions: $sessionList")
+          $audioEndpoints = @(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -like '*VB-Audio Virtual Cable*' } |
+            Select-Object FriendlyName,Status)
+          Write-Host ("Signed virtual audio endpoints: " + ($audioEndpoints | ConvertTo-Json -Compress))
+          $deviceList = (& ffmpeg -hide_banner -list_devices true -f dshow -i dummy 2>&1 | Out-String)
+          Write-Host ("DirectShow audio device inventory: " + $deviceList)
+          $inventoryPath = Join-Path $env:RUNNER_TEMP 'native-tone-device-inventory.json'
+          [IO.File]::WriteAllText($inventoryPath, (@{ sessionId=$sessionId; sessions=$sessionList; endpoints=$audioEndpoints; directShowDevices=$deviceList } | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
           $app = Join-Path $env:REEL_EVIDENCE_PACKAGE 'resources/app'
           $fixture = Join-Path $app 'desktop-windows/probe/fixture.html'
           $html = [IO.File]::ReadAllText($fixture)
@@ -184,71 +192,52 @@ jobs:
           $wav = Join-Path $env:RUNNER_TEMP 'native-440hz.wav'
           & ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=20' -ac 1 -c:a pcm_s16le $wav
           if ($LASTEXITCODE) { throw 'Could not generate the native Windows audio control tone.' }
-          $meterSource = @'
-          using System;
-          using System.Runtime.InteropServices;
-          namespace ReelAudioDiagnostic {
-            [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-            interface IDeviceEnumerator { [PreserveSig] int EnumAudioEndpoints(int f, uint s, out IntPtr d); [PreserveSig] int GetDefaultAudioEndpoint(int f, int r, out IDevice d); }
-            [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-            interface IDevice { [PreserveSig] int Activate(ref Guid g, uint c, IntPtr p, out IntPtr o); [PreserveSig] int OpenPropertyStore(uint s, out IntPtr p); [PreserveSig] int GetId(out IntPtr id); [PreserveSig] int GetState(out uint s); }
-            [ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-            interface IAudioMeterInformation { [PreserveSig] int GetPeakValue(out float p); [PreserveSig] int GetMeteringChannelCount(out int c); [PreserveSig] int GetChannelsPeakValues(int c, [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex=0)] float[] p); [PreserveSig] int QueryHardwareSupport(out int m); }
-            public static class WasapiMeter {
-              public static float Peak() {
-                var enumerator=(IDeviceEnumerator)Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")));
-                IDevice device=null; IntPtr ptr=IntPtr.Zero; object meterObject=null;
-                try {
-                  int hr=enumerator.GetDefaultAudioEndpoint(0,0,out device); if(hr<0) Marshal.ThrowExceptionForHR(hr);
-                  Guid iid=new Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064");
-                  hr=device.Activate(ref iid,23,IntPtr.Zero,out ptr); if(hr<0) Marshal.ThrowExceptionForHR(hr);
-                  meterObject=Marshal.GetObjectForIUnknown(ptr); var meter=(IAudioMeterInformation)meterObject;
-                  hr=meter.GetPeakValue(out float peak); if(hr<0) Marshal.ThrowExceptionForHR(hr); return peak;
-                } finally { if(meterObject!=null) Marshal.ReleaseComObject(meterObject); if(ptr!=IntPtr.Zero) Marshal.Release(ptr); if(device!=null) Marshal.ReleaseComObject(device); if(enumerator!=null) Marshal.ReleaseComObject(enumerator); }
-              }
-            }
-          }
-          '@
-          Add-Type -TypeDefinition $meterSource
+          $out = Join-Path $env:RUNNER_TEMP 'native-tone-evidence'
+          $dshowWave = Join-Path $env:RUNNER_TEMP 'cable-output-direct-capture.wav'
+          $executable = Join-Path $env:REEL_EVIDENCE_PACKAGE 'Reel.exe'
           $playerCommand = '$p = New-Object -TypeName System.Media.SoundPlayer -ArgumentList "' + $wav + '"; $p.PlaySync()'
           $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($playerCommand))
           $player = Start-Process -FilePath (Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe') -ArgumentList @('-NoProfile','-EncodedCommand',$encoded) -PassThru
-          Start-Sleep -Milliseconds 600
-          $out = Join-Path $env:RUNNER_TEMP 'native-tone-evidence'
-          $executable = Join-Path $env:REEL_EVIDENCE_PACKAGE 'Reel.exe'
+          Start-Sleep -Milliseconds 500
           $capture = Start-Process -FilePath $executable -ArgumentList @('--manual-picker','--no-pause',"--out=$out") -PassThru -NoNewWindow
-          $peaks = @()
-          for ($i=0; $i -lt 28 -and -not $capture.HasExited; $i++) { try { $peaks += [ReelAudioDiagnostic.WasapiMeter]::Peak() } catch { $peaks += -1 }; Start-Sleep -Milliseconds 400 }
+          & ffmpeg -hide_banner -loglevel info -y -f dshow -i 'audio=CABLE Output (VB-Audio Virtual Cable)' -t 16 -ac 1 -ar 48000 -c:a pcm_s16le $dshowWave 2>&1 | ForEach-Object { Write-Host $_ }
+          $dshowExit = $LASTEXITCODE
           $capture.WaitForExit()
           if (-not $player.HasExited) { Stop-Process -Id $player.Id -Force }
-          Write-Host ("WASAPI default-render meter peaks during native tone: " + ($peaks -join ','))
-          $meterPath = Join-Path $env:RUNNER_TEMP 'native-tone-wasapi-meter.json'
-          [IO.File]::WriteAllText($meterPath, (@{ sessionId=$sessionId; sessions=$sessionList; renderPeakSamples=$peaks } | ConvertTo-Json -Depth 3), [Text.UTF8Encoding]::new($false))
+          else { Write-Host ("Native SoundPlayer exit code: " + $player.ExitCode) }
+          Write-Host ("DirectShow CABLE Output capture exit code: $dshowExit")
           $resultPath = Join-Path $out 'result.json'
           if (Test-Path $resultPath) {
             $result = Get-Content -Raw $resultPath | ConvertFrom-Json
             $env:REEL_NATIVE_TONE_MP4 = $result.recording.path
             $env:REEL_NATIVE_TONE_PCM = $result.recording.path -replace '\.mp4$','.pcm'
+            $env:REEL_NATIVE_TONE_DSHOW = $dshowWave
             $env:REEL_NATIVE_TONE_DURATION = [string]$result.recording.durationSeconds
-            node --input-type=module @'
+            $nodePath = Join-Path $env:RUNNER_TEMP 'native-tone-visual-audio.mjs'
+            $nodeScript = @'
+          import { existsSync } from 'node:fs';
           import { writeFile } from 'node:fs/promises';
           import { spawnSync } from 'node:child_process';
-          const path = process.env.REEL_NATIVE_TONE_MP4;
-          const pcmPath = process.env.REEL_NATIVE_TONE_PCM;
-          function run(args) { const r=spawnSync('ffmpeg',args,{encoding:'buffer',maxBuffer:16*1024*1024}); if(r.error||r.status!==0) throw Error(String(r.stderr)); return r.stdout; }
-          function frame(t) { const b=run(['-v','error','-ss',String(t),'-i',path,'-frames:v','1','-vf','scale=100:100','-f','rawvideo','-pix_fmt','rgb24','pipe:1']); if(b.length!==30000) throw Error('Decoded frame missing'); return b; }
+          const mp4=process.env.REEL_NATIVE_TONE_MP4, pcm=process.env.REEL_NATIVE_TONE_PCM, dshow=process.env.REEL_NATIVE_TONE_DSHOW;
+          function run(args) { const r=spawnSync('ffmpeg',args,{maxBuffer:16*1024*1024}); if(r.error||r.status!==0) throw Error(String(r.stderr)); return r.stdout; }
+          function frame(t) { const b=run(['-v','error','-ss',String(t),'-i',mp4,'-frames:v','1','-vf','scale=100:100','-f','rawvideo','-pix_fmt','rgb24','pipe:1']); if(b.length!==30000) throw Error('Decoded frame missing'); return b; }
           function rgb(b,x,y) { const i=(y*100+x)*3; return [...b.subarray(i,i+3)]; }
-          function audio(input,t,raw=false) { const args=['-v','error','-ss',String(t),...(raw?['-f','s16le','-ar','16000','-ac','1']:[]),'-i',input,...(raw?[]:['-map','0:a:0']),'-t','2','-ac','1','-ar','48000','-f','f32le','pipe:1']; const b=run(args); const n=Math.floor(b.length/4); let sum=0,re=0,im=0; for(let i=0;i<n;i++){ const x=b.readFloatLE(i*4); sum+=x*x; const a=2*Math.PI*440*i/48000; re+=x*Math.cos(a); im+=x*Math.sin(a); } return {rms:Math.sqrt(sum/Math.max(1,n)),correlation440:Math.hypot(re,im)/Math.max(1,n),samples:n}; }
-          const first=frame(2),later=frame(3);
-          const markerA=rgb(first,88,85),markerB=rgb(later,88,85);
+          function audio(input,t,format='aac') { const args=['-v','error','-ss',String(t)]; if(format==='pcm') args.push('-f','s16le','-ar','16000','-ac','1'); args.push('-i',input); if(format==='aac') args.push('-map','0:a:0'); args.push('-t','2','-ac','1','-ar','48000','-f','f32le','pipe:1'); const b=run(args),n=Math.floor(b.length/4); let sum=0,re=0,im=0; for(let i=0;i<n;i++){ const x=b.readFloatLE(i*4); sum+=x*x; const a=2*Math.PI*440*i/48000; re+=x*Math.cos(a); im+=x*Math.sin(a); } return {rms:Math.sqrt(sum/Math.max(1,n)),correlation440:Math.hypot(re,im)/Math.max(1,n),samples:n}; }
+          const first=frame(2),later=frame(3),markerA=rgb(first,88,85),markerB=rgb(later,88,85);
           const corners=[rgb(first,20,20),rgb(first,80,20),rgb(first,20,80),rgb(first,80,80)];
           const magenta=c=>c[0]>120&&c[1]<120&&c[2]>90,green=c=>c[0]<120&&c[1]>120&&c[2]>70;
-          const gridOk=magenta(corners[0])&&green(corners[1])&&green(corners[2])&&magenta(corners[3]);
-          const evidence={durationSeconds:Number(process.env.REEL_NATIVE_TONE_DURATION),
-            markerAt2s:markerA,markerAt3s:markerB,markerChanged:markerA.some((v,i)=>Math.abs(v-markerB[i])>40),cornersAt2s:corners,checkerboardOk:gridOk,
-            mp4AudioAt1s:audio(path,1),pcmAt1s:audio(pcmPath,1,true)};
-          await writeFile(process.env.RUNNER_TEMP + '/native-tone-visual-audio.json',JSON.stringify(evidence,null,2)); console.log(JSON.stringify(evidence));
+          let vbCableInput;
+          try { vbCableInput=existsSync(dshow)?audio(dshow,1):{missingFile:true}; } catch (error) { vbCableInput={error:error.message}; }
+          const evidence={durationSeconds:Number(process.env.REEL_NATIVE_TONE_DURATION),markerAt2s:markerA,markerAt3s:markerB,
+            markerChanged:markerA.some((v,i)=>Math.abs(v-markerB[i])>40),cornersAt2s:corners,
+            checkerboardOk:magenta(corners[0])&&green(corners[1])&&green(corners[2])&&magenta(corners[3]),
+            mp4AudioAt1s:audio(mp4,1),pcmAt1s:audio(pcm,1,'pcm'),vbCableInputAt1s:vbCableInput};
+          await writeFile(process.env.RUNNER_TEMP + '/native-tone-visual-audio.json',JSON.stringify(evidence,null,2));
+          console.log(JSON.stringify(evidence));
           '@
+            [IO.File]::WriteAllText($nodePath, $nodeScript, [Text.UTF8Encoding]::new($false))
+            node $nodePath
+            if ($LASTEXITCODE) { Write-Host "Native audio/video metrics exited with code $LASTEXITCODE." }
           } else { Write-Host 'Native-tone control did not produce a capture result file.' }
       - name: Exercise the explicit microphone opt-in through production getUserMedia
         if: success()
@@ -273,6 +262,7 @@ jobs:
             ${{ runner.temp }}/manual-microphone-verification-${{ matrix.arch }}.json
             ${{ runner.temp }}/native-tone-evidence
             ${{ runner.temp }}/native-tone-visual-audio.json
-            ${{ runner.temp }}/native-tone-wasapi-meter.json
+            ${{ runner.temp }}/native-tone-device-inventory.json
+            ${{ runner.temp }}/cable-output-direct-capture.wav
           if-no-files-found: warn
           retention-days: 7
