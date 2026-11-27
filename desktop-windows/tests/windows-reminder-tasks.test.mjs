@@ -55,7 +55,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const allowlist=build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/)?.[1] ?? '';
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.ps1/);
-  const taskHelper=readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8');
+  const taskHelper=readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8').replace(/\r\n/g,'\n');
   assert.ok(taskHelper.includes(String.raw`$planJson.Trim() -match '^\[\s*\]$'`)
     && taskHelper.includes('$plan = @()') && taskHelper.includes('$null -eq $parsedPlan'),
     'An empty JSON array means cancel all tasks, while JSON null remains an invalid plan.');
