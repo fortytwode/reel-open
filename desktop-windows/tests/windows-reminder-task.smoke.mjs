@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createWindowsReminderTaskManager, serializeReminderLaunchConfig } from '../src/windows-reminder-tasks.mjs';
@@ -12,26 +12,34 @@ if (!['portable', 'msix'].includes(mode)) throw Error('Select the portable or ms
 const scope = '7'.repeat(64), token = '8'.repeat(32);
 const stateRoot = mkdtempSync(path.join(os.tmpdir(), 'reel-reminder-task-'));
 const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-const receiver = path.join(stateRoot, 'receiver.mjs');
+const receiverApp = path.join(stateRoot, 'receiver-app');
+const receiver = path.join(receiverApp, 'receiver.mjs');
+const smokeExecutable = process.env.REEL_REMINDER_SMOKE_ELECTRON || process.execPath;
+mkdirSync(receiverApp, { recursive: true });
+writeFileSync(path.join(receiverApp, 'package.json'), JSON.stringify({ type: 'module', main: 'receiver.mjs' }));
 writeFileSync(receiver, `import { writeFileSync } from 'node:fs';
 import { appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-const diagnostics = join(dirname(fileURLToPath(import.meta.url)), 'scheduler-milestones.log');
+const stateRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const diagnostics = join(stateRoot, 'scheduler-milestones.log');
 appendFileSync(diagnostics, 'receiver-started\\n');
+appendFileSync(diagnostics, 'receiver-started-at:' + Date.now() + '\\n');
 const activation = process.argv.find(argument => /^--meeting-reminder-trigger=[a-f0-9]{32}$/.test(argument));
 if (activation) {
-  writeFileSync(join(dirname(fileURLToPath(import.meta.url)), 'delivered.txt'), activation);
+  writeFileSync(join(stateRoot, 'delivered.txt'), activation);
   appendFileSync(diagnostics, 'receiver-trigger-accepted\\n');
 }
 appendFileSync(diagnostics, 'receiver-exited:0\\n');
+appendFileSync(diagnostics, 'receiver-exited-at:' + Date.now() + '\\n');
+process.exit(0);
 `);
 const productionLaunchConfig = mode === 'msix'
   ? { mode: 'msix' }
-  : { mode: 'portable', executable: process.execPath, arguments: [receiver] };
+  : { mode: 'portable', executable: smokeExecutable, arguments: [receiverApp] };
 let lastSyncSummary = null;
-const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: process.execPath,
-  launchArguments: mode === 'portable' ? [receiver] : [],
+const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: smokeExecutable,
+  launchArguments: mode === 'portable' ? [receiverApp] : [],
   exec:(file,args,options)=>{
     const planPath=args[args.indexOf('-PlanPath')+1];
     const plan=JSON.parse(readFileSync(planPath,'utf8'));
@@ -86,16 +94,23 @@ const taskStatus = name => JSON.parse(command('read task action result and regis
   `principalMatchesCurrent=($taskSid -eq $identity.User.Value);logonType=[int]$t.Definition.Principal.LogonType; `+
   `sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`));
 const taskLaunchDiagnostics = (name, scriptName='meeting-reminder-task[.]ps1') => JSON.parse(command('inspect task launch process and scheduler events',
-  `$processes=@(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '${scriptName}' } | ForEach-Object { `+
+  `$sessionId=(Get-Process -Id $PID).SessionId; $allProcesses=@(Get-CimInstance Win32_Process); `+
+  `$processes=@($allProcesses | Where-Object { $_.CommandLine -match '${scriptName}' } | ForEach-Object { `+
   `$process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; $parent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$_.ParentProcessId) -ErrorAction SilentlyContinue; `+
   `[pscustomobject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;exe=[IO.Path]::GetFileName([string]$_.ExecutablePath); `+
   `parentExe=[IO.Path]::GetFileName([string]$parent.ExecutablePath);sessionId=[int]$_.SessionId; `+
   `elapsedMs=[int]((Get-Date).ToUniversalTime()-$_.CreationDate.ToUniversalTime()).TotalMilliseconds; `+
   `cpuSeconds=[math]::Round([double]$process.CPU,1);workingSetMB=[math]::Round([double]$process.WorkingSet64/1MB,1)} }); `+
+  `$relatedSessionProcesses=@($allProcesses | Where-Object { $_.SessionId -eq $sessionId -and `+
+  `[IO.Path]::GetFileName([string]$_.ExecutablePath) -match '^(powershell|node|electron|Reel)\.exe$' } | ForEach-Object { `+
+    `$process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; `+
+    `[pscustomobject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;exe=[IO.Path]::GetFileName([string]$_.ExecutablePath); `+
+    `elapsedMs=[int]((Get-Date).ToUniversalTime()-$_.CreationDate.ToUniversalTime()).TotalMilliseconds; `+
+    `cpuSeconds=[math]::Round([double]$process.CPU,1);workingSetMB=[math]::Round([double]$process.WorkingSet64/1MB,1)} }); `+
   `$events=@(); try { $events=@(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational';StartTime=(Get-Date).AddMinutes(-3)} -ErrorAction Stop | `+
   `Where-Object { $_.Message -like ('*'+ '${name}' + '*') } | Select-Object -First 20 | ForEach-Object { `+
   `[pscustomobject]@{id=[int]$_.Id;timeUtc=$_.TimeCreated.ToUniversalTime().ToString('o');level=[int]$_.Level} }) } catch { }; `+
-  `[pscustomobject]@{taskActionExe='${powershell.replaceAll("'", "''")}';matchedProcesses=$processes;recentSchedulerEvents=$events} | ConvertTo-Json -Compress -Depth 4`,12_000));
+  `[pscustomobject]@{taskActionExe='${powershell.replaceAll("'", "''")}';matchedProcesses=$processes;relatedSessionProcesses=$relatedSessionProcesses;recentSchedulerEvents=$events} | ConvertTo-Json -Compress -Depth 4`,12_000));
 const psQuote = value => `'${value.replaceAll("'", "''")}'`;
 const runPowerShellStartupProbe = runtime => {
   const taskName = `ReelReminderStartupProbe_${randomUUID().replaceAll('-', '')}`;
@@ -165,9 +180,10 @@ try {
     `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`,30_000));
   assert.equal(runtime.is64Bit,true,'Task Scheduler COM is queried from a 64-bit PowerShell host.');
   console.log(`Task Scheduler host: ${JSON.stringify({architecture:runtime.architecture,is64Bit:runtime.is64Bit,sessionId:runtime.sessionId,sessionName:runtime.sessionName})}`);
+  console.log(`Windows reminder smoke: portable child runtime is ${path.basename(smokeExecutable)} (${process.env.REEL_REMINDER_SMOKE_ELECTRON ? 'Electron' : 'Node fallback'}).`);
   const startupTiming=await runPowerShellStartupProbe(runtime);
-  const taskWaitMs=Math.min(60_000,Math.max(15_000,startupTiming.entryMs+10_000));
-  console.log(`Windows reminder smoke: task action completion bound is ${taskWaitMs} ms, derived from measured scheduled PowerShell startup.`);
+  const taskWaitMs=Math.min(60_000,Math.max(30_000,startupTiming.entryMs+10_000));
+  console.log(`Windows reminder smoke: task action completion bound is ${taskWaitMs} ms; ARM previously needed over 15s to reach portable process creation.`);
   const sidHash=createHash('sha256').update(runtime.sid,'utf8').digest('hex');
   const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
@@ -197,6 +213,7 @@ try {
   assert.ok(!security.args.includes('private calendar title') && !security.args.includes('private-event-id'));
   // Exercise the real registered action while its initial trigger is safely far in the future.
   // ARM64 CI can take long enough to run the action that a due-retry trigger would overlap it.
+  const taskActionRequestedAt=Date.now();
   command('run registered task through Task Scheduler COM',
     `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${taskName}'); $null=$t.Run($null)`);
   const immediateStatus=taskStatus(taskName);
@@ -224,6 +241,9 @@ try {
   let launchMilestones=[];
   try { launchMilestones=readFileSync(diagnosticsFile,'utf8').trim().split(/\r?\n/).filter(Boolean); } catch { /* No helper milestone means the task did not reach config loading. */ }
   console.log(`Sanitized reminder launch milestones: ${JSON.stringify(launchMilestones)}`);
+  const receiverStartedAt=Number(launchMilestones.find(value=>value.startsWith('receiver-started-at:'))?.slice('receiver-started-at:'.length));
+  const receiverExitedAt=Number(launchMilestones.find(value=>value.startsWith('receiver-exited-at:'))?.slice('receiver-exited-at:'.length));
+  console.log(`Windows reminder smoke: Electron/Node receiver launch took ${Number.isFinite(receiverStartedAt)?receiverStartedAt-taskActionRequestedAt:'unobserved'} ms; receiver execution took ${Number.isFinite(receiverExitedAt)&&Number.isFinite(receiverStartedAt)?receiverExitedAt-receiverStartedAt:'unobserved'} ms.`);
   assert.equal(completed,true,'The registered task runs its trigger action.');
   assert.notEqual(finalStatus.state,4,'Task Scheduler reports that the action has left the Running state.');
   assert.notEqual(finalStatus.lastTaskResult,267009,'The Scheduler running status has been replaced by the completed action result.');
@@ -314,7 +334,7 @@ try {
     'The helper reports that rounding would move the reminder to meeting end.');
   assert.equal(taskCount(),0,'Rounding a fractional start to the next second removes a reminder that would start at its meeting end.');
   if (mode==='msix') {
-    assert.match(readFileSync(manager.launchPath,'utf8'),/"mode":"msix"/);
+    assert.match(readFileSync(manager.launchPath,'utf8'),/^version=2\r?\nmode=msix\r?\n$/);
     assert.ok(command('resolve installed MSIX identity',"Get-AppxPackage -Name 'RocketShipHQ.Reel' | Select-Object -First 1 -ExpandProperty PackageFamilyName"),
       'The MSIX launch resolver finds the currently installed package family.');
   }

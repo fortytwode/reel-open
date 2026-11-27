@@ -124,6 +124,7 @@ jobs:
           $cpu = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue).PercentProcessorTime
           $memory = [math]::Round($os.FreePhysicalMemory / 1KB)
           Write-Host ("Sanitized runner resources before reminder smoke: " + (@{freePhysicalMemoryMB=$memory;cpuPercent=$cpu;processes=$processes} | ConvertTo-Json -Compress -Depth 3))
+          $env:REEL_REMINDER_SMOKE_ELECTRON = (Resolve-Path 'desktop-windows/probe/node_modules/electron/dist/electron.exe').Path
           node desktop-windows/tests/windows-reminder-task.smoke.mjs portable
       - name: Preflight extracted local Whisper assets
         shell: pwsh
