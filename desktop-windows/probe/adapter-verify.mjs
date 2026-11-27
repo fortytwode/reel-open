@@ -11,6 +11,14 @@ const manualPicker = process.argv.includes('--manual-picker');
 const outDir = path.resolve(outArg ? outArg.slice(6) : path.join(here, 'adapter-out'));
 const result = JSON.parse(await readFile(path.join(outDir, 'result.json'), 'utf8'));
 assert.equal(result.ok, true, JSON.stringify(result.error || result));
+if (manualPicker && process.argv.includes('--test-missing-output') && result.method === 'missing-audio-output') {
+  assert.equal(result.systemAudioOutputPresent, false);
+  assert.equal(result.pickerChoiceFound, true);
+  assert.equal(result.captureErrorName, 'NotReadableError');
+  assert.equal(result.savedRecordings, 0);
+  console.log('Verified that Recorder rejects system-audio capture cleanly without an output endpoint. Media capture requires a separate test on an audio-equipped Windows machine.');
+  process.exit(0);
+}
 assert.equal(result.method, manualPicker ? 'production-manual-picker-recorder' : 'production-recorder-exact-source');
 assert.equal(result.recorderWindowHidden, true);
 if (manualPicker) {

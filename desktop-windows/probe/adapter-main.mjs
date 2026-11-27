@@ -16,6 +16,7 @@ const outDir = path.resolve(outArg ? outArg.slice(6) : path.join(here, 'adapter-
 const abortNegative = process.argv.includes('--abort-negative');
 const verifyOutputSwitch = process.argv.includes('--verify-output-switch');
 const manualPicker = process.argv.includes('--manual-picker');
+const testMissingOutput = process.argv.includes('--test-missing-output');
 const ownerUserID = 'synthetic-probe';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failures = [];
@@ -113,8 +114,7 @@ async function run() {
     let pickerChoice;
     if (manualPicker) {
       bridge = createNativeBridge({ executable: path.join(here, '../native/ReelNativeJoin.exe') });
-      let systemAudioOutputPresent = false;
-      try { systemAudioOutputPresent = Boolean(await bridge.defaultRenderEndpoint()); } catch { /* Report only device presence. */ }
+      const systemAudioOutputPresent = Boolean(await bridge.defaultRenderEndpoint());
       manualController = createManualWindowCapture({ desktopCapturer, recorder,
         getProfile: () => ({ userID: ownerUserID }),
         getExcludedWindowHandles: () => BrowserWindow.getAllWindows()
@@ -124,7 +124,18 @@ async function run() {
       if (matches.length !== 1) throw Error('The manual picker did not expose exactly one synthetic fixture window');
       [pickerChoice] = matches;
       captureDiagnostics = { systemAudioOutputPresent, pickerChoiceFound: true };
-      await manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true });
+      const start = () => manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true });
+      if (testMissingOutput && !systemAudioOutputPresent) {
+        let error;
+        try { await start(); } catch (failure) { error = failure; }
+        if (error?.captureErrorName !== 'NotReadableError' || manualController.state().phase !== 'failed'
+          || manualController.isActive() || store.list(ownerUserID).length !== 0) {
+          throw Error('Expected the system-audio recording to fail cleanly on a Windows host without an output endpoint.');
+        }
+        return { ok: true, method: 'missing-audio-output', ...captureDiagnostics,
+          captureErrorName: error.captureErrorName, savedRecordings: 0 };
+      }
+      await start();
       activeCapture = true;
     } else {
       activeCapture = await recorder.start(argumentsForCapture);
