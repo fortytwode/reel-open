@@ -101,8 +101,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The Windows smoke runs the registered task and checks its action result.');
   assert.match(smoke,/taskLaunchDiagnostics = \(name, scriptName='meeting-reminder-task\[\.\]ps1'\)[\s\S]*CommandLine -match '\$\{scriptName\}'[\s\S]*relatedSessionProcesses=\$relatedSessionProcesses;recentSchedulerEvents=\$events/,
     'A stalled task reports sanitized helper and same-session process timing plus scheduler events without exposing command lines.');
-  assert.match(smoke,/runPowerShellStartupProbe[\s\S]*scheduler-startup-probe\.ps1[\s\S]*entryMs:entryAt-requestedAt[\s\S]*startupTiming\.entryMs\+10_000/,
-    'Windows CI measures an interactive scheduled PowerShell no-op before deriving the product action wait bound.');
+  assert.match(smoke,/runPowerShellStartupProbe[\s\S]*scheduler-startup-probe\.ps1[\s\S]*entryMs:entryAt-requestedAt[\s\S]*const taskWaitMs=60_000[\s\S]*startup probe took \$\{startupTiming\.entryMs\} ms/,
+    'Windows CI measures and reports scheduled PowerShell startup while allowing the observed ARM cold start to complete.');
   assert.match(smoke,/REEL_REMINDER_SMOKE_ELECTRON[\s\S]*receiverApp[\s\S]*receiver\.mjs/,
     'The portable task smoke can deliver the token through an Electron main-process receiver, not only Node.');
   assert.match(workflow,/REEL_REMINDER_SMOKE_ELECTRON = \(Resolve-Path 'desktop-windows\/probe\/node_modules\/electron\/dist\/electron\.exe'\)/,
@@ -137,8 +137,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Windows CI runs and verifies an actual reminder task with production launch JSON and absent optional diagnostic properties.');
   assert.match(smoke,/security\.command\)\.toLowerCase\(\),\/\^powershell/,
     'The registered action executable is validated as Windows PowerShell.');
-  assert.match(smoke,/Math\.max\(30_000,startupTiming\.entryMs\+10_000\)[\s\S]*const deadline = Date\.now\(\)\+taskWaitMs[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
-    'Trigger delivery is required alongside a completed, non-running scheduler action within the evidence-based bounded wait.');
+  assert.match(smoke,/const taskWaitMs=60_000[\s\S]*const deadline = Date\.now\(\)\+taskWaitMs[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
+    'Trigger delivery is required alongside a completed, non-running scheduler action within the 60-second ARM cold-start bound.');
   assert.ok(smoke.indexOf("command('run registered task through Task Scheduler COM'")
     < smoke.indexOf('manager.sync([{token,start:alreadyDueRetry'),
     'The actual task action runs before the due-retry fixture can create an overlapping scheduled trigger.');

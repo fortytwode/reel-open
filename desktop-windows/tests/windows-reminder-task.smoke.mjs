@@ -182,8 +182,8 @@ try {
   console.log(`Task Scheduler host: ${JSON.stringify({architecture:runtime.architecture,is64Bit:runtime.is64Bit,sessionId:runtime.sessionId,sessionName:runtime.sessionName})}`);
   console.log(`Windows reminder smoke: portable child runtime is ${path.basename(smokeExecutable)} (${process.env.REEL_REMINDER_SMOKE_ELECTRON ? 'Electron' : 'Node fallback'}).`);
   const startupTiming=await runPowerShellStartupProbe(runtime);
-  const taskWaitMs=Math.min(60_000,Math.max(30_000,startupTiming.entryMs+10_000));
-  console.log(`Windows reminder smoke: task action completion bound is ${taskWaitMs} ms; ARM previously needed over 15s to reach portable process creation.`);
+  const taskWaitMs=60_000;
+  console.log(`Windows reminder smoke: task action completion bound is ${taskWaitMs} ms; PowerShell startup probe took ${startupTiming.entryMs} ms.`);
   const sidHash=createHash('sha256').update(runtime.sid,'utf8').digest('hex');
   const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
