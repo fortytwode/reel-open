@@ -69,19 +69,24 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $currentName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $registeredCount = 0
+    $rearmedCount = 0
+    $skippedAtEndCount = 0
+    $skippedPastCount = 0
     foreach ($token in $wanted.Keys) {
         $entry = $wanted[$token]
         $start = $entry.start
         if ($start -le [DateTimeOffset]::UtcNow) {
             $start = [DateTimeOffset]::UtcNow.AddSeconds(15)
-            if ($null -eq $entry.end -or $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); continue }
+            $rearmedCount++
+            if ($null -eq $entry.end -or $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); $skippedAtEndCount++; continue }
         }
         $ticksWithinSecond = $start.Ticks % [TimeSpan]::TicksPerSecond
         if ($ticksWithinSecond -ne 0) {
             $start = $start.AddTicks([TimeSpan]::TicksPerSecond - $ticksWithinSecond)
         }
-        if ($null -ne $entry.end -and $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); continue }
-        if ($start -le [DateTimeOffset]::UtcNow) { continue }
+        if ($null -ne $entry.end -and $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); $skippedAtEndCount++; continue }
+        if ($start -le [DateTimeOffset]::UtcNow) { $skippedPastCount++; continue }
         $task = $service.NewTask(0)
         $task.RegistrationInfo.Description = 'Local opt-in Reel meeting reminder.'
         $task.Principal.UserId = $currentSid
@@ -100,7 +105,9 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSCommandPath + '" -Token ' + $token + ' -Scope ' + $scopeValue
         $taskName = $prefix + $token
         $null = $folder.RegisterTaskDefinition($taskName, $task, 6, $currentName, $null, 3, $null) # CREATE_OR_UPDATE, INTERACTIVE_TOKEN
+        $registeredCount++
     }
+    [pscustomobject]@{ registered=$registeredCount; rearmed=$rearmedCount; skippedAtEnd=$skippedAtEndCount; skippedPast=$skippedPastCount } | ConvertTo-Json -Compress
 }
 
 function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
