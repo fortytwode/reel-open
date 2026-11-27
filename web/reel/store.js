@@ -3,7 +3,7 @@
 // per file (init.mp4, segNNNNN.m4s, video.mp4, thumb.jpg, trimmed.mp4). Every segment is stored
 // the moment the encoder closes it, so a crashed or closed tab can be recovered on the next visit
 // (the Mac app's recording.json + segments/ folder + Recovery).
-import * as C from "./core.js?v=20261126-serving-import";
+import * as C from "./core.js?v=20261128-meeting-modes";
 import { organizationStorageKey } from "../organization.js?v=20261118-orgstate1";
 
 const DB = organizationStorageKey("reel-recorder"), VERSION = 1;

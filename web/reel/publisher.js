@@ -3,8 +3,8 @@
 // starts and segments stream up during capture, so the link is copied the moment recording stops
 // and plays within seconds. Then video.mp4 (assembled locally from the segments), the thumbnail
 // and meta are uploaded in the background. Same remote layout as the Mac app.
-import * as C from "./core.js?v=20261126-serving-import";
-import * as store from "./store.js?v=20261126-hls-publication";
+import * as C from "./core.js?v=20261128-meeting-modes";
+import * as store from "./store.js?v=20261128-meeting-modes";
 import { StorageClient, FirestoreClient, SegmentUploader, CloudError, concurrently } from "./cloud.js?v=20261119-owner2";
 import { remux, parseInit, fragmentDuration } from "./fmp4.js";
 

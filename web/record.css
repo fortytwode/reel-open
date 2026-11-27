@@ -100,3 +100,8 @@ button:focus-visible,a:focus-visible,summary:focus-visible,select:focus-visible 
 #meeting-notes-dialog { width: min(760px, 90vw); max-height: 85vh; overflow: auto; }
 .meeting-transcript { white-space: pre-wrap; max-height: 40vh; overflow: auto; font: inherit; padding: 12px; background: #f4f5f7; }
 #meeting-summary { white-space: pre-wrap; }
+
+#meeting-capture-mode { display: flex; flex-wrap: wrap; gap: 12px 24px; border: 1px solid var(--border, #d8dee8); border-radius: 10px; margin: 0 0 14px; padding: 12px; }
+#meeting-capture-mode legend { padding: 0 4px; font-weight: 600; }
+#meeting-capture-mode[hidden], #capture-start-row[hidden] { display: none; }
+#meeting-notes-options:not([hidden]) { display: grid; gap: 10px; }

@@ -10,7 +10,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/viewer.css">
   <link rel="stylesheet" href="/meeting-calendar.css?v=20261119-choice1">
-  <link rel="stylesheet" href="/record.css?v=20261126-drawing">
+  <link rel="stylesheet" href="/record.css?v=20261128-meeting-modes">
 </head>
 <body>
   <header class="bar">
@@ -36,7 +36,6 @@
       <p>On Windows, the <a href="/downloads/reel-meeting-prompt-0.1.2.zip" download>Reel extension</a> adds global shortcuts in Chrome and Edge. See the browser’s extension shortcuts page to view or change your keys.</p>
     </details>
     <p id="install-status" class="small muted" role="status"></p>
-    <div id="meeting-calendar-panel"></div>
     <section class="recorder card" id="setup">
       <div class="rec-head">
         <h1 id="recording-heading">New recording</h1>
@@ -44,14 +43,24 @@
         <p id="recording-intro" class="muted small">After you press Start, pick what to share: your entire screen, a window or a browser tab. Tick <b>Also share system audio</b> (screen) or <b>Also share tab audio</b> (tab) to include sound from your computer.</p>
         <p id="tab-intro" class="muted small" hidden>To include sound from the tab, choose a system audio option below and tick <b>Also share tab audio</b> in the browser picker.</p>
       </div>
+      <fieldset id="meeting-capture-mode" hidden>
+        <legend>How to record</legend>
+        <label><input id="meeting-method-device" type="radio" name="meeting-method" value="device" checked> Record on this device</label>
+        <label><input id="meeting-method-bot" type="radio" name="meeting-method" value="bot"> Send the Reel bot</label>
+      </fieldset>
+      <div id="meeting-calendar-panel"></div>
       <section id="meeting-setup" hidden>
-        <label>Calendar invitation <select id="meeting-calendar-invite"><option value="">Manual meeting — private Calls and recap to you</option></select></label>
-        <p id="meeting-calendar-status" class="muted small">Sign in to select a calendar invitation for team recaps.</p>
         <label>Meeting title <input id="meeting-title" maxlength="200" placeholder="Meeting title"></label>
-        <label>Attendee emails <input id="meeting-attendees" placeholder="Emails, separated by commas"></label>
-        <p class="muted small">Records video, your microphone and computer sound. For Google Meet or Teams in a browser, share the meeting tab and tick <b>Also share tab audio</b>. For Zoom or Teams desktop, share your screen with system audio. Keep this Reel window open until transcription finishes.</p>
-        <p class="muted small">Meeting audio is sent securely to OpenAI for transcription and AI meeting notes. Organization sign-in is required. The video stays in this browser unless you choose Share video. When signed in, its title and date appear in your private Meetings portal.</p>
-        <p class="muted small">New meeting notes are automatically saved in Notion. Recaps go to internal calendar invitees, including nonattendees; external invitees are excluded. A manual meeting without an invitation sends a recap only to you.</p>
+        <p class="muted small">Join the meeting yourself. In Chrome or Edge, choose the meeting tab and share tab audio. For a desktop app, select a source that shares system audio. Reel saves the selected video and audio, including your microphone, in this browser.</p>
+        <label><input type="checkbox" id="meeting-recording-consent"> I have permission from all participants to record this meeting.</label>
+        <label><input type="checkbox" id="meeting-process-notes"> Generate meeting notes with OpenAI</label>
+        <div id="meeting-notes-options" hidden>
+          <p class="muted small">Reel sends meeting audio to OpenAI for transcription and notes. Organization sign-in is required. The video stays in this browser unless you use Share video.</p>
+          <label>Calendar invitation <select id="meeting-calendar-invite"><option value="">Manual meeting — private Calls and recap to you</option></select></label>
+          <p id="meeting-calendar-status" class="muted small">Sign in to select a calendar invitation for team recaps.</p>
+          <label>Attendee emails <input id="meeting-attendees" placeholder="Emails, separated by commas"></label>
+          <p class="muted small">Reel saves notes in Notion. Calendar recaps go to internal invitees. For a manual meeting, the recap goes only to you. Keep Reel open until processing finishes.</p>
+        </div>
       </section>
       <div id="ordinary-settings">
       <div class="recorder-preview">
@@ -137,7 +146,7 @@
       </div>
       </details>
       </div>
-      <div class="start-row">
+      <div class="start-row" id="capture-start-row">
         <button id="start" type="button" class="primary big">Start recording</button>
         <span class="muted small" id="shortcut-hint">Ctrl+Alt+R start/stop · Ctrl+Alt+P pause · Ctrl+Alt+Backspace cancel (while this tab or the bubble is focused)</span>
       </div>
@@ -287,6 +296,6 @@
   <div id="toast" class="toast" role="status" hidden></div>
   <footer class="foot muted small"><a href="/notetaker" class="muted">Open Reel Notetaker</a></footer>
   <script type="module" src="/reel/install.js?v=20261119-products1"></script>
-  <script type="module" src="/record.js?v=20261126-team-audio-timeline"></script>
+  <script type="module" src="/record.js?v=20261128-meeting-modes"></script>
 </body>
 </html>

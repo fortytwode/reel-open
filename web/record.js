@@ -4,16 +4,16 @@
 // (link copied immediately, plays within seconds) / cancel / restart → video.mp4 assembled
 // locally → background upload. Recordings live in IndexedDB; an interrupted one is rebuilt on
 // the next visit.
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261120-partial-recovery";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261126-language";
 import { organizationStorageKey } from "./organization.js?v=20261118-orgstate1";
-import * as C from "./reel/core.js?v=20261126-language";
-import * as store from "./reel/store.js?v=20261126-hls-publication";
+import * as C from "./reel/core.js?v=20261128-meeting-modes";
+import * as store from "./reel/store.js?v=20261128-meeting-modes";
 import { transcribeMeeting } from "./reel/meeting-transcription.js?v=20261126-language";
 import { whisperLanguageOptions } from "./reel/whisper-languages.js?v=20261126-language";
 import { deliverMeeting, listDeliveryCalendar } from "./reel/meeting-delivery.js?v=20261119-choice1";
 import { transcribeCloudMeeting, summarizeCloudMeeting } from "./reel/cloud-meeting-speech.js?v=20261110-cloudmeeting1";
 import { isOrganizationEmail, loadAuth, CLOUD_CONFIG, DOMAIN, EMU, sessionSnapshot } from "./reel/firebase.js?v=20261118-orgstate1";
-import { Library, Publisher, APP } from "./reel/publisher.js?v=20261126-hls-publication";
+import { Library, Publisher, APP } from "./reel/publisher.js?v=20261128-meeting-modes";
 import { CaptureSession, captureSupported, pickDisplay, openCamera, openMic, pickDevice, modeForSurface } from "./reel/capture.js?v=20261126-team-audio-timeline";
 import { chooseRecordingRegion } from "./reel/region-picker.js";
 import { createAnnotationPanel } from "./reel/annotation-panel.js?v=20261126-drawing";
@@ -115,7 +115,7 @@ async function initAuth() {
     authReady();
     renderList();
     if (u) libraryReady.then(async () => { await publisher.syncCloudLibrary(); resumeMeetingDelivery(); }).catch((e) => toast(e.message, true));
-    if ($("recording-kind").value === "meeting") loadDeliveryInvites();
+    if ($("meeting-process-notes").checked) loadDeliveryInvites();
   });
   $("sign-in").addEventListener("click", async () => {
     const provider = new am.GoogleAuthProvider();
@@ -203,10 +203,21 @@ async function start({ reuse = false } = {}) {
   R.drawingOpened = R.drawingBusy = false;
   const meetingMode = isMeeting();
   const tabOnly = isTabCapture();
+  if (meetingMode && $("meeting-method-bot").checked) return;
+  if (meetingMode && !reuse && !$("meeting-recording-consent").checked) {
+    toast("Confirm participant permission before recording.", true);
+    return;
+  }
+  const createNotes = meetingMode && $("meeting-process-notes").checked;
+  if (createNotes && !user) {
+    if (reuse) releaseDevices();
+    toast("Sign in with your organization account to generate meeting notes.", true);
+    return;
+  }
   let meetingDetails = null;
   const captureOwnerUID = user?.uid;
   if (meetingMode) {
-    try { meetingDetails = C.parseMeetingDetails($("meeting-attendees").value); }
+    try { meetingDetails = createNotes ? C.parseMeetingDetails($("meeting-attendees").value) : { attendees: [], notesRequested: false }; }
     catch (e) { toast(e.message, true); return; }
   }
   const s = meetingMode ? C.meetingSettings(settings) : { ...settings, mode: captureMode() };
@@ -293,13 +304,15 @@ async function start({ reuse = false } = {}) {
   }
   if (meetingDetails) {
     r.meeting = meetingDetails;
-    if (captureOwnerUID) r.meeting.ownerUID = captureOwnerUID;
-    r.meeting.calendar = deliveryCalendarEvents.get($("meeting-calendar-invite").value)?.calendar ?? null;
-    r.meeting.deliveryStatus = "pending";
+    if (createNotes) {
+      r.meeting.ownerUID = captureOwnerUID;
+      r.meeting.calendar = deliveryCalendarEvents.get($("meeting-calendar-invite").value)?.calendar ?? null;
+      r.meeting.deliveryStatus = "pending";
+    }
     r.title = meetingTitle || "Meeting " + now.toLocaleString();
     r.titleIsCustom = true;
   }
-  r.transcriptStatus = s.audio === "none" ? "none" : "pending";
+  r.transcriptStatus = s.audio === "none" || (meetingMode && !createNotes) ? "none" : "pending";
   r.captureState = "recording";
 
   R.recording = r; R.log = C.newSegmentLog(); R.writes = Promise.resolve(); R.uploader = null; R.cancelCountdown = false; R.countdownError = null;
@@ -461,9 +474,13 @@ async function stop(nav) {
     setPhase("idle");
     cur = library.get(r.id);
     if (C.isMeeting(cur)) {
-      toast("Meeting video saved locally. Sending audio securely for transcription…");
-      syncMeetingMetadata(cur);
-      processRecording(cur);
+      if (cur.meeting.notesRequested === false) toast("Meeting recording saved in this browser");
+      else {
+        toast("Meeting video saved locally. Sending audio securely for transcription…");
+        syncMeetingMetadata(cur);
+        processRecording(cur);
+      }
+      resetMeetingChoices();
     } else {
       if (cur.transcriptStatus === "pending") processRecording(cur);
       if (settings.autoUpload) await publisher.publish(cur, { copyLink: !uploader && settings.copyLinkOnStop });
@@ -498,7 +515,10 @@ async function cancel({ confirmFirst = true, keepDevices = false } = {}) {
   R.session = null; R.uploader = null;
   if (R.unlock) { R.unlock(); R.unlock = null; }
   await discard(r);
-  if (!keepDevices) releaseDevices();
+  if (!keepDevices) {
+    releaseDevices();
+    if (C.isMeeting(r)) resetMeetingChoices();
+  }
   setPhase("idle");
   toast("Recording discarded");
 }
@@ -676,7 +696,7 @@ async function renderItem(r) {
     btn("Copy link", () => copyText(C.shareURL(r, CLOUD_CONFIG)), "primary");
     btn("Open", () => window.open(C.shareURL(r, CLOUD_CONFIG), "_blank", "noopener"));
   }
-  if (!busy && C.isMeeting(r)) {
+  if (!busy && C.isMeeting(r) && r.meeting.notesRequested !== false) {
     bits.push("Transcript: " + r.transcriptStatus);
     meta.textContent = bits.join(" · ");
     btn("Meeting notes", () => openMeetingNotes(r));
@@ -783,7 +803,7 @@ function syncMeetingMetadata(recording) {
   const id = recording.id;
   const task = (portalJobs.get(id) || Promise.resolve()).catch(() => {}).then(async () => {
     const r = library.get(id);
-    if (!r || !C.isMeeting(r) || !r.meeting.ownerUID || r.meeting.ownerUID !== user?.uid) return;
+    if (!r || !C.isMeeting(r) || r.meeting.notesRequested === false || !r.meeting.ownerUID || r.meeting.ownerUID !== user?.uid) return;
     const current = await session.session();
     if (!current || current.uid !== r.meeting.ownerUID) return;
     try {
@@ -811,7 +831,7 @@ async function removeMeetingMetadata(r) {
   if (!response.ok) throw new Error("Portal sync failed");
 }
 function processRecording(recording, { resumeNotes = false } = {}) {
-  if (!recording || recording.localImport || !["complete", "recovered"].includes(recording.captureState)) return Promise.resolve();
+  if (!recording || recording.localImport || recording.meeting?.notesRequested === false || !["complete", "recovered"].includes(recording.captureState)) return Promise.resolve();
   if (transcriptionJobs.has(recording.id)) return transcriptionJobs.get(recording.id);
   const id = recording.id;
   const expectedOwnerUID = user?.uid ?? null, expectedGeneration = authGeneration;
@@ -1167,7 +1187,6 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) previ
 // ---------------------------------------------------------------- boot
 
 async function boot() {
-  if (!captureSupported()) { $("unsupported").hidden = false; $("start").disabled = true; }
   bindSettings();
   library.addEventListener("change", renderList);
   libraryReady = library.load();
@@ -1185,41 +1204,68 @@ async function boot() {
   resumeMeetingDelivery();
   for (const r of resumable.slice(0, 20)) publisher.refreshViews(r).catch(() => {});
 }
-function updateRecordingKind() {
+function refreshCaptureMethod() {
   const meeting = isMeeting();
   const tab = isTabCapture();
+  const bot = meeting && $("meeting-method-bot").checked;
+  const onDevice = meeting && !bot;
+  $("meeting-capture-mode").hidden = !meeting;
   $("ordinary-settings").hidden = meeting;
-  $("meeting-setup").hidden = !meeting;
   $("mode-setting").hidden = tab;
-  $("recording-intro").hidden = tab;
+  $("recording-intro").hidden = meeting || tab;
   $("tab-intro").hidden = !tab;
+  $("meeting-setup").hidden = !onDevice;
+  $("meeting-calendar-panel").hidden = !bot;
+  $("capture-start-row").hidden = bot;
+  $("meeting-notes-options").hidden = !$("meeting-process-notes").checked;
   $("recording-heading").textContent = meeting ? "Record a meeting" : tab ? "Record a browser tab" : "New recording";
   $("start").textContent = meeting ? "Start meeting recording" : tab ? "Choose a tab" : "Start recording";
+  $("unsupported").hidden = bot || captureSupported();
+  $("start").disabled = !captureSupported() || (onDevice && !$("meeting-recording-consent").checked);
   $("last").hidden = meeting || !$("last-link").textContent;
-  if (meeting) loadDeliveryInvites();
 }
-$("recording-kind").addEventListener("change", () => {
-  preview.stop();
-  updateRecordingKind();
-  refreshForm();
+function resetMeetingChoices() {
+  $("meeting-recording-consent").checked = false;
+  $("meeting-process-notes").checked = false;
+  refreshCaptureMethod();
+}
+for (const id of ["recording-kind", "meeting-method-device", "meeting-method-bot"]) {
+  $(id).addEventListener("change", () => { preview.stop(); resetMeetingChoices(); refreshForm(); });
+}
+$("meeting-recording-consent").addEventListener("change", refreshCaptureMethod);
+$("meeting-process-notes").addEventListener("change", () => {
+  refreshCaptureMethod();
+  if ($("meeting-process-notes").checked) loadDeliveryInvites();
 });
 window.addEventListener("beforeunload", (e) => {
   if (R.phase === "recording" || R.phase === "paused" || R.phase === "finishing" || publisher.uploads.size || transcriptionJobs.size) { e.preventDefault(); e.returnValue = ""; }
 });
-if (query.get("mode") === "meeting") $("recording-kind").value = "meeting";
-updateRecordingKind();
+const autoBot = /(?:^#|&)(?:meeting-request|calendar-meeting)=/.test(location.hash);
+if (autoBot || query.get("mode") === "meeting") {
+  $("recording-kind").value = "meeting";
+  if (autoBot) $("meeting-method-bot").checked = true;
+}
+refreshCaptureMethod();
 boot();
 console.info(APP, EMU ? "(emulators)" : "");
 
 let meetingCalendar;
 function openMeetingEntry() {
   const fragmentRequest = /(?:^#|&)(?:meeting-request|calendar-meeting)=/.test(location.hash);
-  if (!fragmentRequest && query.get("mode") !== "meeting") return;
+  if (!fragmentRequest && query.get("mode") !== "meeting" && !isMeeting()) return;
+  if (fragmentRequest) {
+    if (R.phase !== "idle") return;
+    $("recording-kind").value = "meeting";
+    $("meeting-method-bot").checked = true;
+    resetMeetingChoices();
+    meetingCalendar?.dispose();
+    meetingCalendar = null;
+  }
   if (meetingCalendar) return;
   $("recording-kind-label").hidden = false;
   meetingCalendar = mountMeetingCalendar({
     container: $("meeting-calendar-panel"), session: () => session.session(),
-    onSelectionChange: () => { if ($("recording-kind").value === "meeting") loadDeliveryInvites(); },
+    onSelectionChange: () => { if ($("meeting-process-notes").checked) loadDeliveryInvites(); },
   });
 }
 window.addEventListener("hashchange", openMeetingEntry);

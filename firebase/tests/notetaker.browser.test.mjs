@@ -49,8 +49,11 @@ test('Notetaker launches separately without capture and legacy meeting links rem
     await page.goto(`${origin}/record#calendar-meeting=event-1`);
     await page.locator('#meeting-calendar-panel .mc-card').waitFor({ timeout: 5000 });
     await page.goto(`${origin}/record?mode=meeting`);
-    await page.locator('#meeting-calendar-panel .mc-card').waitFor({ timeout: 5000 });
     assert.equal(await page.locator('#recording-kind').inputValue(), 'meeting');
+    assert.equal(await page.locator('#meeting-method-device').isChecked(), true);
+    assert.equal(await page.locator('#meeting-calendar-panel').isHidden(), true);
+    await page.locator('#meeting-method-bot').check();
+    await page.locator('#meeting-calendar-panel .mc-card').waitFor({ timeout: 5000 });
     await page.goto(`${origin}/record#meeting-request=${encodeURIComponent(JSON.stringify({url:'https://meet.google.com/abc-defg-hij'}))}`);
     await page.locator('#meeting-calendar-panel .mc-card').waitFor({ timeout: 5000 });
     assert.equal(await page.locator('[data-browser]').isVisible(), true);
