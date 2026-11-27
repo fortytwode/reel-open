@@ -145,6 +145,9 @@ function renderManualWindowCapture(signedIn) {
   const placeholder=node('option','','Choose an open window'); placeholder.value=''; select.append(placeholder);
   for(const source of choices) { const option=node('option','',source.title); option.value=source.id; select.append(option); }
   if(choices.some(source=>source.id===previous)) select.value=previous;
+  const preview=byId('captureWindowPreview'), selected=choices.find(source=>source.id===select.value);
+  if(signedIn && selected?.preview) { preview.src=selected.preview; preview.classList.remove('hidden'); }
+  else { preview.src=''; preview.classList.add('hidden'); }
   const busy=['starting','capturing','saving'].includes(capture.phase);
   byId('refreshCaptureWindows').disabled=!signedIn || busy;
   select.disabled=!signedIn || busy || !choices.length;

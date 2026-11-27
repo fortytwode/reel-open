@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { captureWindowPreview } from './capture-window-preview.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const WINDOW_SOURCE = /^window:([1-9][0-9]{0,19}):[01]$/;
@@ -18,7 +19,7 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
   async function list(ownerUserID) {
     owner(ownerUserID);
     check(!isActive(), 'Stop the current recording before choosing another window.');
-    const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 } });
+    const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 192, height: 120 } });
     owner(ownerUserID);
     choices = new Map(); catalogOwner = ownerUserID;
     const excluded = new Set(getExcludedWindowHandles().map(String));
@@ -28,8 +29,9 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
       if (!match || excluded.has(match[1])) continue;
       const id = randomUUID();
       const title = String(source.name ?? '').trim().slice(0, 160) || 'Untitled window';
+      const preview = captureWindowPreview(source);
       choices.set(id, { sourceID: source.id, title, sourceName: String(source.name ?? ''), ownerUserID });
-      options.push({ id, title });
+      options.push({ id, title, ...(preview ? { preview } : {}) });
     }
     publish({ phase: state.phase, ownerUserID, sources: options });
     return options;
@@ -53,7 +55,7 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
       const match = WINDOW_SOURCE.exec(matches[0].id);
       check(match, 'That window cannot be captured.');
       const handle = await recorder.start({
-        ownerUserID, hwnd: match[1], manual: true, title: capture.title, sourceName: selected.sourceName, meeting: null,
+        ownerUserID, hwnd: match[1], manual: true, title: capture.title, sourceName: selected.sourceName, meeting: { manual: true },
         systemAudio: true, microphone: false, signal: capture.controller.signal,
       });
       if (active !== capture || !current(capture)) {

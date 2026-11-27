@@ -41,6 +41,28 @@ test('transcript dialog labels the window without announcing the entire transcri
   assert.match(html,/<button[^>]+data-action="closeTranscript"[^>]*>Close transcript<\/button>/);
 });
 
+test('the selected window preview stays in the signed-in picker and clears on sign-out', async () => {
+  const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onState,onChange;
+  const profile={userID:'owner-a',email:'a@example.com',calendarConnected:true};
+  const snapshot={configured:true,profile,settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},
+    manualCapture:{phase:'idle',ownerUserID:'owner-a',sources:[{id:'opaque-choice',title:'Window',preview:'data:image/png;base64,cHJldmlldw=='}]},
+    meetings:[],recordings:[],status:{phase:'idle'}};
+  const api={onState:fn=>{onState=fn;},state:async()=>snapshot,action:async()=>snapshot};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='change')onChange=fn;}};
+  const context={window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  const select=getElement('captureWindowSelect'),preview=getElement('captureWindowPreview');
+  select.value='opaque-choice'; onChange({target:{...select,id:'captureWindowSelect',matches:()=>false}});
+  assert.equal(preview.src,'data:image/png;base64,cHJldmlldw==');
+  assert.equal(preview.classList.values.has('hidden'),false);
+  onState({...snapshot,profile:null,manualCapture:{phase:'idle'}});
+  assert.equal(preview.src,'');
+  assert.equal(preview.classList.values.has('hidden'),true);
+});
+
 class Element {
   constructor(tag = 'div') {
     this.tagName = tag; this.children = []; this.dataset = {}; this.disabled = false;
