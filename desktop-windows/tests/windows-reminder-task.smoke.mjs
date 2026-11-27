@@ -50,7 +50,7 @@ const taskSecurity = name => {
   const xml=execFileSync(schtasks,['/Query','/TN',name,'/XML'],{encoding:'utf8',windowsHide:true,timeout:15_000});
   const readTag=tag=>xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`,'i'))?.[1] ?? '<missing>';
   console.log(`Windows reminder smoke: task XML query completed in ${Date.now()-started} ms.`);
-  return {logonType:readTag('LogonType'),runLevel:readTag('RunLevel'),args:readTag('Arguments'),start:readTag('StartBoundary')};
+  return {name,logonType:readTag('LogonType'),runLevel:readTag('RunLevel'),args:readTag('Arguments'),start:readTag('StartBoundary')};
 };
 const taskCount = () => Number(command('count this scope’s scheduled tasks through Task Scheduler COM',
   `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $f=$s.GetFolder([string][char]92); $count=0; `+
@@ -101,7 +101,12 @@ try {
     && retryTiming.candidateUtcMs<retryTiming.planEndUtcMs,'The UTC retry candidate remains between the safe delay and meeting end.');
   const retried=taskQuery(taskName);
   const retriedSecurity=taskSecurity(taskName);
-  assert.equal(retried.name,taskName,'Rearming replaces the existing one-shot task instead of leaving a consumed task.');
+  assert.equal(retriedSecurity.name,taskName,'The exact-name schtasks XML query confirms the rearmed task exists.');
+  assert.equal(taskCount(),1,'Rearming updates the existing one-shot task without leaving a duplicate.');
+  assert.equal(retried.userSid,retried.currentSid,'The rearmed task still belongs to the current Windows user SID.');
+  assert.equal(retriedSecurity.logonType,'InteractiveToken','The rearmed task still uses the current interactive token.');
+  assert.ok(['<missing>','LeastPrivilege'].includes(retriedSecurity.runLevel),
+    'The rearmed task remains at least-privileged.');
   assert.ok(Date.parse(retriedSecurity.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
   assert.ok(Date.parse(retriedSecurity.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
   command('run registered task through Task Scheduler COM',
