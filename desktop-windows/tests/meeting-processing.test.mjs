@@ -95,7 +95,9 @@ test('manual recordings are transcribed only on request and stop before summary 
   f.set({phase:'pending',title:'Saved window',createdAt:'2026-11-10T09:00:00Z',meeting:{manual:true}});
   assert.deepEqual(await f.processor.resume(),[]);
   assert.equal(f.calls.length,0,'Pending manual captures are never processed automatically.');
-  const result=await f.processor.process({ownerUserID,id});
+  assert.throws(()=>f.processor.process({ownerUserID,id}),/Choose a transcription mode/);
+  assert.equal(f.calls.length,0);
+  const result=await f.processor.process({ownerUserID,id,transcriptionMode:'cloud'});
   assert.equal(result.phase,'completed');
   assert.equal(result.transcriptOnly,true);
   assert.equal(result.text,'Full transcript.');

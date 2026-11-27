@@ -456,7 +456,7 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     check(/^[0-9a-f]{32}$/.test(id ?? ''), 'Invalid recording.');
     const value = owner(ownerUserID), item = value.state.recordings.find(recording => recording.id === id);
     const file = path.join(value.dir, `${id}.mp4`);
-    if (!(item?.processing?.meeting || item?.processing?.manual === true || item?.processing?.meeting?.manual === true) || !existsSync(file)) return null;
+    if (!item?.processing?.meeting || !existsSync(file)) return null;
     const dimensions = Number.isInteger(item.width) && item.width > 0 && Number.isInteger(item.height) && item.height > 0
       ? { width: item.width, height: item.height } : await videoDimensions(file);
     return { id, title: item.title, createdAt: item.createdAt, durationSeconds: item.durationSeconds,
@@ -478,7 +478,7 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     const value = owner(ownerUserID), file = path.join(value.dir, `${id}.mp4`);
     const state = await mutate(value, state => {
       const item = state.recordings.find(recording => recording.id === id);
-      check((item?.processing?.meeting || item?.processing?.manual === true || item?.processing?.meeting?.manual === true)
+      check(item?.processing?.meeting
         && existsSync(file), 'This saved recording is unavailable.');
       if (item.share) {
         check(item.share.ownerUserID === ownerUserID && item.share.recordingNonce === recordingNonce

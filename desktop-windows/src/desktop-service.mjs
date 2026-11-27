@@ -320,11 +320,13 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         await coordinator.cancelJoin(id);
       } else if(name==='retryProcessing') {
-        const id=requireOwner(payload?.expectedOwnerUserID);
-        if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        const processing=typeof payload?.id==='string' && store.getProcessing({ownerUserID:id,id:payload.id});
+        if (!processing) throw Error('Recording is unavailable.');
+        if (processing.meeting?.manual) throw Error('Choose local or cloud transcription for this recording.');
         void processor?.process({ownerUserID:id,id:payload.id}).catch(()=>{});
       } else if(name==='transcribeManualRecording') {
-        const id=requireOwner(payload?.expectedOwnerUserID);
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!payload || typeof payload!=='object' || Array.isArray(payload)
           || Object.keys(payload).some(key=>!['expectedOwnerUserID','id','transcriptionConfirmed','transcriptionMode'].includes(key))
           || typeof payload.id!=='string' || !/^[0-9a-f]{32}$/.test(payload.id)

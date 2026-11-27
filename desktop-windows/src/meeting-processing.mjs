@@ -251,6 +251,8 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
   }
   function process({ ownerUserID, id, transcriptionMode } = {}) {
     check(ID.test(id ?? '') && typeof ownerUserID === 'string' && ownerUserID.length > 0, 'Invalid meeting processing owner or recording.');
+    if (snapshot(ownerUserID,id)?.meeting?.manual)
+      check(['local','cloud'].includes(transcriptionMode),'Choose a transcription mode for this recording.');
     const key = JSON.stringify([ownerUserID, id]);
     if (jobs.has(key) && !jobs.get(key).controller.signal.aborted) return jobs.get(key).promise;
     const controller = new AbortController();
