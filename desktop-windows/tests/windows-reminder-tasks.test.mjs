@@ -95,6 +95,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The launch parser requires an object and rejects fields outside the portable/MSIX schema.');
   assert.doesNotMatch(launchParserFunction,/\.Contains\(/,
     'The generic dictionary is queried with its public ContainsKey API rather than the IDictionary overload.');
+  assert.match(launchParserFunction,/return ,\$launch/,
+    'The validated generic dictionary is returned as one object instead of being enumerated into entries.');
   assert.doesNotMatch(launchParserFunction,/ConvertFrom-Json/,
     'Scheduled delivery does not invoke the slow PowerShell JSON cmdlet on the ARM cold path.');
   assert.match(launchParserFunction,/launch-parser-assembly-load-before[\s\S]*Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*launch-parser-assembly-load-after[\s\S]*launch-parser-create-before[\s\S]*launch-parser-create-after[\s\S]*launch-json-deserialize-before[\s\S]*launch-json-deserialize-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,

@@ -97,7 +97,7 @@ function Read-ReminderLaunchConfiguration([string]$json, [string]$diagnosticsPat
         throw 'Invalid reminder launch configuration.'
     }
     Write-TaskDiagnostic $diagnosticsPath 'launch-config-schema-check-after'
-    return $launch
+    return ,$launch
 }
 
 function ConvertTo-UtcDateTimeOffset($value) {
