@@ -98,6 +98,22 @@ function tone(seconds, frequency = 440, input = recordingPath) {
 const lateTime = result.outputSwitched ? Number(probe.format.duration) - 3 : 10;
 if (manualPicker) {
   const pcmPath = recordingPath.replace(/\.mp4$/, '.pcm');
+  // The fixture plays 880 Hz only after the encoder confirms Pause. Check the
+  // entire recording in 100 ms windows so a dropped pause cannot hide between probes.
+  for (const input of [recordingPath, pcmPath]) {
+    const raw = input === pcmPath ? ['-f','s16le','-ar','16000','-ac','1'] : [];
+    const audio = run('ffmpeg',['-v','error',...raw,'-i',input,'-map','0:a:0','-ar','8000','-ac','1','-f','f32le','pipe:1']);
+    let peak=0;
+    for (let start=0; start+800 <= audio.length/4; start+=800) {
+      let re=0, im=0;
+      for (let frame=0; frame<800; frame++) {
+        const sample=audio.readFloatLE((start+frame)*4), angle=2*Math.PI*880*frame/8000;
+        re+=sample*Math.cos(angle); im+=sample*Math.sin(angle);
+      }
+      peak=Math.max(peak,Math.hypot(re,im)/800);
+    }
+    assert.ok(peak < 0.02,'Paused fixture audio appeared in '+path.extname(input));
+  }
   sidecarTones.early = tone(1, 440, pcmPath);
   sidecarTones.late = tone(10, 440, pcmPath);
 } else if (result.outputSwitched) {

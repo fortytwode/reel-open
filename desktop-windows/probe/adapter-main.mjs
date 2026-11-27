@@ -140,6 +140,16 @@ async function run() {
       if (!changedAt) throw Error('Windows did not report a different default output device');
       await fixtureWindow.webContents.executeJavaScript('tone.frequency.value = 660');
       await sleep(10_000);
+    } else if (manualPicker) {
+      const pauseStarted = Date.now();
+      await manualController.setPaused(ownerUserID, true);
+      await fixtureWindow.webContents.executeJavaScript('tone.frequency.value = 880');
+      await sleep(1800);
+      await fixtureWindow.webContents.executeJavaScript('tone.frequency.value = 440');
+      await sleep(250); // Allow the output endpoint buffer to drain before resuming.
+      await manualController.setPaused(ownerUserID, false);
+      const pausedMs = Date.now() - pauseStarted;
+      await sleep(Math.max(3500, 13_500 + pausedMs - (Date.now() - beganAt)));
     } else {
       await sleep(Math.max(0, 13_500 - (Date.now() - beganAt)));
     }
