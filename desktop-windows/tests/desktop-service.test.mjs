@@ -141,7 +141,7 @@ test('manual capture service actions remain owner-bound and validate picker payl
   f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
   await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/account changed/i);
   assert.equal(f.service.state().manualCapture.phase,'idle','Another account must not see the previous owner capture state.');
-  assert.deepEqual(calls,[['list','owner-a'],['start',{ownerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}],['stop','owner-a']]);
+  assert.deepEqual(calls,[['list','owner-a'],['start',{ownerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true,includeMicrophone:false}],['stop','owner-a']]);
 });
 
 test('manual capture cannot overlap auto-join or an explicit meeting join',async()=>{
