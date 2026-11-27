@@ -47,6 +47,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const root=fileURLToPath(new URL('..',import.meta.url));
   const build=readFileSync(path.join(root,'build-portable.ps1'),'utf8');
   const msix=readFileSync(path.join(root,'build-msix.ps1'),'utf8');
+  const workflow=readFileSync(path.join(root,'..','.github','workflows','windows-package.yml'),'utf8');
   const smoke=readFileSync(path.join(root,'tests','windows-reminder-task.smoke.mjs'),'utf8');
   const allowlist=build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/)?.[1] ?? '';
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
@@ -78,6 +79,13 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.ok(smoke.indexOf("command('run registered task through Task Scheduler COM'")
     < smoke.indexOf('manager.sync([{token,start:alreadyDueRetry'),
     'The actual task action runs before the due-retry fixture can create an overlapping scheduled trigger.');
+  assert.ok(workflow.indexOf('Snapshot runner and verify reminders before model inference')
+    < workflow.indexOf('Verify packaged local Whisper inference and offline cache'),
+    'Task Scheduler smoke runs before high-memory model inference on the Windows package runner.');
+  assert.ok(workflow.includes('Snapshot runner after packaged local Whisper inference')
+    && workflow.includes('Sanitized Whisper cache directories remaining')
+    && workflow.includes('Remove-Item -LiteralPath $cache.FullName -Recurse -Force'),
+    'The Windows package job records leftover Electron/model resources and removes only its smoke-owned cache directories.');
   assert.match(smoke,/receiver\.mjs[\s\S]*process\.argv\.find\(argument => \/\^--meeting-reminder-trigger=/,
     'The portable task smoke receiver accepts the same argv trigger flag as the Electron app.');
   assert.doesNotMatch(smoke,/\b(?:info|retried|delayedTask)\.name\b/,

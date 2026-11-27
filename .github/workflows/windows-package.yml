@@ -62,6 +62,20 @@ jobs:
           $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
           ./desktop-windows/build-portable.ps1 -ElectronDist desktop-windows/probe/node_modules/electron/dist -ExpectedArchitecture $env:REEL_ARCH -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials -Version "$version-ci" -OutputZip $zip
           Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP/demo-package"
+      - name: Snapshot runner and verify reminders before model inference
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $processes = foreach ($name in @('electron','reel','node','powershell','pwsh')) {
+            $procSet = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+            $workingSet = 0; $cpuSeconds = 0
+            foreach ($proc in $procSet) { $workingSet += $proc.WorkingSet64; if ($null -ne $proc.CPU) { $cpuSeconds += $proc.CPU } }
+            [pscustomobject]@{ name=$name; count=$procSet.Count; workingSetMB=[math]::Round($workingSet / 1MB); cpuSeconds=[math]::Round($cpuSeconds) }
+          }
+          $cpu = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue).PercentProcessorTime
+          $memory = [math]::Round($os.FreePhysicalMemory / 1KB)
+          Write-Host ("Sanitized runner resources before reminder smoke: " + (@{freePhysicalMemoryMB=$memory;cpuPercent=$cpu;processes=$processes} | ConvertTo-Json -Compress -Depth 3))
+          node desktop-windows/tests/windows-reminder-task.smoke.mjs portable
       - name: Preflight extracted local Whisper assets
         shell: pwsh
         run: |
@@ -184,9 +198,23 @@ jobs:
           path: ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
           if-no-files-found: warn
           retention-days: 7
-      - name: Verify persistent reminders with Windows Task Scheduler
+      - name: Snapshot runner after packaged local Whisper inference
+        if: always()
         shell: pwsh
-        run: node desktop-windows/tests/windows-reminder-task.smoke.mjs portable
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $processes = foreach ($name in @('electron','reel','node','powershell','pwsh')) {
+            $procSet = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+            $workingSet = 0; $cpuSeconds = 0
+            foreach ($proc in $procSet) { $workingSet += $proc.WorkingSet64; if ($null -ne $proc.CPU) { $cpuSeconds += $proc.CPU } }
+            [pscustomobject]@{ name=$name; count=$procSet.Count; workingSetMB=[math]::Round($workingSet / 1MB); cpuSeconds=[math]::Round($cpuSeconds) }
+          }
+          $cpu = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue).PercentProcessorTime
+          $memory = [math]::Round($os.FreePhysicalMemory / 1KB)
+          Write-Host ("Sanitized runner resources after local Whisper: " + (@{freePhysicalMemoryMB=$memory;cpuPercent=$cpu;processes=$processes} | ConvertTo-Json -Compress -Depth 3))
+          $caches = @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'reel-whisper-cache-*' -ErrorAction SilentlyContinue)
+          Write-Host ("Sanitized Whisper cache directories remaining: $($caches.Count)")
+          foreach ($cache in $caches) { Remove-Item -LiteralPath $cache.FullName -Recurse -Force }
       - name: Launch the extracted app and verify first-run setup
         working-directory: firebase/tests
         shell: bash
