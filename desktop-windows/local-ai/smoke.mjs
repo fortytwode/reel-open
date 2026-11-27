@@ -22,13 +22,19 @@ writeFileSync(logPath,'');
 let currentRun='startup',currentPhase='bootstrap',onPhase=()=>{};
 const safeRequestClasses=new Set(['method_options','method_other','non_https_request','hub_model_file',
   'hub_model_file_query','hub_model_other_path','hub_model_cache_path','hub_other_path','pinned_cdn_blob',
-  'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied']);
-function log(phase,progress,requestClass,loadErrorCode,loadFailureClass){
+  'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied','local_method_options',
+  'local_method_other','local_url_extras','local_asset_request']);
+const safeLoadErrorTokens=new Set(['ERR_ABORTED','ERR_BLOCKED_BY_CLIENT','ERR_CACHE_MISS','ERR_CONNECTION_CLOSED',
+  'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_FAILED','ERR_FILE_NOT_FOUND','ERR_INTERNET_DISCONNECTED',
+  'ERR_HTTP_RESPONSE_CODE_FAILURE','ERR_INVALID_URL','ERR_NAME_NOT_RESOLVED','ERR_NETWORK_CHANGED',
+  'ERR_TIMED_OUT','ERR_TOO_MANY_REDIRECTS','ERR_UNSAFE_REDIRECT']);
+function log(phase,progress,requestClass,loadErrorCode,loadFailureClass,loadErrorToken){
   const item={time:new Date().toISOString(),run:currentRun,phase};
   if(Number.isFinite(progress))item.progress=Math.round(Math.max(0,Math.min(1,progress))*100)/100;
   if(safeRequestClasses.has(requestClass))item.requestClass=requestClass;
   if(Number.isInteger(loadErrorCode)&&loadErrorCode>=-10_000&&loadErrorCode<=0)item.loadErrorCode=loadErrorCode;
   if(['Error','TypeError','AbortError'].includes(loadFailureClass))item.loadFailureClass=loadFailureClass;
+  if(safeLoadErrorTokens.has(loadErrorToken))item.loadErrorToken=loadErrorToken;
   const line=JSON.stringify(item);
   appendFileSync(logPath,line+'\n');
   process.stdout.write(line+'\n');
@@ -52,6 +58,7 @@ const phaseLimits={
   window_create_requested:30_000,window_reused:30_000,renderer_load_started:30_000,renderer_dom_ready:30_000,
   renderer_load_complete:30_000,renderer_document_loaded:30_000,renderer_script_started:15_000,
   renderer_load_failed:5_000,renderer_load_rejected:5_000,
+  local_request_blocked:5_000,
   renderer_script_ready:15_000,worker_creation_started:15_000,worker_created:15_000,worker_script_ready:15_000,
   renderer_ready:15_000,renderer_startup_timeout:5_000,renderer_probe_sent:5_000,renderer_probe_received:5_000,
   renderer_probe_timeout:5_000,renderer_task_received:10_000,task_sent:15_000,worker_message_sent:15_000,
@@ -66,10 +73,10 @@ function reportProgress(event){
   if(Number.isFinite(event.progress)){
     const bucket=Math.floor(Math.max(0,Math.min(1,event.progress))*20);
     if(!loggedPhases.has(key)||bucket>(lastProgressBucket.get(key)??-1)){
-      log(event.phase,event.progress,event.requestClass,event.loadErrorCode,event.loadFailureClass);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
+      log(event.phase,event.progress,event.requestClass,event.loadErrorCode,event.loadFailureClass,event.loadErrorToken);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
     }
   }else if(!loggedPhases.has(key)){
-    log(event.phase,undefined,event.requestClass,event.loadErrorCode,event.loadFailureClass);loggedPhases.add(key);
+    log(event.phase,undefined,event.requestClass,event.loadErrorCode,event.loadFailureClass,event.loadErrorToken);loggedPhases.add(key);
   }
   if(!phaseLimits[event.phase])return;
   if(event.phase===currentPhase)return;

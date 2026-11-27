@@ -12,7 +12,7 @@ class FakeWebContents extends EventEmitter {
   getURL(){return this.url;}
   setWindowOpenHandler(){}
   send(channel,value){this.messages.push({channel,value});}
-  loadURL(url){this.url=url;setImmediate(()=>FakeWindow.onLoad?.(this));return Promise.resolve();}
+  loadURL(url){this.url=url;if(FakeWindow.loadError){const error=FakeWindow.loadError;FakeWindow.loadError=null;return Promise.reject(error);}setImmediate(()=>FakeWindow.onLoad?.(this));return Promise.resolve();}
 }
 class FakeWindow extends EventEmitter {
   constructor(){super();this.webContents=new FakeWebContents();this.destroyed=false;FakeWindow.last=this;}
@@ -54,6 +54,7 @@ test('local inference network access is restricted to the pinned model and GET r
   assert.equal(localAIRequestClass('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/private.wav','GET',origin),'hub_model_other_path');
   assert.equal(localAIRequestClass('https://example.com/collect','OPTIONS',origin),'method_options');
   assert.equal(localAIRequestClass('https://example.com/collect','GET',origin),'other_remote_host');
+  assert.equal(localAIRequestClass(`${origin}/?private=1`,'GET',origin),'local_url_extras');
 });
 
 test('known Transformers.js main-revision metadata probe is pinned and preserves Range',async()=>{
@@ -201,6 +202,15 @@ test('renderer navigation diagnostics keep only a bounded network error code',as
   const requestID=view.webContents.messages[0].value.requestID;
   f.complete({requestID,ok:true,result:{text:'ok',chunks:[]}});
   await operation;f.bridge.dispose();
+});
+
+test('renderer load rejection logs only an allowlisted Chromium error token',async()=>{
+  const diagnostics=[];const f=setup({onDiagnostic:value=>diagnostics.push(value)});
+  FakeWindow.loadError=Error("ERR_ABORTED (-3) loading 'http://127.0.0.1:4321/private-meeting-data'");
+  await assert.rejects(f.bridge.probeRenderer(),/could not start/u);
+  assert.ok(diagnostics.some(value=>value.phase==='renderer_load_rejected'&&value.loadErrorToken==='ERR_ABORTED'));
+  assert.doesNotMatch(JSON.stringify(diagnostics),/private-meeting-data|127\.0\.0\.1/u);
+  f.bridge.dispose();
 });
 
 test('renderer startup waits for worker module and task channel probe without starting inference',async()=>{

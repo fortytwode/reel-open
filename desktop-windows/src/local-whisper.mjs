@@ -13,7 +13,22 @@ const MODEL_CDN_QUERY_KEYS=['Expires','Hash-Algorithm','Key-Pair-Id','Policy','S
   'response-content-disposition','user_id','xip'].sort();
 const SAFE_REMOTE_REQUEST_CLASSES=new Set(['method_options','method_other','non_https_request','hub_model_file',
   'hub_model_file_query','hub_model_other_path','hub_model_cache_path','hub_other_path','pinned_cdn_blob',
-  'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied']);
+  'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied','local_method_options',
+  'local_method_other','local_url_extras','local_asset_request']);
+const SAFE_LOAD_ERROR_TOKENS=new Set(['ERR_ABORTED','ERR_BLOCKED_BY_CLIENT','ERR_CACHE_MISS','ERR_CONNECTION_CLOSED',
+  'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_FAILED','ERR_FILE_NOT_FOUND','ERR_INTERNET_DISCONNECTED',
+  'ERR_HTTP_RESPONSE_CODE_FAILURE','ERR_INVALID_URL','ERR_NAME_NOT_RESOLVED','ERR_NETWORK_CHANGED',
+  'ERR_TIMED_OUT','ERR_TOO_MANY_REDIRECTS','ERR_UNSAFE_REDIRECT']);
+
+function safeLoadFailure(cause){
+  const code=Number.isInteger(cause?.errorCode)&&cause.errorCode>=-10_000&&cause.errorCode<=0?cause.errorCode:undefined;
+  const tokenCandidate=typeof cause?.code==='string'?cause.code:
+    typeof cause?.message==='string'?cause.message.match(/\bERR_[A-Z0-9_]+\b/u)?.[0]:undefined;
+  const tokenMatch=typeof tokenCandidate==='string'?tokenCandidate.match(/\bERR_[A-Z0-9_]+\b/u)?.[0]:undefined;
+  const token=SAFE_LOAD_ERROR_TOKENS.has(tokenMatch)?tokenMatch:undefined;
+  return {...(code!==undefined?{loadErrorCode:code}:{}),...(token?{loadErrorToken:token}:{}),
+    ...(['Error','TypeError','AbortError'].includes(cause?.name)?{loadFailureClass:cause.name}:{})};
+}
 const SAFE_PROGRESS_PHASES=new Set(['worker_message_sent','worker_started','model_loading','model_downloading',
   'model_ready','inference','inference_complete','worker_failed','worker_dispatch_failed','renderer_task_received',
   'worker_creation_started','worker_created','worker_creation_failed','worker_error']);
@@ -64,10 +79,14 @@ export function localAIRequestAllowed(requestURL,method,localOrigin,allowedHubRe
 
 /** Fixed categories for smoke diagnostics; never logs a URL, filename, query value or request header. */
 export function localAIRequestClass(requestURL,method,localOrigin){
-  if(method!=='GET')return method==='OPTIONS'?'method_options':'method_other';
   try{
     const url=new URL(requestURL),origin=new URL(localOrigin);
-    if(url.origin===origin.origin)return 'other_remote_host';
+    const local=url.origin===origin.origin;
+    if(method!=='GET')return local?(method==='OPTIONS'?'local_method_options':'local_method_other'):
+      (method==='OPTIONS'?'method_options':'method_other');
+    if(local){
+      return url.search||url.hash||url.username||url.password?'local_url_extras':'local_asset_request';
+    }
     if(url.protocol!=='https:'||url.port!=='')return 'non_https_request';
     if(url.hostname==='huggingface.co'){
       if(url.pathname.startsWith(MODEL_PATH)){
@@ -92,11 +111,12 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   let window=null,loading=null,active=null,disposed=false,rendererStartup=null;
   const pendingProbes=new Map();
   const pageURL=origin+'/';
-  const diagnostic=(phase,progress,requestClass,loadErrorCode,loadFailureClass)=>{
+  const diagnostic=(phase,progress,requestClass,loadErrorCode,loadFailureClass,loadErrorToken)=>{
     try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{}),
       ...(SAFE_REMOTE_REQUEST_CLASSES.has(requestClass)?{requestClass}:{}),
       ...(Number.isInteger(loadErrorCode)&&loadErrorCode>=-10_000&&loadErrorCode<=0?{loadErrorCode}:{}),
-      ...(['Error','TypeError','AbortError'].includes(loadFailureClass)?{loadFailureClass}:{})});}catch{}
+      ...(['Error','TypeError','AbortError'].includes(loadFailureClass)?{loadFailureClass}:{}),
+      ...(SAFE_LOAD_ERROR_TOKENS.has(loadErrorToken)?{loadErrorToken}:{})});}catch{}
   };
   function currentWindow(event){return window&&!window.isDestroyed()&&event.sender===window.webContents&&event.senderFrame===window.webContents.mainFrame&&event.senderFrame?.url===pageURL;}
   function rejectRendererStartup(contents,phase,message){
@@ -156,8 +176,8 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
         else rejectRendererStartup(contents,'preload_bridge_missing','Local transcription preload did not expose its restricted bridge.');
       }).catch(()=>rejectRendererStartup(contents,'preload_bridge_probe_failed','Local transcription preload bridge could not be checked.'));
     });
-    contents.on('did-fail-load',(_event,errorCode,_description,failedURL,isMainFrame)=>{
-      if(isMainFrame===true&&failedURL===pageURL)diagnostic('renderer_load_failed',undefined,undefined,errorCode);
+    contents.on('did-fail-load',(_event,errorCode,_description,_failedURL,isMainFrame)=>{
+      if(isMainFrame===true)diagnostic('renderer_load_failed',undefined,undefined,errorCode);
     });
     contents.on('preload-error',()=>diagnostic('preload_error'));
     contents.on('console-message',details=>{if(details?.level==='error')diagnostic('renderer_console_error');});
@@ -184,16 +204,18 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       callback({cancel:false});
     });
     session.webRequest.onBeforeRequest({urls:['<all_urls>']},(details,callback)=>{
-      let allowed=false,remote=false,consentAllowed=true;
+      let allowed=false,remote=false,consentAllowed=true,requestClass='invalid_request_url';
       try{
         remote=new URL(details.url).origin!==parsedOrigin.origin;
         allowed=localAIRequestAllowed(details.url,details.method,origin,allowedHubRedirects);
+        if(!allowed)requestClass=localAIRequestClass(details.url,details.method,origin);
         if(allowed&&remote){
           consentAllowed=allowRemoteModelRequest()===true;
           allowed=consentAllowed;
         }
         if(remote)diagnostic(allowed?'model_network_allowed':'model_network_blocked',undefined,
-          allowed?undefined:(consentAllowed?localAIRequestClass(details.url,details.method,origin):'remote_consent_denied'));
+          allowed?undefined:(consentAllowed?requestClass:'remote_consent_denied'));
+        else if(!allowed)diagnostic('local_request_blocked',undefined,requestClass);
       }catch{}
       callback({cancel:!allowed});
     });
@@ -218,7 +240,8 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       return window;
     }).catch(cause=>{
       if(rendererStartup?.contents===contents){clearTimeout(rendererStartup.timer);rendererStartup=null;}
-      diagnostic('renderer_load_rejected',undefined,undefined,undefined,cause?.name);
+      const safeFailure=safeLoadFailure(cause);
+      diagnostic('renderer_load_rejected',undefined,undefined,safeFailure.loadErrorCode,safeFailure.loadFailureClass,safeFailure.loadErrorToken);
       if(window===createdWindow){createdWindow.destroy();window=null;}
       throw Error(`Local transcription window could not start: ${cause.message}`);
     }).finally(()=>{loading=null;});
