@@ -16,6 +16,39 @@ function atomicWrite(filePath, bytes) {
   } finally { rmSync(temp, { force: true }); }
 }
 
+function encodeLaunchValue(value) { return Buffer.from(value, 'utf8').toString('base64'); }
+
+/** Versioned key/value format for the Windows PowerShell 5.1 task helper. */
+export function serializeReminderLaunchConfig(launch) {
+  if (!launch || typeof launch !== 'object' || !['portable', 'msix'].includes(launch.mode)) {
+    throw TypeError('Invalid reminder launch configuration');
+  }
+  const allowed = launch.mode === 'portable'
+    ? new Set(['mode', 'executable', 'arguments', 'diagnosticsFile', 'waitForChildExit'])
+    : new Set(['mode', 'diagnosticsFile']);
+  if (Object.keys(launch).some(key => !allowed.has(key))) throw TypeError('Invalid reminder launch configuration');
+  const lines = ['version=2', `mode=${launch.mode}`];
+  if (launch.mode === 'portable') {
+    if (typeof launch.executable !== 'string' || !path.isAbsolute(launch.executable) || launch.executable.length > 2048
+      || !Array.isArray(launch.arguments) || launch.arguments.length > 16
+      || launch.arguments.some(value => typeof value !== 'string' || value.length > 2048)
+      || (launch.waitForChildExit !== undefined && typeof launch.waitForChildExit !== 'boolean')) {
+      throw TypeError('Invalid reminder launch configuration');
+    }
+    lines.push(`executableB64=${encodeLaunchValue(launch.executable)}`);
+    lines.push(`argumentCount=${launch.arguments.length}`);
+    launch.arguments.forEach((value, index) => lines.push(`argument.${index}=${encodeLaunchValue(value)}`));
+    if (launch.waitForChildExit !== undefined) lines.push(`waitForChildExit=${launch.waitForChildExit}`);
+  }
+  if (launch.diagnosticsFile !== undefined) {
+    if (typeof launch.diagnosticsFile !== 'string' || !path.isAbsolute(launch.diagnosticsFile) || launch.diagnosticsFile.length > 2048) {
+      throw TypeError('Invalid reminder launch configuration');
+    }
+    lines.push(`diagnosticsFileB64=${encodeLaunchValue(launch.diagnosticsFile)}`);
+  }
+  return Buffer.from(`${lines.join('\n')}\n`, 'utf8');
+}
+
 /** Task Scheduler adapter. Only opaque reminder tokens and UTC times enter task definitions. */
 export function createWindowsReminderTaskManager({ stateRoot, scope, windowsStore = false, executable, launchArguments = [],
   exec = execFileSync } = {}) {
@@ -25,13 +58,15 @@ export function createWindowsReminderTaskManager({ stateRoot, scope, windowsStor
     || typeof exec !== 'function') throw TypeError('Invalid Windows reminder task dependencies');
   mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
   const scriptPath = path.join(stateRoot, 'meeting-reminder-task.ps1');
-  const launchPath = path.join(stateRoot, 'reminder-launch.json');
+  const launchPath = path.join(stateRoot, 'reminder-launch.v2.conf');
   const triggerDir = path.join(stateRoot, 'reminder-triggers');
   const script = readFileSync(sourceScript);
-  if (!existsSync(scriptPath) || !readFileSync(scriptPath).equals(script)) atomicWrite(scriptPath, script);
   const launch = windowsStore ? { mode: 'msix' } : { mode: 'portable', executable, arguments: launchArguments };
-  const launchText = Buffer.from(JSON.stringify(launch));
+  const launchText = serializeReminderLaunchConfig(launch);
   if (!existsSync(launchPath) || !readFileSync(launchPath).equals(launchText)) atomicWrite(launchPath, launchText);
+  // On an upgrade, keep the old JSON file for the old helper until the new config is durable.
+  // Replacing the helper last makes existing tasks observe either the old helper+JSON pair or the new helper+v2 pair.
+  if (!existsSync(scriptPath) || !readFileSync(scriptPath).equals(script)) atomicWrite(scriptPath, script);
 
   function sync(records) {
     if (!Array.isArray(records) || records.length > 32 || records.some(record => !TOKEN.test(record?.token)

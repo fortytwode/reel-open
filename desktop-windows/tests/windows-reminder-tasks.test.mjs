@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createEncryptedReminderStore, createWindowsReminderTaskManager } from '../src/windows-reminder-tasks.mjs';
+import { createEncryptedReminderStore, createWindowsReminderTaskManager, serializeReminderLaunchConfig } from '../src/windows-reminder-tasks.mjs';
 
 const scope='a'.repeat(64), token='b'.repeat(32), start='2026-11-26T10:00:00.250Z', end='2026-11-26T10:30:00.000Z';
 function temp() { return mkdtempSync(path.join(os.tmpdir(),'reel-reminder-test-')); }
@@ -13,16 +13,32 @@ test('task registration input contains only opaque tokens and UTC event bounds',
   const root=temp(), calls=[];let plan;
   try {
     const executable=path.join(root,'Program Files','Reel.exe');
+    const legacyConfigPath=path.join(root,'reminder-launch.json');
+    const legacyConfig=JSON.stringify({mode:'portable',executable,arguments:[]});
+    writeFileSync(legacyConfigPath,legacyConfig);
     const manager=createWindowsReminderTaskManager({stateRoot:root,scope,executable,
       exec:(...args)=>{calls.push(args);const planPath=args[1][args[1].indexOf('-PlanPath')+1];plan=JSON.parse(readFileSync(planPath,'utf8'));}});
     manager.sync([{token,start,end}]);
     assert.equal(calls.length,1);
     const command=calls[0];
     assert.equal(command[0],'powershell.exe');
-    const launchConfig=JSON.parse(readFileSync(manager.launchPath,'utf8'));
-    assert.equal(launchConfig.executable,executable);
-    assert.deepEqual(Object.keys(launchConfig).sort(),['arguments','executable','mode'],
-      'Generated production launch config omits the diagnostic path and child-wait smoke options.');
+    const launchLines=readFileSync(manager.launchPath,'utf8').trim().split('\n');
+    const launchFields=new Map(launchLines.map(line=>{const at=line.indexOf('=');return[line.slice(0,at),line.slice(at+1)];}));
+    assert.equal(path.basename(manager.launchPath),'reminder-launch.v2.conf');
+    assert.equal(launchFields.get('version'),'2');
+    assert.equal(launchFields.get('mode'),'portable');
+    assert.equal(Buffer.from(launchFields.get('executableB64'),'base64').toString('utf8'),executable);
+    assert.equal(launchFields.get('argumentCount'),'0');
+    assert.equal(launchFields.has('diagnosticsFileB64'),false,'Generated production config omits the diagnostic path.');
+    assert.equal(launchFields.has('waitForChildExit'),false,'Generated production config omits the smoke child wait flag.');
+    assert.equal(readFileSync(legacyConfigPath,'utf8'),legacyConfig,'Upgrade preparation leaves the old helper’s JSON config untouched.');
+    assert.equal(existsSync(manager.scriptPath),true);
+    assert.throws(()=>serializeReminderLaunchConfig({mode:'portable',executable,arguments:Array(17).fill('x')}),TypeError,
+      'The serializer enforces the same bounded argument count as the task helper.');
+    const multilineArgument='--caption=one=two\nsecond line';
+    const safeConfig=serializeReminderLaunchConfig({mode:'portable',executable,arguments:[multilineArgument]});
+    assert.equal(safeConfig.toString('utf8').split('\n').length,6,'Newlines and equals in values cannot inject config fields.');
+    assert.equal(Buffer.from(safeConfig.toString('utf8').match(/argument\.0=([^\n]+)/)[1],'base64').toString('utf8'),multilineArgument);
     assert.deepEqual(plan,[{token,start,end}]);
     assert.throws(()=>manager.sync([{token,start}]),TypeError,'Every scheduled meeting must provide an end bound.');
     assert.equal(JSON.stringify(plan).includes('private calendar title'),false);
@@ -53,9 +69,14 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const workflow=readFileSync(path.join(root,'..','.github','workflows','windows-package.yml'),'utf8');
   const msixUpdate=readFileSync(path.join(root,'test-msix-update.ps1'),'utf8');
   const smoke=readFileSync(path.join(root,'tests','windows-reminder-task.smoke.mjs'),'utf8');
+  const taskManager=readFileSync(path.join(root,'src','windows-reminder-tasks.mjs'),'utf8');
   const allowlist=build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/)?.[1] ?? '';
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.ps1/);
+  assert.ok(taskManager.indexOf('atomicWrite(launchPath, launchText)') < taskManager.indexOf('atomicWrite(scriptPath, script)'),
+    'Upgrade writes the new launch config before atomically replacing the helper used by already-registered tasks.');
+  assert.match(taskManager,/reminder-launch\.v2\.conf[\s\S]*On an upgrade, keep the old JSON file[\s\S]*atomicWrite\(scriptPath, script\)/,
+    'Upgrade leaves the legacy JSON config available to an old helper if the process stops before helper replacement.');
   const taskHelper=readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8').replace(/\r\n/g,'\n');
   assert.ok(taskHelper.includes(String.raw`$planJson.Trim() -match '^\[\s*\]$'`)
     && taskHelper.includes('$plan = @()') && taskHelper.includes('$null -eq $parsedPlan'),
@@ -88,33 +109,26 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Smoke diagnostics bracket account identity and scope hashing so a slow call can be isolated.');
   const deliveryFunction=taskHelper.match(/function Deliver-ReminderTrigger[\s\S]*?(?=\n}\n\ntry)/)?.[0] ?? '';
   const launchParserFunction=taskHelper.match(/function Read-ReminderLaunchConfiguration[\s\S]*?(?=\n}\n\nfunction ConvertTo-UtcDateTimeOffset)/)?.[0] ?? '';
-  assert.match(deliveryFunction,/\[IO\.Path\]::Combine\(\$PSScriptRoot, 'reminder-launch\.json'\)[\s\S]*\[IO\.File\]::Exists\(\$launchPath\)[\s\S]*\[IO\.File\]::ReadAllText\(\$launchPath\)[\s\S]*launch-config-parse-after/,
-    'The trigger path uses .NET path/file APIs and separately marks config existence, read and JSON parse.');
-  assert.match(deliveryFunction,/\$launch = Read-ReminderLaunchConfiguration \$launchJson \$DiagnosticPath[\s\S]*\$launchMode = \$launch\['mode'\][\s\S]*if \(\$launchMode -eq 'msix'\)[\s\S]*elseif \(\$launchMode -eq 'portable'/,
+  const launchValueParser=taskHelper.match(/function ConvertFrom-LaunchConfigValue[\s\S]*?(?=\n}\n\nfunction Read-ReminderLaunchConfiguration)/)?.[0] ?? '';
+  assert.match(deliveryFunction,/\[IO\.Path\]::Combine\(\$PSScriptRoot, 'reminder-launch\.v2\.conf'\)[\s\S]*\[IO\.File\]::Exists\(\$launchPath\)[\s\S]*Read-ReminderLaunchConfiguration \$launchPath \$DiagnosticPath[\s\S]*launch-config-parse-after/,
+    'The trigger path reads and validates the versioned config through .NET APIs.');
+  assert.match(deliveryFunction,/\$launch = Read-ReminderLaunchConfiguration \$launchPath \$DiagnosticPath[\s\S]*\$launchMode = \$launch\['mode'\][\s\S]*if \(\$launchMode -eq 'msix'\)[\s\S]*elseif \(\$launchMode -eq 'portable'/,
     'Delivery binds the validated mode in the caller scope before dispatching to the portable or MSIX launch path.');
-  assert.match(launchParserFunction,/Reflection\.Assembly\]::Load\('System\.Web\.Extensions'\)[\s\S]*GetType\('System\.Web\.Script\.Serialization\.JavaScriptSerializer', \$true\)[\s\S]*Activator\]::CreateInstance\(\$serializerType\)[\s\S]*MaxJsonLength = 65536[\s\S]*RecursionLimit = 8[\s\S]*DeserializeObject\(\$json\)/,
-    'Cold-path JSON parsing uses direct .NET assembly/type loading and bounded parsing without Add-Type.');
-  assert.match(launchParserFunction,/\$launch -isnot \[System\.Collections\.Generic\.Dictionary\[string,object\]\][\s\S]*ContainsKey\('mode'\)[\s\S]*\$allowedKeys[\s\S]*-notin \$allowedKeys[\s\S]*diagnosticsFile/,
-    'The launch parser requires an object and rejects fields outside the portable/MSIX schema.');
-  assert.doesNotMatch(launchParserFunction,/\.Contains\(/,
-    'The generic dictionary is queried with its public ContainsKey API rather than the IDictionary overload.');
-  assert.match(launchParserFunction,/return ,\$launch/,
-    'The validated generic dictionary is returned as one object instead of being enumerated into entries.');
+  assert.match(launchParserFunction,/\[IO\.File\]::ReadAllBytes\(\$configPath\)[\s\S]*bytes\.Length -gt 65536[\s\S]*UTF8Encoding\]::new\(\$false, \$true\)[\s\S]*Dictionary\[string,string\][\s\S]*ContainsKey\(\$key\)[\s\S]*\$allowedKeys[\s\S]*-notin \$allowedKeys/,
+    'The launch parser uses bounded strict UTF-8 and rejects duplicate or unknown fields without loading optional assemblies.');
+  assert.match(launchValueParser,/FromBase64String\(\$value\)[\s\S]*ToBase64String\(\$bytes\) -cne \$value/);
+  assert.match(launchParserFunction,/\$argumentCount -gt 16[\s\S]*\$argumentKey = 'argument\.' \+ \$index/,
+    'The launch parser validates canonical base64 values and bounds portable arguments.');
   assert.doesNotMatch(launchParserFunction,/ConvertFrom-Json/,
     'Scheduled delivery does not invoke the slow PowerShell JSON cmdlet on the ARM cold path.');
-  assert.match(launchParserFunction,/launch-parser-assembly-load-before[\s\S]*Reflection\.Assembly\]::Load[\s\S]*launch-parser-assembly-load-after[\s\S]*launch-parser-create-before[\s\S]*launch-parser-create-after[\s\S]*launch-json-deserialize-before[\s\S]*launch-json-deserialize-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,
-    'The scheduled smoke can distinguish parser assembly load, serializer construction, JSON parse and schema validation.');
-  assert.ok(launchParserFunction.includes("'launch-json-deserialize-error:'")
-    && launchParserFunction.includes('$exception.GetType().FullName')
-    && launchParserFunction.includes('$exception.HResult')
-    && launchParserFunction.includes('ScriptLineNumber'),
-    'Parser errors retain only safe exception type, HRESULT and source line for diagnostics.');
+  assert.match(launchParserFunction,/launch-config-read-before[\s\S]*launch-config-read-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,
+    'The scheduled smoke distinguishes config reading from schema validation.');
   assert.doesNotMatch(deliveryFunction,/\b(?:Join-Path|Test-Path|Get-Content|New-Item|Remove-Item)\b/,
     'Scheduled delivery does not invoke filesystem provider cmdlets on its cold PowerShell path.');
-  assert.match(taskHelper,/\$launch\.ContainsKey\('diagnosticsFile'\)/,
-    'Production launch configuration safely omits the smoke-only diagnostic field under StrictMode.');
-  assert.match(taskHelper,/\$launch\.ContainsKey\('waitForChildExit'\)/,
-    'Production portable launch configuration safely omits the smoke-only child wait flag under StrictMode.');
+  assert.match(launchParserFunction,/\$launch\.Add\('diagnosticsFile', \$diagnosticsFile\)[\s\S]*\$launch\.Add\('waitForChildExit', \$waitForChildExit\)/,
+    'The parser normalizes omitted production-only optional fields to safe defaults before delivery reads them.');
+  assert.match(deliveryFunction,/\$diagnosticsFile = \[string\]\$launch\['diagnosticsFile'\][\s\S]*\$waitForChildExit = \$launch\['waitForChildExit'\] -eq \$true/,
+    'StrictMode delivery reads only normalized optional properties rather than assuming source fields exist.');
   assert.match(smoke,/Object\.hasOwn\(productionLaunchConfig,'diagnosticsFile'\),false[\s\S]*Object\.hasOwn\(productionLaunchConfig,'waitForChildExit'\),false[\s\S]*productionLaunchConfig[\s\S]*The production launch configuration delivers the reminder trigger[\s\S]*productionStatus\.lastTaskResult,0/,
     'Windows CI runs and verifies an actual reminder task with production launch JSON and absent optional diagnostic properties.');
   assert.match(smoke,/security\.command\)\.toLowerCase\(\),\/\^powershell/,
@@ -136,12 +150,13 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The installed MSIX update test exercises actual scheduled-task delivery through its MSIX launch path.');
   assert.match(workflow,/\[System\.Management\.Automation\.Language\.Parser\]::ParseFile\([\s\S]*\$parseErrors\.Count/,
     'The early PowerShell preflight uses the PowerShell AST parser and fails on syntax errors.');
-  assert.match(workflow,/Reflection\.Assembly\]::Load\('System\.Web\.Extensions'\)[\s\S]*GetType\('System\.Web\.Script\.Serialization\.JavaScriptSerializer'[\s\S]*Activator\]::CreateInstance[\s\S]*DeserializeObject[\s\S]*\$portable[\s\S]*\$msix/,
-    'The early Windows PowerShell 5.1 preflight verifies the parser assembly and both production launch JSON shapes.');
-  assert.match(workflow,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*-ValidateLaunchConfig -LaunchConfigPath[\s\S]*Windows PowerShell 5\.1 rejected reminder config/,
-    'Windows PowerShell 5.1 invokes the full helper validator for production and diagnostic portable/MSIX JSON.');
-  assert.match(workflow,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*-ValidateLaunchConfig -LaunchConfigPath[\s\S]*Windows PowerShell 5\.1 rejected reminder config/,
-    'Windows PowerShell 5.1 invokes the helper’s full schema validator for all four production/diagnostic launch shapes.');
+  const preflight=workflow.slice(workflow.indexOf('- name: Parse reminder helper'),workflow.indexOf('- name: Install pinned local Whisper browser runtime'));
+  assert.doesNotMatch(preflight,/System\.Web\.Extensions|JavaScriptSerializer|ConvertFrom-Json/,
+    'The early helper preflight does not depend on PowerShell JSON assemblies or cmdlets.');
+  assert.match(preflight,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*-ValidateLaunchConfig -LaunchConfigPath[\s\S]*Windows PowerShell 5\.1 rejected reminder config/,
+    'Windows PowerShell 5.1 invokes the full helper validator for production and diagnostic portable/MSIX configs.');
+  assert.match(preflight,/duplicate-key[\s\S]*unknown-key[\s\S]*invalid-base64[\s\S]*accepted invalid reminder config/,
+    'Windows CI verifies malformed, duplicate and unknown config fields fail closed.');
   assert.ok(workflow.includes('Snapshot runner after packaged local Whisper inference')
     && workflow.includes('Sanitized Whisper cache directories remaining')
     && workflow.includes('Remove-Item -LiteralPath $cache.FullName -Recurse -Force'),

@@ -50,54 +50,88 @@ function Write-TaskDiagnostic([string]$filePath, [string]$phase) {
     } catch { }
 }
 
-function Read-ReminderLaunchConfiguration([string]$json, [string]$diagnosticsPath) {
-    if ($json.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
-    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-assembly-load-before'
-    $parserAssembly = [Reflection.Assembly]::Load('System.Web.Extensions')
-    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-assembly-load-after'
-    $serializerType = $parserAssembly.GetType('System.Web.Script.Serialization.JavaScriptSerializer', $true)
-    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-create-before'
-    $serializer = [Activator]::CreateInstance($serializerType)
-    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-create-after'
-    $serializer.MaxJsonLength = 65536
-    $serializer.RecursionLimit = 8
-    Write-TaskDiagnostic $diagnosticsPath 'launch-json-deserialize-before'
-    try { $launch = $serializer.DeserializeObject($json) }
-    catch {
-        $exception = $_.Exception
-        $hresult = '0x' + ([int]$exception.HResult).ToString('X8')
-        Write-TaskDiagnostic $diagnosticsPath ('launch-json-deserialize-error:' + $exception.GetType().FullName + ':' + $hresult + ':line=' + [int]$_.InvocationInfo.ScriptLineNumber)
-        throw 'Invalid reminder launch configuration.'
+function ConvertFrom-LaunchConfigValue([string]$value) {
+    try {
+        $bytes = [Convert]::FromBase64String($value)
+        if ([Convert]::ToBase64String($bytes) -cne $value) { throw 'Invalid encoding.' }
+        return ([Text.UTF8Encoding]::new($false, $true)).GetString($bytes)
+    } catch { throw 'Invalid reminder launch configuration.' }
+}
+
+function Read-ReminderLaunchConfiguration([string]$configPath, [string]$diagnosticsPath) {
+    Write-TaskDiagnostic $diagnosticsPath 'launch-config-read-before'
+    $bytes = [IO.File]::ReadAllBytes($configPath)
+    if ($bytes.Length -eq 0 -or $bytes.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
+    $text = ([Text.UTF8Encoding]::new($false, $true)).GetString($bytes)
+    $lines = $text.Split([char[]]@([char]10))
+    $fields = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $lines.Length; $index++) {
+        $line = $lines[$index].TrimEnd([char]13)
+        if ($index -eq ($lines.Length - 1) -and $line.Length -eq 0) { continue }
+        $separator = $line.IndexOf('=')
+        if ($line.Length -eq 0 -or $separator -le 0) { throw 'Invalid reminder launch configuration.' }
+        $key = $line.Substring(0, $separator)
+        if ($fields.ContainsKey($key)) { throw 'Invalid reminder launch configuration.' }
+        $fields.Add($key, $line.Substring($separator + 1))
     }
-    Write-TaskDiagnostic $diagnosticsPath 'launch-json-deserialize-after'
+    Write-TaskDiagnostic $diagnosticsPath ('launch-config-read-after:' + $bytes.Length)
     Write-TaskDiagnostic $diagnosticsPath 'launch-config-schema-check-before'
-    if ($launch -isnot [System.Collections.Generic.Dictionary[string,object]] -or -not $launch.ContainsKey('mode')) {
+    if (-not $fields.ContainsKey('version') -or $fields['version'] -cne '2' -or -not $fields.ContainsKey('mode')) {
         throw 'Invalid reminder launch configuration.'
     }
-    $launchMode = $launch['mode']
-    if ($launchMode -isnot [string]) { throw 'Invalid reminder launch configuration.' }
+    $launchMode = $fields['mode']
+    $allowedKeys = @('version', 'mode')
+    $executable = ''
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    $diagnosticsFile = ''
+    $waitForChildExit = $false
     if ($launchMode -eq 'portable') {
-        $allowedKeys = @('mode', 'executable', 'arguments', 'diagnosticsFile', 'waitForChildExit')
-        if (-not $launch.ContainsKey('executable') -or -not $launch.ContainsKey('arguments') -or $launch['executable'] -isnot [string] -or $launch['arguments'] -isnot [System.Array]) {
+        $allowedKeys += @('executableB64', 'argumentCount', 'waitForChildExit')
+        if (-not $fields.ContainsKey('executableB64') -or -not $fields.ContainsKey('argumentCount')) {
             throw 'Invalid reminder launch configuration.'
         }
-        foreach ($argument in $launch['arguments']) {
-            if ($argument -isnot [string] -or $argument.Length -gt 2048) { throw 'Invalid reminder launch configuration.' }
-        }
-        if ($launch['arguments'].Length -gt 16) { throw 'Invalid reminder launch configuration.' }
-        if ($launch.ContainsKey('waitForChildExit') -and $launch['waitForChildExit'] -isnot [bool]) {
+        $executable = ConvertFrom-LaunchConfigValue $fields['executableB64']
+        if ([string]::IsNullOrEmpty($executable) -or $executable.Length -gt 2048 -or -not [IO.Path]::IsPathRooted($executable)) {
             throw 'Invalid reminder launch configuration.'
+        }
+        $argumentCount = 0
+        if (-not [int]::TryParse($fields['argumentCount'], [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$argumentCount) -or $argumentCount -lt 0 -or $argumentCount -gt 16 -or [string]$argumentCount -cne $fields['argumentCount']) {
+            throw 'Invalid reminder launch configuration.'
+        }
+        for ($index = 0; $index -lt $argumentCount; $index++) {
+            $argumentKey = 'argument.' + $index
+            if (-not $fields.ContainsKey($argumentKey)) { throw 'Invalid reminder launch configuration.' }
+            $allowedKeys += $argumentKey
+            $argument = ConvertFrom-LaunchConfigValue $fields[$argumentKey]
+            if ($argument.Length -gt 2048) { throw 'Invalid reminder launch configuration.' }
+            $arguments.Add($argument)
+        }
+        if ($fields.ContainsKey('waitForChildExit')) {
+            $allowedKeys += 'waitForChildExit'
+            if ($fields['waitForChildExit'] -cne 'true' -and $fields['waitForChildExit'] -cne 'false') {
+                throw 'Invalid reminder launch configuration.'
+            }
+            $waitForChildExit = $fields['waitForChildExit'] -ceq 'true'
         }
     } elseif ($launchMode -eq 'msix') {
-        $allowedKeys = @('mode', 'diagnosticsFile')
     } else { throw 'Invalid reminder launch configuration.' }
-    foreach ($key in $launch.Keys) {
+    if ($fields.ContainsKey('diagnosticsFileB64')) {
+        $allowedKeys += 'diagnosticsFileB64'
+        $diagnosticsFile = ConvertFrom-LaunchConfigValue $fields['diagnosticsFileB64']
+        if ($diagnosticsFile.Length -gt 2048 -or ($diagnosticsFile.Length -gt 0 -and -not [IO.Path]::IsPathRooted($diagnosticsFile))) {
+            throw 'Invalid reminder launch configuration.'
+        }
+    }
+    foreach ($key in $fields.Keys) {
         if ($key -notin $allowedKeys) { throw 'Invalid reminder launch configuration.' }
     }
-    if ($launch.ContainsKey('diagnosticsFile') -and $launch['diagnosticsFile'] -isnot [string]) {
-        throw 'Invalid reminder launch configuration.'
-    }
     Write-TaskDiagnostic $diagnosticsPath 'launch-config-schema-check-after'
+    $launch = [System.Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+    $launch.Add('mode', $launchMode)
+    $launch.Add('executable', $executable)
+    $launch.Add('arguments', $arguments.ToArray())
+    $launch.Add('diagnosticsFile', $diagnosticsFile)
+    $launch.Add('waitForChildExit', $waitForChildExit)
     return ,$launch
 }
 
@@ -156,17 +190,15 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     $currentName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $diagnosticPath = ''
-    $launchConfigPath = Join-Path $PSScriptRoot 'reminder-launch.json'
-    if (Test-Path -LiteralPath $launchConfigPath -PathType Leaf) {
-        try {
-            $launchConfig = Get-Content -LiteralPath $launchConfigPath -Raw | ConvertFrom-Json
-            $candidateDiagnosticPath = [string]$launchConfig.diagnosticsFile
-            if (-not [string]::IsNullOrEmpty($candidateDiagnosticPath)) {
-                $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-                $candidate = [IO.Path]::GetFullPath($candidateDiagnosticPath)
-                if ($candidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $diagnosticPath = $candidate }
-            }
-        } catch { $diagnosticPath = '' }
+    $launchConfigPath = [IO.Path]::Combine($PSScriptRoot, 'reminder-launch.v2.conf')
+    if ([IO.File]::Exists($launchConfigPath)) {
+        $launchConfig = Read-ReminderLaunchConfiguration $launchConfigPath ''
+        $candidateDiagnosticPath = [string]$launchConfig['diagnosticsFile']
+        if (-not [string]::IsNullOrEmpty($candidateDiagnosticPath)) {
+            $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+            $candidate = [IO.Path]::GetFullPath($candidateDiagnosticPath)
+            if ($candidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $diagnosticPath = $candidate }
+        }
     }
     $registeredCount = 0
     $rearmedCount = 0
@@ -241,26 +273,21 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     $null = Get-TaskPrefix $scopeValue $DiagnosticPath
     Write-TaskDiagnostic $DiagnosticPath 'trigger-scope-prefix-after'
     Write-TaskDiagnostic $DiagnosticPath 'launch-path-combine-before'
-    $launchPath = [IO.Path]::Combine($PSScriptRoot, 'reminder-launch.json')
+    $launchPath = [IO.Path]::Combine($PSScriptRoot, 'reminder-launch.v2.conf')
     Write-TaskDiagnostic $DiagnosticPath 'launch-path-combine-after'
     Write-TaskDiagnostic $DiagnosticPath 'launch-path-check-before'
     $launchExists = [IO.File]::Exists($launchPath)
     Write-TaskDiagnostic $DiagnosticPath ('launch-path-check-after:' + [bool]$launchExists)
     if (-not $launchExists) { return }
-    $launchFile = [IO.FileInfo]::new($launchPath)
-    if ($launchFile.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
-    Write-TaskDiagnostic $DiagnosticPath 'launch-config-read-before'
-    $launchJson = [IO.File]::ReadAllText($launchPath)
-    Write-TaskDiagnostic $DiagnosticPath ('launch-config-read-after:' + $launchJson.Length)
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-before'
-    $launch = Read-ReminderLaunchConfiguration $launchJson $DiagnosticPath
+    $launch = Read-ReminderLaunchConfiguration $launchPath $DiagnosticPath
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-after'
     $launchMode = $launch['mode']
-    $diagnosticsFile = ''
-    if ($launch.ContainsKey('diagnosticsFile')) {
-        $diagnosticCandidate = [IO.Path]::GetFullPath([string]$launch['diagnosticsFile'])
+    $diagnosticsFile = [string]$launch['diagnosticsFile']
+    if (-not [string]::IsNullOrEmpty($diagnosticsFile)) {
+        $diagnosticCandidate = [IO.Path]::GetFullPath($diagnosticsFile)
         $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-        if ($diagnosticCandidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $diagnosticsFile = $diagnosticCandidate }
+        if ($diagnosticCandidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $diagnosticsFile = $diagnosticCandidate } else { $diagnosticsFile = '' }
     }
     Write-TaskDiagnostic $diagnosticsFile 'helper-config-loaded'
     $triggerDir = [IO.Path]::Combine($PSScriptRoot, 'reminder-triggers')
@@ -292,8 +319,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-called'
         $child = Start-Process -FilePath ([string]$launch['executable']) -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-returned'
-        $waitForChildExit = $false
-        if ($launch.ContainsKey('waitForChildExit')) { $waitForChildExit = $launch['waitForChildExit'] -eq $true }
+        $waitForChildExit = $launch['waitForChildExit'] -eq $true
         if ($waitForChildExit) {
             $child.WaitForExit()
             $child.Refresh()
@@ -312,10 +338,7 @@ try {
         if ([string]::IsNullOrEmpty($LaunchConfigPath) -or -not [IO.File]::Exists($LaunchConfigPath)) {
             throw 'Reminder launch configuration is unavailable.'
         }
-        $launchFile = [IO.FileInfo]::new($LaunchConfigPath)
-        if ($launchFile.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
-        $launchJson = [IO.File]::ReadAllText($LaunchConfigPath)
-        $null = Read-ReminderLaunchConfiguration $launchJson $DiagnosticPath
+        $null = Read-ReminderLaunchConfiguration $LaunchConfigPath $DiagnosticPath
     } elseif ($Sync) { Sync-ReminderTasks $PlanPath $Scope $Diagnostic }
     else { Deliver-ReminderTrigger $Token $Scope }
 } catch {

@@ -41,32 +41,37 @@ jobs:
             foreach ($parseError in $parseErrors) { [Console]::Error.WriteLine($parseError.Message) }
             exit 1
           }
-          $parserAssembly = [Reflection.Assembly]::Load('System.Web.Extensions')
-          $serializerType = $parserAssembly.GetType('System.Web.Script.Serialization.JavaScriptSerializer', $true)
-          $serializer = [Activator]::CreateInstance($serializerType)
-          $serializer.MaxJsonLength = 65536
-          $serializer.RecursionLimit = 8
-          $portable = $serializer.DeserializeObject('{"mode":"portable","executable":"C:\\Program Files\\Reel.exe","arguments":["--probe"]}')
-          $msix = $serializer.DeserializeObject('{"mode":"msix"}')
-          if ($portable -isnot [System.Collections.IDictionary] -or $portable['arguments'] -isnot [System.Array] -or $msix -isnot [System.Collections.IDictionary]) {
-            throw 'Windows PowerShell 5.1 JSON parser smoke returned an unexpected object shape.'
-          }
           '@
           & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command $parserCommand
           if ($LASTEXITCODE -ne 0) { throw 'The reminder helper failed Windows PowerShell 5.1 parsing.' }
           $helperPath = (Resolve-Path 'desktop-windows/src/windows-reminder-tasks.ps1').Path
           $diagnosticsPath = [IO.Path]::Combine($env:RUNNER_TEMP, 'reminder-config-preflight.log')
+          function Encode-LaunchValue([string]$value) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value)) }
+          $portableExe = Encode-LaunchValue 'C:\Program Files\Reel.exe'
+          $probeArgument = Encode-LaunchValue '--probe'
+          $diagnostics = Encode-LaunchValue $diagnosticsPath
           $configs = @(
-            @{ name='portable-production'; value=[ordered]@{ mode='portable'; executable='C:\Program Files\Reel.exe'; arguments=@() } },
-            @{ name='portable-diagnostic'; value=[ordered]@{ mode='portable'; executable='C:\Program Files\Reel.exe'; arguments=@('--probe'); diagnosticsFile=$diagnosticsPath; waitForChildExit=$true } },
-            @{ name='msix-production'; value=[ordered]@{ mode='msix' } },
-            @{ name='msix-diagnostic'; value=[ordered]@{ mode='msix'; diagnosticsFile=$diagnosticsPath } }
+            @{ name='portable-production'; text="version=2`nmode=portable`nexecutableB64=$portableExe`nargumentCount=0`n" },
+            @{ name='portable-diagnostic'; text="version=2`nmode=portable`nexecutableB64=$portableExe`nargumentCount=1`nargument.0=$probeArgument`nwaitForChildExit=true`ndiagnosticsFileB64=$diagnostics`n" },
+            @{ name='msix-production'; text="version=2`nmode=msix`n" },
+            @{ name='msix-diagnostic'; text="version=2`nmode=msix`ndiagnosticsFileB64=$diagnostics`n" }
           )
           foreach ($config in $configs) {
-            $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ($config.name + '.json'))
-            [IO.File]::WriteAllText($configPath, ($config.value | ConvertTo-Json -Compress -Depth 4))
+            $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ($config.name + '.conf'))
+            [IO.File]::WriteAllText($configPath, $config.text, [Text.UTF8Encoding]::new($false))
             & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helperPath -ValidateLaunchConfig -LaunchConfigPath $configPath -Diagnostic
             if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell 5.1 rejected reminder config $($config.name)." }
+          }
+          $invalidConfigs = @(
+            @{ name='duplicate-key'; text="version=2`nmode=msix`nmode=portable`n" },
+            @{ name='unknown-key'; text="version=2`nmode=msix`ncommand=whoami`n" },
+            @{ name='invalid-base64'; text="version=2`nmode=portable`nexecutableB64=%%%`nargumentCount=0`n" }
+          )
+          foreach ($config in $invalidConfigs) {
+            $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ('invalid-' + $config.name + '.conf'))
+            [IO.File]::WriteAllText($configPath, $config.text, [Text.UTF8Encoding]::new($false))
+            & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helperPath -ValidateLaunchConfig -LaunchConfigPath $configPath -Diagnostic
+            if ($LASTEXITCODE -eq 0) { throw "Windows PowerShell 5.1 accepted invalid reminder config $($config.name)." }
           }
       - name: Install pinned local Whisper browser runtime
         run: npm ci --ignore-scripts --prefix desktop-windows

@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createWindowsReminderTaskManager } from '../src/windows-reminder-tasks.mjs';
+import { createWindowsReminderTaskManager, serializeReminderLaunchConfig } from '../src/windows-reminder-tasks.mjs';
 
 if (process.platform !== 'win32') throw Error('Windows Task Scheduler smoke requires Windows.');
 const mode = process.argv[2];
@@ -26,6 +26,9 @@ if (activation) {
 }
 appendFileSync(diagnostics, 'receiver-exited:0\\n');
 `);
+const productionLaunchConfig = mode === 'msix'
+  ? { mode: 'msix' }
+  : { mode: 'portable', executable: process.execPath, arguments: [receiver] };
 let lastSyncSummary = null;
 const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: process.execPath,
   launchArguments: mode === 'portable' ? [receiver] : [],
@@ -41,13 +44,12 @@ const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore
     return output;
   }});
 const diagnosticsFile=path.join(stateRoot,'scheduler-milestones.log');
-const launchConfig=JSON.parse(readFileSync(manager.launchPath,'utf8'));
-const productionLaunchConfig={...launchConfig};
+const launchConfig={...productionLaunchConfig};
 assert.equal(Object.hasOwn(productionLaunchConfig,'diagnosticsFile'),false,'The manager generated production config has no smoke diagnostic path.');
 assert.equal(Object.hasOwn(productionLaunchConfig,'waitForChildExit'),false,'The manager generated production config has no smoke child wait flag.');
 launchConfig.diagnosticsFile=diagnosticsFile;
 if(mode==='portable') launchConfig.waitForChildExit=true;
-writeFileSync(manager.launchPath,JSON.stringify(launchConfig));
+writeFileSync(manager.launchPath,serializeReminderLaunchConfig(launchConfig));
 const syncCounts = () => { const {timing,...counts}=lastSyncSummary ?? {}; return counts; };
 const command = (phase,script,timeout=15_000) => {
   console.log(`Windows reminder smoke: ${phase} (Node ${process.arch}).`);
@@ -240,7 +242,7 @@ try {
   } else assert.ok(launchMilestones.includes('msix-shell-launch-returned'),'The MSIX shell activation was requested.');
   // Exercise the generated production config, which has neither smoke-only diagnostic field.
   // This catches StrictMode failures on absent optional JSON properties after trigger receipt.
-  writeFileSync(manager.launchPath,JSON.stringify(productionLaunchConfig));
+  writeFileSync(manager.launchPath,serializeReminderLaunchConfig(productionLaunchConfig));
   const productionToken='9'.repeat(32);
   const productionTaskName='ReelReminder_'+scope+'_'+sidHash+'_'+productionToken;
   const productionStart=new Date(Date.now()+5*60_000).toISOString();
