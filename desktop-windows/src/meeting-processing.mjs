@@ -136,13 +136,17 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
     check(response.ok, `Meeting service returned HTTP ${response.status}. Retry to reconcile safely.`);
     return data;
   }
-  async function run(ownerUserID, id, controller) {
+  async function run(ownerUserID, id, controller, requestedMode) {
     let processing;
     try {
       requireCurrent(ownerUserID, id, controller);
       processing = structuredClone(snapshot(ownerUserID, id));
       const meeting = processing.meeting ?? {}, title = String(processing.title ?? meeting.title ?? 'Meeting');
-      const transcriptionMode=processing.transcriptionMode??(processing.phase==='pending'&&!processing.nextFrame?modeForOwner(ownerUserID):'cloud');
+      const manualRecording = meeting.manual === true;
+      if (requestedMode !== undefined) check(manualRecording && ['local','cloud'].includes(requestedMode), 'Invalid manual transcription mode.');
+      if (requestedMode && processing.transcriptionMode && requestedMode !== processing.transcriptionMode)
+        throw Error('This recording already has a saved transcription mode. Retry with that mode.');
+      const transcriptionMode=processing.transcriptionMode??requestedMode??(processing.phase==='pending'&&!processing.nextFrame?modeForOwner(ownerUserID):'cloud');
       check(transcriptionMode==='cloud'||transcriptionMode==='local','Meeting transcription mode is invalid.');
       if(transcriptionMode==='local')check(typeof localTranscribe==='function','Local transcription is unavailable in this build.');
       const calendar = calendarContext(meeting);
@@ -193,6 +197,13 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
         processing = { ...processing, transcriptComplete: true };
         await save(ownerUserID, id, controller, processing);
       }
+      if (manualRecording) {
+        processing = { ...processing, phase: 'completed', transcriptOnly: true,
+          ...(transcriptionMode === 'local' ? { localOnly: true } : { localOnly: false }),
+          noSpeech: !processing.text?.trim(), error: null };
+        await save(ownerUserID, id, controller, processing);
+        return processing;
+      }
       if(transcriptionMode==='local'){
         const lastSegment=(processing.segments??[]).at(-1);
         const duration=Number.isSafeInteger(processing.transcribedFrames)?processing.transcribedFrames/RATE:
@@ -238,13 +249,13 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
       throw cause;
     }
   }
-  function process({ ownerUserID, id } = {}) {
+  function process({ ownerUserID, id, transcriptionMode } = {}) {
     check(ID.test(id ?? '') && typeof ownerUserID === 'string' && ownerUserID.length > 0, 'Invalid meeting processing owner or recording.');
     const key = JSON.stringify([ownerUserID, id]);
     if (jobs.has(key) && !jobs.get(key).controller.signal.aborted) return jobs.get(key).promise;
     const controller = new AbortController();
     requireCurrent(ownerUserID, id, controller);
-    const execute = () => run(ownerUserID, id, controller);
+    const execute = () => run(ownerUserID, id, controller, transcriptionMode);
     const promise = queue.catch(() => {}).then(() => store.withRecordingLock
       ? store.withRecordingLock({ ownerUserID, id }, execute) : execute()).finally(() => {
       // A cancelled job may have a replacement queued behind it. Its cleanup
@@ -260,7 +271,9 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
   async function resume() {
     const ownerUserID = auth.getProfile()?.userID;
     if (!ownerUserID || disposed) return [];
-    const pending = store.listProcessing(ownerUserID).filter(({ processing }) => processing && !['completed', 'failed'].includes(processing.phase) && !receiptOK(processing.receipt, allowedEmailDomain));
+    const pending = store.listProcessing(ownerUserID).filter(({ processing }) => processing
+      && processing.meeting?.manual !== true
+      && !['completed', 'failed'].includes(processing.phase) && !receiptOK(processing.receipt, allowedEmailDomain));
     return Promise.allSettled(pending.map(({ id }) => process({ ownerUserID, id })));
   }
   const unsubscribe = auth.onStateChange(() => {

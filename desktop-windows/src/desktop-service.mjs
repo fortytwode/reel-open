@@ -302,6 +302,22 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         const id=requireOwner(payload?.expectedOwnerUserID);
         if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');
         void processor?.process({ownerUserID:id,id:payload.id}).catch(()=>{});
+      } else if(name==='transcribeManualRecording') {
+        const id=requireOwner(payload?.expectedOwnerUserID);
+        if (!payload || typeof payload!=='object' || Array.isArray(payload)
+          || Object.keys(payload).some(key=>!['expectedOwnerUserID','id','transcriptionConfirmed','transcriptionMode'].includes(key))
+          || typeof payload.id!=='string' || !/^[0-9a-f]{32}$/.test(payload.id)
+          || payload.transcriptionConfirmed!==true || !['local','cloud'].includes(payload.transcriptionMode)
+          || typeof processor?.process!=='function')
+          throw Error('Choose a transcription mode and confirm transcription for this saved recording.');
+        const recording=store.list(id).find(item=>item.id===payload.id);
+        const processing=store.getProcessing({ownerUserID:id,id:payload.id});
+        if (!recording?.manualRecording || processing?.meeting?.manual!==true)
+          throw Error('This saved manual recording is unavailable.');
+        if (processing.transcriptionMode && processing.transcriptionMode!==payload.transcriptionMode)
+          throw Error('This recording already has a saved transcription mode. Retry with that mode.');
+        await processor.process({ownerUserID:id,id:payload.id,transcriptionMode:payload.transcriptionMode});
+        requireOwner(id);
       } else if(name==='playRecording') {
         const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof openRecording !== 'function') throw Error('Recording is unavailable.');

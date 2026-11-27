@@ -28,6 +28,7 @@ const metadata = recording => {
   const localSummary=localSummaryMetadata(recording);
   return ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
   durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload), shareIncludesTranscript: recording.share.includeTranscript === true } : {}),
+  ...(recording.processing?.meeting?.manual === true ? { manualRecording: true } : {}),
   ...(recording.share?.access ? { shareAccess: { passwordProtected: Boolean(recording.share.access.key), expiresAt: recording.share.access.expiresAt ?? null,
     updatePending: Boolean(recording.share.accessUpdate) } } : {}),
   ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true,
@@ -455,7 +456,7 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     check(/^[0-9a-f]{32}$/.test(id ?? ''), 'Invalid recording.');
     const value = owner(ownerUserID), item = value.state.recordings.find(recording => recording.id === id);
     const file = path.join(value.dir, `${id}.mp4`);
-    if (!item?.processing?.meeting || !existsSync(file)) return null;
+    if (!(item?.processing?.meeting || item?.processing?.manual === true || item?.processing?.meeting?.manual === true) || !existsSync(file)) return null;
     const dimensions = Number.isInteger(item.width) && item.width > 0 && Number.isInteger(item.height) && item.height > 0
       ? { width: item.width, height: item.height } : await videoDimensions(file);
     return { id, title: item.title, createdAt: item.createdAt, durationSeconds: item.durationSeconds,
@@ -477,7 +478,8 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     const value = owner(ownerUserID), file = path.join(value.dir, `${id}.mp4`);
     const state = await mutate(value, state => {
       const item = state.recordings.find(recording => recording.id === id);
-      check(item?.processing?.meeting && existsSync(file), 'This saved meeting recording is unavailable.');
+      check((item?.processing?.meeting || item?.processing?.manual === true || item?.processing?.meeting?.manual === true)
+        && existsSync(file), 'This saved recording is unavailable.');
       if (item.share) {
         check(item.share.ownerUserID === ownerUserID && item.share.recordingNonce === recordingNonce
           && item.share.shareID === shareID, 'This recording is already bound to its original owner.');

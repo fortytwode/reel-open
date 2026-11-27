@@ -57,12 +57,12 @@ function fixture(options = {}) {
 }
 async function running(f) { await settle(); await f.ready(); await f.init(); await f.fragment(1); return f.start; }
 
-test('manual window captures save locally without creating a transcript processing job',async()=>{
-  const f=fixture({sources:[{id:'window:123:0',name:'Chrome'}],requestArgs:signal=>({hwnd:'123',manual:true,title:'Chrome',sourceName:'Chrome',meeting:null,ownerUserID:'owner',
+test('manual window captures save a pending transcript checkpoint without starting processing',async()=>{
+  const f=fixture({sources:[{id:'window:123:0',name:'Chrome'}],requestArgs:signal=>({hwnd:'123',manual:true,title:'Chrome',sourceName:'Chrome',meeting:{manual:true},ownerUserID:'owner',
     systemAudio:true,microphone:false,signal})});
   await settle();
   const begin=f.calls.find(call=>call[0]==='begin')[1];
-  assert.equal(begin.title,'Chrome');assert.equal(begin.meeting,null);
+  assert.equal(begin.title,'Chrome');assert.deepEqual(begin.meeting,{manual:true});
   const handle=await running(f), stop=f.recorder.stop(handle);
   await f.status({type:'done',duration:4,segments:1});
   await stop;

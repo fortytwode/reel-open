@@ -63,7 +63,7 @@ test('MSIX product launch arguments select the configured Recorder and Notetaker
   assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
 });
 
-function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler, exportTrimmedCopy, manualCapture } = {}) {
+function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler, exportTrimmedCopy, manualCapture, processor } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
   const settings = new Map(), recordings = [], calls = [], writes = [], snapshots = [], listeners = new Set();
@@ -76,7 +76,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting, reminderSche
   store.rename=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');const item=recordings.find(recording=>recording.id===args.id);if(!item)throw Error('unavailable');item.title=args.title.trim();};
   store.deleteRecording=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');if(args.localOnlyConfirmed!==true)throw Error('confirm local only');const index=recordings.findIndex(recording=>recording.id===args.id);if(index<0)throw Error('unavailable');recordings.splice(index,1);};
   const service = createDesktopService({org, auth, store, fetch:async () => Response.json({events:[]}),
-    reminderScheduler, manualCapture,
+    reminderScheduler, manualCapture, processor,
     discover: discover ?? (async ({auth}) => ({ ownerUserID: auth.getProfile().userID, calendars: [{id:'cal',title:'Work'}], meetings: [
       { id:'one', title:'QA', start:'2026-11-06T15:00:00Z',end:'2026-11-06T16:00:00Z',platform:'google_meet',joinURL:'https://meet.google.com/aaa-bbbb-ccc',attendeeEmails:['private@example.com'] } ] })),
     createCoordinator(options) { coordinatorOptions = options; coordinator = realCoordinator ? createMeetingCoordinator({ ...options,
@@ -122,6 +122,19 @@ test('transcript viewer returns only completed text for the active owner and opa
   await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a',path:'/tmp/private.txt'}),/transcript is unavailable/i);
   f.store.getProcessing=()=>({transcriptComplete:false,text:'Partial'});
   await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a'}),/transcript is unavailable/i);
+});
+
+test('manual transcription requires explicit confirmation and a matching owned manual clip', async()=>{
+  const id='c'.repeat(32), processed=[], processor={process:async value=>processed.push(value),onStateChange:()=>()=>{},cancel(){},dispose(){}};
+  const f=fixture({processor});
+  f.recordings.push({id,title:'Saved window',manualRecording:true});
+  f.store.getProcessing=request=>request.ownerUserID==='owner-a'&&request.id===id?{meeting:{manual:true}}:null;
+  await assert.rejects(f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-a'}),/choose a transcription mode/i);
+  await assert.rejects(f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-b',transcriptionConfirmed:true,transcriptionMode:'cloud'}),/account changed/i);
+  await assert.rejects(f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-a',transcriptionConfirmed:true,transcriptionMode:'invalid',transcript:'invented'}),/choose a transcription mode/i);
+  await f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-a',transcriptionConfirmed:true,transcriptionMode:'cloud'});
+  assert.deepEqual(processed,[{ownerUserID:'owner-a',id,transcriptionMode:'cloud'}]);
+  await f.service.dispose();
 });
 
 test('manual capture service actions remain owner-bound and validate picker payloads', async()=>{
