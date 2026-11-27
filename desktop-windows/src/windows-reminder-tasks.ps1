@@ -187,13 +187,15 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     Write-TaskDiagnostic $DiagnosticPath 'trigger-scope-prefix-before'
     $null = Get-TaskPrefix $scopeValue $DiagnosticPath
     Write-TaskDiagnostic $DiagnosticPath 'trigger-scope-prefix-after'
-    $launchPath = Join-Path $PSScriptRoot 'reminder-launch.json'
+    Write-TaskDiagnostic $DiagnosticPath 'launch-path-combine-before'
+    $launchPath = [IO.Path]::Combine($PSScriptRoot, 'reminder-launch.json')
+    Write-TaskDiagnostic $DiagnosticPath 'launch-path-combine-after'
     Write-TaskDiagnostic $DiagnosticPath 'launch-path-check-before'
-    $launchExists = Test-Path -LiteralPath $launchPath -PathType Leaf
+    $launchExists = [IO.File]::Exists($launchPath)
     Write-TaskDiagnostic $DiagnosticPath ('launch-path-check-after:' + [bool]$launchExists)
     if (-not $launchExists) { return }
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-read-before'
-    $launchJson = Get-Content -LiteralPath $launchPath -Raw
+    $launchJson = [IO.File]::ReadAllText($launchPath)
     Write-TaskDiagnostic $DiagnosticPath ('launch-config-read-after:' + $launchJson.Length)
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-before'
     $launch = ConvertFrom-Json -InputObject $launchJson
@@ -201,13 +203,13 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     $diagnosticsFile = ''
     if ($launch.PSObject.Properties.Name -contains 'diagnosticsFile') { $diagnosticsFile = [string]$launch.diagnosticsFile }
     Write-TaskDiagnostic $diagnosticsFile 'helper-config-loaded'
-    $triggerDir = Join-Path $PSScriptRoot 'reminder-triggers'
+    $triggerDir = [IO.Path]::Combine($PSScriptRoot, 'reminder-triggers')
     Write-TaskDiagnostic $diagnosticsFile 'trigger-directory-create-before'
-    New-Item -ItemType Directory -Force -Path $triggerDir | Out-Null
+    [IO.Directory]::CreateDirectory($triggerDir) | Out-Null
     Write-TaskDiagnostic $diagnosticsFile 'trigger-directory-create-after'
-    $marker = Join-Path $triggerDir ($token + '.trigger')
+    $marker = [IO.Path]::Combine($triggerDir, ($token + '.trigger'))
     Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-check-before'
-    $markerExists = Test-Path -LiteralPath $marker
+    $markerExists = [IO.File]::Exists($marker)
     Write-TaskDiagnostic $diagnosticsFile ('trigger-marker-check-after:' + [bool]$markerExists)
     if ($markerExists) { Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-already-present'; return }
     Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-create-before'
@@ -219,13 +221,13 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
 
     if ($launch.mode -eq 'msix') {
         $package = Get-AppxPackage -Name 'RocketShipHQ.Reel' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $package) { Write-TaskDiagnostic $diagnosticsFile 'msix-package-not-found'; Remove-Item -LiteralPath $marker -Force; return }
-        Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList ('shell:AppsFolder\' + $package.PackageFamilyName + '!Companion') -WindowStyle Hidden
+        if (-not $package) { Write-TaskDiagnostic $diagnosticsFile 'msix-package-not-found'; [IO.File]::Delete($marker); return }
+        Start-Process -FilePath ([IO.Path]::Combine($env:WINDIR, 'explorer.exe')) -ArgumentList ('shell:AppsFolder\' + $package.PackageFamilyName + '!Companion') -WindowStyle Hidden
         Write-TaskDiagnostic $diagnosticsFile 'msix-shell-launch-returned'
-    } elseif ($launch.mode -eq 'portable' -and [IO.Path]::IsPathRooted([string]$launch.executable) -and (Test-Path -LiteralPath $launch.executable -PathType Leaf)) {
+    } elseif ($launch.mode -eq 'portable' -and [IO.Path]::IsPathRooted([string]$launch.executable) -and [IO.File]::Exists([string]$launch.executable)) {
         $arguments = @()
         if ($launch.arguments -is [System.Array]) { $arguments = @($launch.arguments | ForEach-Object { [string]$_ }) }
-        if ($arguments.Count -gt 16 -or @($arguments | Where-Object { $_.Length -gt 2048 }).Count -gt 0) { Write-TaskDiagnostic $diagnosticsFile 'portable-arguments-invalid'; Remove-Item -LiteralPath $marker -Force; return }
+        if ($arguments.Count -gt 16 -or @($arguments | Where-Object { $_.Length -gt 2048 }).Count -gt 0) { Write-TaskDiagnostic $diagnosticsFile 'portable-arguments-invalid'; [IO.File]::Delete($marker); return }
         $arguments += '--meeting-reminder-trigger=' + $token
         $argumentLine = (@($arguments | ForEach-Object { Quote-CommandLineArgument $_ }) -join ' ')
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-called'
@@ -241,7 +243,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
         }
     } else {
         Write-TaskDiagnostic $diagnosticsFile 'launch-mode-invalid'
-        Remove-Item -LiteralPath $marker -Force
+        [IO.File]::Delete($marker)
     }
 }
 

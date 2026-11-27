@@ -85,8 +85,11 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The scheduled reminder helper records entry before it begins account and launch configuration work.');
   assert.match(taskHelper,/scope-identity-before[\s\S]*WindowsIdentity\]::GetCurrent\(\)\.User\.Value[\s\S]*scope-identity-after[\s\S]*scope-hash-before[\s\S]*ComputeHash[\s\S]*scope-hash-after/,
     'Smoke diagnostics bracket account identity and scope hashing so a slow call can be isolated.');
-  assert.match(taskHelper,/launch-path-check-before[\s\S]*Test-Path -LiteralPath \$launchPath[\s\S]*launch-path-check-after[\s\S]*launch-config-read-before[\s\S]*launch-config-read-after[\s\S]*launch-config-parse-before[\s\S]*launch-config-parse-after/,
-    'Smoke diagnostics bracket launch config existence, file read and JSON parse separately.');
+  const deliveryFunction=taskHelper.match(/function Deliver-ReminderTrigger[\s\S]*?(?=\n}\n\ntry)/)?.[0] ?? '';
+  assert.match(deliveryFunction,/\[IO\.Path\]::Combine\(\$PSScriptRoot, 'reminder-launch\.json'\)[\s\S]*\[IO\.File\]::Exists\(\$launchPath\)[\s\S]*\[IO\.File\]::ReadAllText\(\$launchPath\)[\s\S]*launch-config-parse-after/,
+    'The trigger path uses .NET path/file APIs and separately marks config existence, read and JSON parse.');
+  assert.doesNotMatch(deliveryFunction,/\b(?:Join-Path|Test-Path|Get-Content|New-Item|Remove-Item)\b/,
+    'Scheduled delivery does not invoke filesystem provider cmdlets on its cold PowerShell path.');
   assert.match(taskHelper,/\$launch\.PSObject\.Properties\.Name -contains 'diagnosticsFile'/,
     'Production launch configuration safely omits the smoke-only diagnostic field under StrictMode.');
   assert.match(taskHelper,/\$launch\.PSObject\.Properties\.Name -contains 'waitForChildExit'/,
