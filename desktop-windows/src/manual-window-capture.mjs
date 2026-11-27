@@ -34,10 +34,11 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
     publish({ phase: state.phase, ownerUserID, sources: options });
     return options;
   }
-  async function runStart({ ownerUserID, sourceID, consentConfirmed } = {}) {
+  async function runStart({ ownerUserID, sourceID, consentConfirmed, includeMicrophone = false } = {}) {
     owner(ownerUserID);
     check(consentConfirmed === true, 'Confirm that you have permission to record this window.');
     check(!isActive(), 'A window recording is already active.');
+    check(typeof includeMicrophone === 'boolean', 'Choose whether to include the microphone.');
     const selected = choices.get(sourceID);
     choices.clear();
     publish({ phase: state.phase, ownerUserID, sources: [] });
@@ -54,7 +55,7 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
       check(match, 'That window cannot be captured.');
       const handle = await recorder.start({
         ownerUserID, hwnd: match[1], manual: true, title: capture.title, sourceName: selected.sourceName, meeting: null,
-        systemAudio: true, microphone: false, signal: capture.controller.signal,
+        systemAudio: true, microphone: includeMicrophone, signal: capture.controller.signal,
       });
       if (active !== capture || !current(capture)) {
         try { await recorder.stop(handle); } catch {}
@@ -76,6 +77,18 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
     const tracked = operation.finally(() => { if (pendingStart === tracked) pendingStart = null; });
     pendingStart = tracked;
     return tracked;
+  }
+  async function setPaused(ownerUserID, paused) {
+    owner(ownerUserID);
+    const capture = active;
+    check(capture?.handle && capture.ownerUserID === ownerUserID && !capture.changingPause &&
+      state.phase === (paused ? 'capturing' : 'paused'), 'The recording state changed.');
+    capture.changingPause = true;
+    try {
+      await recorder.setPaused(capture.handle, paused);
+      if (capture === active && current(capture))
+        publish({ phase: paused ? 'paused' : 'capturing', ownerUserID, title: capture.title });
+    } finally { capture.changingPause = false; }
   }
   async function stop(ownerUserID) {
     if (pendingStop) {
@@ -115,5 +128,5 @@ export function createManualWindowCapture({ desktopCapturer, recorder, getProfil
     await Promise.allSettled([pendingStart,pendingStop].filter(Boolean));
   }
   function isActive() { return !!(active || pendingStart || pendingStop); }
-  return { list, start, stop, dispose, clearCatalog, state: () => structuredClone(state), isActive };
+  return { list, start, stop, setPaused, dispose, clearCatalog, state: () => structuredClone(state), isActive };
 }

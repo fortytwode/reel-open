@@ -186,14 +186,14 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   async function action(name,payload) {
     if (closed || closing) throw Error('Reel is shutting down.');
     let transcriptResponse = null;
-    if (['listCaptureWindows','startWindowRecording','stopWindowRecording'].includes(name)) {
+    if (['listCaptureWindows','startWindowRecording','stopWindowRecording','pauseWindowRecording','resumeWindowRecording'].includes(name)) {
       if (!manualCapture) throw Error('Native window recording is unavailable in this build.');
       if (name==='listCaptureWindows') {
         if (Object.keys(payload ?? {}).some(key=>!['expectedOwnerUserID'].includes(key))) throw Error('Invalid window picker request.');
         await manualCapture.list(requireOwner(payload?.expectedOwnerUserID));
       } else if (name==='startWindowRecording') {
         if (!payload || typeof payload!=='object' || Array.isArray(payload)
-          || Object.keys(payload).some(key=>!['expectedOwnerUserID','sourceID','consentConfirmed'].includes(key))
+          || Object.keys(payload).some(key=>!['expectedOwnerUserID','sourceID','consentConfirmed','includeMicrophone'].includes(key))
           || typeof payload.sourceID!=='string' || typeof payload.consentConfirmed!=='boolean')
           throw Error('Invalid window recording request.');
         const meetingPhase=coordinator?.getState()?.phase ?? 'idle';
@@ -201,10 +201,12 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           throw Error('Finish the current meeting recording before starting a window recording.');
         if (settings().autoJoin) throw Error('Turn off automatic joining before starting a manual window recording.');
         await manualCapture.start({ownerUserID:requireOwner(payload.expectedOwnerUserID),sourceID:payload.sourceID,
-          consentConfirmed:payload.consentConfirmed});
+          consentConfirmed:payload.consentConfirmed,includeMicrophone:payload.includeMicrophone});
       } else {
         if (Object.keys(payload ?? {}).some(key=>!['expectedOwnerUserID'].includes(key))) throw Error('Invalid window stop request.');
-        await manualCapture.stop(requireOwner(payload?.expectedOwnerUserID));
+        const ownerID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (name==='stopWindowRecording') await manualCapture.stop(ownerID);
+        else await manualCapture.setPaused(ownerID,name==='pauseWindowRecording');
       }
       emit();
     }

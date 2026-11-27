@@ -145,15 +145,19 @@ function renderManualWindowCapture(signedIn) {
   const placeholder=node('option','','Choose an open window'); placeholder.value=''; select.append(placeholder);
   for(const source of choices) { const option=node('option','',source.title); option.value=source.id; select.append(option); }
   if(choices.some(source=>source.id===previous)) select.value=previous;
-  const busy=['starting','capturing','saving'].includes(capture.phase);
+  const busy=['starting','capturing','paused','saving'].includes(capture.phase);
   byId('refreshCaptureWindows').disabled=!signedIn || busy;
   select.disabled=!signedIn || busy || !choices.length;
+  byId('captureWindowMicrophone').disabled=!signedIn || busy;
+  byId('pauseWindowRecording').classList.toggle('hidden',capture.phase!=='capturing');
+  byId('resumeWindowRecording').classList.toggle('hidden',capture.phase!=='paused');
   byId('captureWindowConsent').disabled=!signedIn || busy;
-  byId('startWindowRecording').classList.toggle('hidden',['capturing','saving'].includes(capture.phase));
+  byId('startWindowRecording').classList.toggle('hidden',['capturing','paused','saving'].includes(capture.phase));
   byId('startWindowRecording').disabled=!signedIn || busy || autoJoinBlocked || !select.value || !byId('captureWindowConsent').checked;
-  byId('stopWindowRecording').classList.toggle('hidden',!['starting','capturing','saving'].includes(capture.phase));
-  byId('stopWindowRecording').disabled=!['starting','capturing'].includes(capture.phase);
+  byId('stopWindowRecording').classList.toggle('hidden',!['starting','capturing','paused','saving'].includes(capture.phase));
+  byId('stopWindowRecording').disabled=!['starting','capturing','paused'].includes(capture.phase);
   byId('manualCaptureStatus').textContent=capture.phase==='capturing' ? `Recording “${capture.title}” locally.`
+    : capture.phase==='paused' ? 'Recording paused.'
     : capture.phase==='starting' ? 'Starting the selected window capture…'
     : capture.phase==='saving' ? 'Saving the recording…'
     : capture.phase==='completed' ? 'Window recording saved locally.'
@@ -342,6 +346,8 @@ function applySnapshot(next, expectedGeneration = null) {
   if (!next || (expectedGeneration !== null && expectedGeneration !== renderGeneration)) return;
   const owner=next.profile?.userID ?? null;
   if (owner !== currentOwner || (snapshot?.profile?.calendarConnected === true && next.profile?.calendarConnected !== true)) {
+    byId('captureWindowConsent').checked=false;
+    byId('captureWindowMicrophone').checked=false;
     const transcriptDialog=byId('transcriptDialog');
     if (transcriptDialog.open) transcriptDialog.close();
     clearTimeout(saveTimer); saveTimer=null; saving=false; localSettings=null; renderGeneration++;
@@ -461,9 +467,9 @@ document.addEventListener('click', event=>{
   if(action==='listCaptureWindows') { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='startWindowRecording') {
     void perform(action,{expectedOwnerUserID:snapshot?.profile?.userID,sourceID:byId('captureWindowSelect').value,
-      consentConfirmed:byId('captureWindowConsent').checked}); return;
+      consentConfirmed:byId('captureWindowConsent').checked,includeMicrophone:byId('captureWindowMicrophone').checked}); return;
   }
-  if(action==='stopWindowRecording') { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if(['stopWindowRecording','pauseWindowRecording','resumeWindowRecording'].includes(action)) { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if (action === 'joinMeeting') {
     const id = target.dataset.meetingId;
     void startMeeting(action, { id, includeMicrophone: microphoneMeetingId === id });

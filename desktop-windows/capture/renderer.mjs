@@ -125,7 +125,9 @@ async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled
     capture = new CaptureSession({
       settings: { quality: 'p720', fps: 15, audio: includeMicrophone ? 'micAndSystem' : 'systemOnly', bubbleSize: 'medium' },
       display: stream, camera: null, mic: microphone, composite: false,
-      events: { onAudio: audioBlock, onInit: bytes => append('init', 0, 0, bytes),
+      events: { onTick: () => {
+        if (capture.pauseConfirmed && !stopping) void api.pauseChanged(true).catch(() => {});
+      }, onAudio: audioBlock, onInit: bytes => append('init', 0, 0, bytes),
         onSegment: (index, duration, bytes) => append('fragment', index, duration, bytes),
         onError: () => fail('encoder_failed'), onSourceEnded: sourceEnded },
     });
@@ -162,4 +164,17 @@ function stop() {
   return stopPromise;
 }
 window.addEventListener('pagehide', () => { stopping = true; releaseTracks(); });
-api.onCommand(command => { if (command.type === 'start') void start(command); else if (command.type === 'refresh-audio') void refreshAudio(command.request, command.deadline); else if (command.type === 'stop') void stop(); });
+api.onCommand(command => {
+  if (command.type === 'start') void start(command);
+  else if (command.type === 'refresh-audio') void refreshAudio(command.request, command.deadline);
+  else if (command.type === 'stop') void stop();
+  else if (!stopping && !failed && capture) {
+    if (command.type === 'pause') {
+      if (capture.pauseConfirmed) void api.pauseChanged(true).catch(() => {});
+      else capture.pause();
+    } else if (command.type === 'resume') {
+      capture.resume({ dropScreenFrame: true });
+      void api.pauseChanged(false).catch(() => {});
+    }
+  }
+});

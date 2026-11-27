@@ -448,3 +448,17 @@ test('renderer carries mixed PCM across block boundaries and waits for storage b
   assert.deepEqual(f.calls.filter(call => call[0] === 'audio').flatMap(call => call[1]), [0, 64, 0, 192, 0, 32]);
   assert.equal(f.calls.some(call => call[0] === 'done'), true);
 });
+
+test('manual pause waits for the renderer and encoder before confirming, and can stop while paused',async()=>{
+  const f=fixture({sources:[{id:'window:123:0',name:'Demo'}],requestArgs:signal=>({hwnd:'123',manual:true,title:'Demo',sourceName:'Demo',meeting:null,ownerUserID:'owner',systemAudio:true,microphone:true,signal})});
+  const handle=await running(f);
+  let confirmed=false;
+  const paused=f.recorder.setPaused(handle,true).then(()=>{confirmed=true;});
+  assert.equal(f.windows[0].command.type,'pause');
+  await f.status({type:'pause_changed',paused:false});
+  assert.equal(confirmed,false);
+  await f.status({type:'pause_changed',paused:true}); await paused;
+  const finish=f.recorder.stop(handle);
+  await f.status({type:'done',duration:4,segments:1});
+  assert.equal((await finish).durationSeconds,4);
+});

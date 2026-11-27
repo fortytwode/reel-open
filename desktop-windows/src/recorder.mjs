@@ -34,6 +34,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
   function clear(capture) {
     clearTimeout(capture.timer);
     clearTimeout(capture.audioTimer);
+    capture.pauseChange?.reject(Error('Recording ended during pause control.'));
     capture.signal?.removeEventListener('abort', capture.onAbort);
     captures.delete(capture.token);
     if (current === capture) current = null;
@@ -92,6 +93,9 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
           && Number.isInteger(message.segments) && message.segments > 0, 'Unexpected recording completion');
         check(!capture.doneReceived, 'Duplicate recording completion');
         capture.doneReceived = true; capture.done.resolve({ duration: message.duration, segments: message.segments });
+      } else if (message.type === 'pause_changed') {
+        const change = capture.pauseChange;
+        if (change && change.paused === message.paused && capture.phase === 'recording') change.resolve();
       } else if (message.type === 'audio_ended') {
         if (capture.phase === 'starting') fail(capture, Error('System audio ended before capture started.'));
         else if (capture.phase === 'recording' && defaultRenderEndpoint) capture.audioEndpoint = null;
@@ -230,7 +234,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
         && typeof args.signal.addEventListener === 'function', 'Invalid meeting capture request');
       if (args.signal.aborted) throw abortError();
       const token = randomBytes(16).toString('hex'), handle = Object.freeze({ id: token });
-      const capture = { ownerUserID: args.ownerUserID, token, handle, phase: 'starting', signal: args.signal, window: null, writer: null,
+      const capture = { manual: args.manual === true, ownerUserID: args.ownerUserID, token, handle, phase: 'starting', signal: args.signal, window: null, writer: null,
         started: deferred(), done: deferred(), failed: deferred(), ready: false, init: false, index: 0,
         audioRequest: 0, pendingPackets: 0, pendingBytes: 0, packets: Promise.resolve(), returned: false };
       // done may reject before stop() is called; the start promise remains owned by the caller.
@@ -246,12 +250,23 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
       return capture.started.promise;
     } catch (error) { return Promise.reject(error); }
   }
+  async function setPaused(handle, paused) {
+    const capture = handles.get(handle);
+    check(capture?.manual && capture.phase === 'recording' && !capture.pauseChange, 'Cannot change pause state.');
+    const change = capture.pauseChange = { ...deferred(), paused };
+    const timer = setTimeout(() => change.reject(Error('The recorder did not confirm the pause control.')), 5000);
+    try {
+      capture.window.webContents.send(COMMAND, { type: paused ? 'pause' : 'resume', token: capture.token });
+      await change.promise;
+    } finally { clearTimeout(timer); capture.pauseChange = null; }
+  }
   function stop(handle) {
     const capture = handle && handles.get(handle);
     if (!capture) return Promise.reject(Error('Unknown recording handle.'));
     if (capture.stopPromise) return capture.stopPromise;
     if (capture.failure) return Promise.reject(capture.failure);
     capture.phase = 'stopping';
+    capture.pauseChange?.reject(Error('Recording is being saved.'));
     clearTimeout(capture.audioTimer);
     capture.timer = setTimeout(() => fail(capture, Error('Recording save timed out.')), DEADLINE_MS);
     capture.timer.unref?.();
@@ -272,5 +287,5 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     capture.stopPromise = Promise.race([finish, capture.failed.promise]);
     return capture.stopPromise;
   }
-  return { start, stop };
+  return { start, stop, setPaused };
 }

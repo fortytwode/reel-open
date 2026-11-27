@@ -3,7 +3,7 @@ let token = null;
 let listener = null;
 let pending = null;
 ipcRenderer.on('reel-capture:command', (_event, message) => {
-  if (!message || !['start', 'stop', 'refresh-audio'].includes(message.type)) return;
+  if (!message || !['start', 'stop', 'pause', 'resume', 'refresh-audio'].includes(message.type)) return;
   if (message.type === 'start') {
     if (token || !/^[0-9a-f]{32}$/.test(message.token ?? '')) return;
     token = message.token;
@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('reelCapture', Object.freeze({
   },
   ready: info => status({ type: 'ready', info: { video: info.video, audio: info.audio } }),
   appendAudio: bytes => ipcRenderer.invoke('reel-capture:audio', { token, bytes }),
+  pauseChanged: paused => status({ type: 'pause_changed', paused }),
   audioEnded: () => status({ type: 'audio_ended' }),
   audioRefreshed: (request, ok) => status({ type: 'audio_refreshed', request, ok: ok === true }),
   audioFailed: () => status({ type: 'audio_failed' }),

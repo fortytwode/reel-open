@@ -66,8 +66,11 @@
         <button id="refreshCaptureWindows" class="outline" type="button" data-action="listCaptureWindows">Refresh windows</button>
       </div>
       <label class="setting"><input id="captureWindowConsent" type="checkbox"> <span>I have permission to record content shown in this window.</span></label>
+      <label class="setting"><input id="captureWindowMicrophone" type="checkbox"> <span>Include my microphone</span></label>
       <p id="manualCaptureStatus" class="meeting-meta" role="status" aria-live="polite"></p>
       <button id="startWindowRecording" class="primary" type="button" data-action="startWindowRecording">Start recording</button>
+      <button id="pauseWindowRecording" class="outline hidden" type="button" data-action="pauseWindowRecording">Pause recording</button>
+      <button id="resumeWindowRecording" class="outline hidden" type="button" data-action="resumeWindowRecording">Resume recording</button>
       <button id="stopWindowRecording" class="danger hidden" type="button" data-action="stopWindowRecording">Stop and save recording</button>
     </section>
       <section id="recordingsCard" class="card recordings-card hidden"><div class="card-heading"><div><p class="eyebrow">RECENT</p><h2>Latest recordings</h2></div><button class="text-button" type="button" data-action="openRecordings">Open recordings folder ↗</button></div><p class="share-disclosure">Anyone with the link can watch the shared video. Choose “Share video and transcript” to include the finished transcript. The attendee list and meeting notes stay private.</p><div id="recordingsList" class="recording-list"></div></section>
