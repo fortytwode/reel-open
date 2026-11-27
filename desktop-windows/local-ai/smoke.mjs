@@ -6,8 +6,9 @@ import path from 'node:path';
 import {app,BrowserWindow,ipcMain} from 'electron';
 import {startAssetServer} from '../src/asset-server.mjs';
 import {whisperSamples} from '../src/meeting-processing.mjs';
+import {localSummaryPrompt} from '../src/local-generative-summary.mjs';
 import {createLocalWhisper,localAIRequestAllowed} from '../src/local-whisper.mjs';
-import {MODEL_ID,MODEL_PATH,withPinnedModelFetch} from './model-pinning.mjs';
+import {MODEL_ID,MODEL_PATH,SUMMARY_MODEL_ID,SUMMARY_MODEL_PATH,SUMMARY_MODEL_REVISION,SUMMARY_TOKENIZER_PATH,withPinnedModelFetch} from './model-pinning.mjs';
 import {withSmokeTimeout} from '../src/smoke-timeout.mjs';
 
 const audioPath=process.env.REEL_WHISPER_SMOKE_AUDIO;
@@ -15,7 +16,8 @@ const packagedRoot=process.env.REEL_WHISPER_SMOKE_ROOT;
 const expectedArch=process.env.REEL_WHISPER_SMOKE_ARCH;
 const logPath=process.env.REEL_WHISPER_SMOKE_LOG;
 const startupOnly=process.env.REEL_WHISPER_SMOKE_STARTUP_ONLY==='1';
-assert.ok((startupOnly||audioPath)&&packagedRoot&&logPath&&['x64','arm64'].includes(expectedArch),'Supply synthetic PCM16/16kHz/mono speech unless startup-only, extracted resources/app path, log path, and expected architecture.');
+const summaryOnly=process.env.REEL_LOCAL_SUMMARY_SMOKE==='1';
+assert.ok((startupOnly||summaryOnly||audioPath)&&packagedRoot&&logPath&&['x64','arm64'].includes(expectedArch),'Supply synthetic audio unless startup-only or summary-only, app root, log path, and expected architecture.');
 assert.equal(process.platform,'win32');
 assert.equal(process.arch,expectedArch);
 writeFileSync(logPath,'');
@@ -123,6 +125,25 @@ async function transcribeWithBounds(name,samples,totalTimeoutMs){
     clearTimeout(phaseTimer);clearTimeout(totalTimer);onPhase=()=>{};
   }
 }
+async function summarizeWithBounds(name,text,totalTimeoutMs){
+  currentRun=name;currentPhase='request_start';
+  const controller=new AbortController(),started=Date.now();
+  let phaseTimer,totalTimer,rejectTimeout;
+  const timeout=new Promise((_,reject)=>{rejectTimeout=reject;});
+  function armPhase(phase){
+    if(!phaseLimits[phase])return;
+    currentPhase=phase;clearTimeout(phaseTimer);
+    const remaining=Math.max(1,totalTimeoutMs-(Date.now()-started));
+    phaseTimer=setTimeout(()=>{log(`phase_timeout_${phase}`);controller.abort();rejectTimeout(Error('Phase timeout'));},Math.min(phaseLimits[phase],remaining));
+  }
+  onPhase=armPhase;log('request_start');
+  totalTimer=setTimeout(()=>{log('overall_timeout');controller.abort();rejectTimeout(Error('Overall timeout'));},totalTimeoutMs);
+  try{
+    const operation=local.summarize({ownerUserID:'smoke-owner',id:'b'.repeat(32),text,signal:controller.signal});
+    return await Promise.race([operation,timeout]);
+  }catch(error){log('request_failed');throw error;}
+  finally{clearTimeout(phaseTimer);clearTimeout(totalTimer);onPhase=()=>{};}
+}
 async function probePinnedModelRequest(){
   const contents=windows.at(-1).webContents;
   const result=await contents.executeJavaScript(`(async()=>{
@@ -159,6 +180,24 @@ async function probePinnedModelRequest(){
     'The real browser Cache API must satisfy a main-revision metadata probe from the pinned revision without network access.');
   log('renderer_model_pin_probe_passed');
 }
+async function probeSummaryModelRequest(){
+  const result=await windows.at(-1).webContents.executeJavaScript(`(async()=>{
+    const {withPinnedModelFetch}=await import('/model-pinning.mjs');const seen=[];
+    const intercepted=withPinnedModelFetch(async(input,init)=>{const request=new Request(input,init);seen.push(request.url);return new Response('',{status:200});});
+    await intercepted('https://huggingface.co/${SUMMARY_MODEL_ID}/resolve/main/config.json');
+    await intercepted('https://huggingface.co/${SUMMARY_MODEL_ID}/resolve/main/tokenizer.json');
+    await intercepted('https://huggingface.co/${SUMMARY_MODEL_ID}/resolve/${SUMMARY_MODEL_REVISION}/spiece.model');
+    return seen;
+  })()`);
+  assert.deepEqual(result,[`https://huggingface.co${SUMMARY_MODEL_PATH}config.json`,
+    `https://huggingface.co${SUMMARY_TOKENIZER_PATH}tokenizer.json`,`https://huggingface.co${SUMMARY_TOKENIZER_PATH}spiece.model`]);
+  assert.equal(localAIRequestAllowed(result[0],'GET',assets.localAIOrigin),true);
+  assert.equal(localAIRequestAllowed(result[1],'GET',assets.localAIOrigin),true);
+  assert.equal(localAIRequestAllowed(result[2],'GET',assets.localAIOrigin),true);
+  assert.equal(localAIRequestAllowed(`https://huggingface.co/${SUMMARY_MODEL_ID}/resolve/main/config.json`,'GET',assets.localAIOrigin),false);
+  assert.equal(localAIRequestAllowed(`https://huggingface.co/${SUMMARY_MODEL_ID}/resolve/main/tokenizer.json`,'GET',assets.localAIOrigin),false);
+  log('summary_model_pin_probe_passed');
+}
 async function transformersCacheEntryCount(){
   return windows.at(-1).webContents.executeJavaScript(
     `caches.open('transformers-cache').then(cache=>cache.keys().then(keys=>keys.length))`);
@@ -183,6 +222,55 @@ async function runSmoke(){
       await bounded('renderer_model_pin_probe',probePinnedModelRequest,10_000);
       log('smoke_startup_preflight_passed');
       return;
+    }
+    if(summaryOnly){
+      const meeting=localSummaryPrompt([
+        {start:0,text:'The launch team met on Thursday to review the onboarding redesign.'},
+        {start:8,text:'The rollout is moving from May 20 to June 3 because account migration needs more time.'},
+        {start:16,text:'Maya will update the customer email by Friday.'},
+        {start:24,text:'Jon will verify the migrated accounts and report problems at Monday’s check-in.'},
+        {start:32,text:'The team agreed to keep the existing support schedule through launch.'},
+      ]);
+      const walkthrough=localSummaryPrompt([
+        {start:0,text:'Open the returns dashboard.'},
+        {start:8,text:'Filter the queue to cases older than 30 days.'},
+        {start:16,text:'Select three duplicate charges for order 584.'},
+        {start:24,text:'Issue refunds for the three charges.'},
+        {start:32,text:'Export the confirmation report and send it to the finance team.'},
+      ]);
+      await bounded('summary_renderer_startup',()=>local.probeRenderer(),20_000);
+      await bounded('summary_model_pin_probe',probeSummaryModelRequest,10_000);
+      const first=await summarizeWithBounds('first_summary',meeting,12*60_000);
+      assert.equal(first.engine,'T5-CNN-25K q8');
+      assert.match(first.text,/rollout.{0,50}May 20.{0,30}June 3|moving from May 20 to June 3/iu,
+        'Meeting summary should preserve the decision to move the rollout because migration needs more time.');
+      assert.match(first.text,/account migration|migrated accounts/iu,'Meeting summary should preserve the migration dependency.');
+      log('first_summary_complete');
+      const second=await summarizeWithBounds('second_summary',walkthrough,4*60_000);
+      assert.equal(second.engine,'T5-CNN-25K q8');
+      assert.match(second.text,/refund/iu,'Walkthrough summary should preserve the refund action.');
+      assert.match(second.text,/confirmation report.{0,40}finance team|finance team.{0,40}confirmation report/iu,
+        'Walkthrough summary should preserve the exported report and recipient.');
+      log('second_summary_complete');
+      const cacheEntries=await bounded('model_cache_snapshot',transformersCacheEntryCount,10_000);
+      assert.ok(Number.isInteger(cacheEntries)&&cacheEntries>0,'The first summary must leave assets in the persistent browser model cache.');
+      log('model_cache_snapshot_complete',undefined,undefined,undefined,undefined,undefined,undefined,cacheEntries);
+      modelNetworkBlocked=true;log('offline_policy_enabled');
+      await bounded('offline_window_recreation',()=>{windows.at(-1).destroy();return new Promise(resolve=>setImmediate(resolve));},5_000);
+      await bounded('offline_renderer_recreation_probe',()=>local.probeRenderer(),20_000);log('offline_renderer_recreation_probe_passed');
+      const offlineCacheEntries=await bounded('offline_cache_snapshot',transformersCacheEntryCount,10_000);
+      assert.equal(offlineCacheEntries,cacheEntries,'Recreated Electron renderer must reuse the same persistent model cache.');
+      log('offline_cache_snapshot_complete',undefined,undefined,undefined,undefined,undefined,undefined,offlineCacheEntries);
+      const offline=await summarizeWithBounds('offline_summary',meeting,4*60_000);
+      assert.equal(offline.engine,'T5-CNN-25K q8');
+      assert.match(offline.text,/rollout.{0,50}May 20.{0,30}June 3|moving from May 20 to June 3/iu);
+      assert.match(offline.text,/account migration|migrated accounts/iu);
+      log('offline_summary_complete');
+      const remoteRequestBlocked=await bounded('offline_network_probe',()=>windows.at(-1).webContents.executeJavaScript(
+        `fetch('https://huggingface.co/${SUMMARY_MODEL_ID}/resolve/${SUMMARY_MODEL_REVISION}/config.json',{cache:'no-store'}).then(()=>false,()=>true)`),20_000);
+      assert.equal(remoteRequestBlocked,true,'Cached local summary must not request model files after remote access is disabled.');
+      assert.equal(blockedRemoteRequests,1,'The isolated renderer policy must deny the explicit offline network probe.');
+      log('offline_network_denial_verified');log('summary_smoke_passed');return;
     }
     const samples=await bounded('audio_fixture_load',async()=>whisperSamples(new Blob([await readFile(audioPath)])),30_000);
     log('audio_fixture_ready');

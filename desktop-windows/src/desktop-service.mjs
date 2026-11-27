@@ -1,5 +1,7 @@
 import { routeGoogleMeetings } from './google-calendar.mjs';
 import { normalizeTrimRange } from './trim-range.mjs';
+import { summarizeLocally } from './local-extractive-summary.mjs';
+import { cleanGeneratedSummary, localSummaryPrompt } from './local-generative-summary.mjs';
 
 const defaults = ownerUserID => ({ownerUserID, autoJoin:false, participantConsent:false,
   systemAudioConsent:false, meetingReminders:false, localTranscription:false, selection:{useAll:true,ids:[]}});
@@ -66,13 +68,14 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,discoverOutlook,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,localSummarize,shareMeeting,reminderScheduler,manualCapture,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
-  let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
+  let meetingStartPending=false, pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
   const activeShares=new Set();
   const activeRecordingOperations=new Map();
   const activeExports=new Map();
+  const activeLocalSummaries=new Set();
   let settingsTail=Promise.resolve(),disposePromise=null;
   let calendars=[],meetings=[],calendarOwner=null,routingUnavailable=false;
   const routingMessage='Cloud routing could not be checked. Local Meet and Teams joins are paused. Zoom can continue.';
@@ -82,6 +85,8 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     if (settingsCache?.ownerUserID !== id) settingsCache=store.getSettings(id);
     return settingsCache;
   };
+  function usingOutlook() { return settings().calendarSource==='outlook' && Boolean(discoverOutlook); }
+  function calendarAvailable(profile) { return Boolean(profile?.userID && (usingOutlook() || profile.calendarConnected)); }
   function state() {
     const profile=auth?.getProfile() ?? null, status=coordinator?.getState() ?? {phase:'idle'};
     // Do not surface a previous owner's meeting state while cancellation is saving.
@@ -89,11 +94,13 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     const phase = currentStatus ? status.phase : 'idle';
     const messageKey = currentStatus && status.reason === 'microphone_unavailable' ? status.reason : phase;
     const currentCalendar=calendarOwner===profile?.userID;
-    return {configured,profile,settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
+    return {configured,profile,outlookAvailable:Boolean(discoverOutlook),calendarAvailable:calendarAvailable(profile),settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
       meetingReminderError:reminderScheduler?.error ?? null,
       meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
         ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`),localOperation:activeRecordingOperations.get(`${profile.userID}:${recording.id}`)?.label ?? null})) : [],
-      status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},error};
+      status:{phase,message:routingUnavailable && ['idle','scheduled'].includes(phase) ? routingMessage : messages[messageKey] ?? messages.idle},
+      manualCapture:(()=>{const value=manualCapture?.state();return value?.ownerUserID && value.ownerUserID!==profile?.userID
+        ? {phase:'idle'} : value ?? {phase:'idle'};})(),error};
   }
   function emit() { if (!closed) onState(state()); }
   function invalidate() {
@@ -103,13 +110,13 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   }
   async function calendarDiscover(args) {
     if (args.signal?.aborted) throw Error('Calendar refresh cancelled.');
-    const profile=auth.getProfile(), key=selectionKey(args.selection), version=generation;
+    const profile=auth.getProfile(), key=(usingOutlook()?'outlook:':'google:')+selectionKey(args.selection), version=generation;
     let result;
     if (cache?.ownerUserID === profile?.userID && cache.ownerEmail === profile?.email
       && cache.key === key && Date.now()-cache.at < 10_000) result=cache.result;
     else {
       try {
-        result = profile?.calendarConnected ? await discover(args) : null;
+        result = usingOutlook() ? await discoverOutlook(args) : profile?.calendarConnected ? await discover(args) : null;
       } catch (error) {
         if (!args.pastedLink) throw error;
       }
@@ -121,20 +128,23 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       if (hasCalendarResult) cache={ownerUserID:result.ownerUserID,ownerEmail:profile.email,key,at:Date.now(),result};
     }
     // Google discovery can be cached briefly; cloud ownership must be fresh before each coordinator refresh/join.
-    const routed=await routeGoogleMeetings({auth,snapshot:result,routingURL:org && org.meetingServiceURL + '/calendar/desktop',fetch:fetcher,signal:args.signal,now:args.now,pastedLink:args.pastedLink});
+    const routed=await routeGoogleMeetings({auth,snapshot:result,localCalendar:usingOutlook(),routingURL:org && org.meetingServiceURL + '/calendar/desktop',fetch:fetcher,signal:args.signal,now:args.now,pastedLink:args.pastedLink});
     if (args.signal?.aborted || version !== generation || profile?.userID !== auth.getProfile()?.userID
       || profile?.email !== auth.getProfile()?.email) throw Error('The calendar account changed.');
     routingUnavailable=routed.routingUnavailable;
     error=routingUnavailable ? routingMessage : null;
     return routed;
   }
-  const coordinator=configured ? createCoordinator({auth, calendar:{discover:calendarDiscover},getSettings:settings,
+  const coordinator=configured ? createCoordinator({auth, calendar:{discover:calendarDiscover},
+    getSettings:()=>manualCapture?.isActive?.() ? {...settings(),autoJoin:false} : settings(),
     hasCompleted:args=>store.hasCompleted(args),markCompleted:args=>store.markCompleted(args)}) : null;
   const unsubscribeStatus=coordinator?.onStateChange(emit);
   const unsubscribeProcessing=processor?.onStateChange(emit);
   const unsubscribeAuth=auth?.onStateChange(() => {
     const next=auth.getProfile()?.userID ?? null;
-    if (owner !== next || ownerEmail !== auth.getProfile()?.email || !auth.getProfile()?.calendarConnected) {
+    if (owner !== next || ownerEmail !== auth.getProfile()?.email || !calendarAvailable(auth.getProfile())) {
+      if (owner !== next && manualCapture?.isActive()) void manualCapture.stop(owner).catch(()=>{});
+      if (owner !== next) manualCapture?.clearCatalog();
       owner=next;ownerEmail=auth.getProfile()?.email ?? null;invalidate();
     }
     // The coordinator independently invalidates on the same auth notification.
@@ -151,7 +161,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     }
     const operation=(async()=>{
       const profile=auth.getProfile(), version=generation;
-      if (!profile?.calendarConnected) { reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]}); await coordinator.refresh(); await coordinator.tick(); emit(); return; }
+      if (!calendarAvailable(profile)) { reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]}); await coordinator.refresh(); await coordinator.tick(); emit(); return; }
       const controller=new AbortController(); calendarController=controller;
       try {
         const result=await calendarDiscover({auth,selection:settings().selection,now:new Date(),signal:controller.signal});
@@ -165,7 +175,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if (closed || closing || version!==generation) return;
         cache=null;calendars=[];meetings=[];
         reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]});
-        error='Could not refresh your calendar. Reconnect Google Calendar or try again.';
+        error=usingOutlook()?'Open classic Outlook with the same work account, then refresh.':'Could not refresh your calendar. Reconnect Google Calendar or try again.';
         await coordinator.cancel();emit();
       } finally { if(calendarController===controller) calendarController=null; }
     })();
@@ -181,7 +191,33 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   async function action(name,payload) {
     if (closed || closing) throw Error('Reel is shutting down.');
     let transcriptResponse = null;
-    if (name==='openLibrary') {
+    if (['listCaptureWindows','startWindowRecording','stopWindowRecording','pauseWindowRecording','resumeWindowRecording'].includes(name)) {
+      if (!manualCapture) throw Error('Native window recording is unavailable in this build.');
+      if (name==='listCaptureWindows') {
+        if (Object.keys(payload ?? {}).some(key=>!['expectedOwnerUserID'].includes(key))) throw Error('Invalid window picker request.');
+        await manualCapture.list(requireOwner(payload?.expectedOwnerUserID));
+      } else if (name==='startWindowRecording') {
+        if (!payload || typeof payload!=='object' || Array.isArray(payload)
+          || Object.keys(payload).some(key=>!['expectedOwnerUserID','sourceID','consentConfirmed','includeMicrophone','highlightClicks'].includes(key))
+          || typeof payload.sourceID!=='string' || typeof payload.consentConfirmed!=='boolean'
+          || (payload.includeMicrophone!==undefined && typeof payload.includeMicrophone!=='boolean')
+          || (payload.highlightClicks!==undefined && typeof payload.highlightClicks!=='boolean'))
+          throw Error('Invalid window recording request.');
+        const meetingPhase=coordinator?.getState()?.phase ?? 'idle';
+        if (meetingStartPending || ['joining','capturing','saving','close_required','retry_wait'].includes(meetingPhase))
+          throw Error('Finish the current meeting recording before starting a window recording.');
+        await manualCapture.start({ownerUserID:requireOwner(payload.expectedOwnerUserID),sourceID:payload.sourceID,
+          consentConfirmed:payload.consentConfirmed,includeMicrophone:payload.includeMicrophone ?? false,
+          highlightClicks:payload.highlightClicks ?? true});
+      } else {
+        if (Object.keys(payload ?? {}).some(key=>!['expectedOwnerUserID'].includes(key))) throw Error('Invalid window stop request.');
+        const ownerID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (name==='stopWindowRecording') await manualCapture.stop(ownerID);
+        else await manualCapture.setPaused(ownerID,name==='pauseWindowRecording');
+      }
+      emit();
+    }
+    else if (name==='openLibrary') {
       if (!org) throw Error('The organization has not configured its web URLs.');
       await openExternal(org.notesBaseURL);
     }
@@ -198,7 +234,10 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         await auth.signIn({connectCalendar:name==='connectCalendar'});
         invalidate();owner=auth.getProfile()?.userID ?? null; await pulse();
       } else if(name==='cancelSignIn') auth.cancelSignIn();
-      else if(name==='signOut') { auth.signOut();await coordinator.cancel(); }
+      else if(name==='signOut') {
+        if(manualCapture?.isActive()) await manualCapture.stop(requireOwner());
+        auth.signOut();await coordinator.cancel();
+      }
       else if(name==='disconnectCalendar') {
         const id=requireOwner(); auth.disconnectCalendar();await coordinator.cancel();
         const write=settingsTail.catch(()=>{}).then(()=>{
@@ -206,7 +245,23 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           return store.saveSettings({...value,ownerUserID:id,expectedOwnerUserID:id,autoJoin:false,meetingReminders:false});
         });
         settingsTail=write;write.catch(()=>{});await write;
-      } else if(name==='saveSettings') {
+      } else if(name==='saveSettings' || name==='setCalendarSource') {
+        const switching=name==='setCalendarSource';
+        let source=settings().calendarSource ?? 'google';
+        if (switching) {
+          requireOwner(payload?.expectedOwnerUserID ?? null);
+          if (!discoverOutlook || !['google','outlook'].includes(payload.source)) throw Error('Unknown calendar source.');
+          source=payload.source;
+          if (source===(settings().calendarSource ?? 'google')) return state();
+          if (['joining','capturing','saving','close_required'].includes(coordinator.getState().phase))
+            throw Error('Finish the current recording before changing calendars.');
+          const current=settings();
+          payload={...defaults(current.ownerUserID),expectedOwnerUserID:current.ownerUserID,localTranscription:current.localTranscription};
+          generation++; calendarOwner=null; calendars=[]; meetings=[];
+        } else if ((payload?.calendarSource ?? 'google') !== source) throw Error('Your calendar source changed. Refresh setup.');
+        if (payload && Object.hasOwn(payload,'calendarSource')) {
+          payload={...payload}; delete payload.calendarSource;
+        }
         if (!payload || typeof payload!=='object' || Array.isArray(payload) || Object.keys(payload).some(key=>!keys.includes(key)))
           throw Error('Invalid recording settings.');
         const id=requireOwner(payload.expectedOwnerUserID), version=generation;
@@ -216,10 +271,10 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           || typeof payload.selection?.useAll!=='boolean' || !Array.isArray(payload.selection.ids)
           || payload.selection.ids.length>250 || payload.selection.ids.some(value=>typeof value!=='string'||!value||value.length>1024))
           throw Error('Invalid recording settings.');
-        const next={ownerUserID:id,autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
+        const next={ownerUserID:id,...(source==='outlook'?{calendarSource:source}:{}),autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
           participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,meetingReminders:payload.meetingReminders,localTranscription:payload.localTranscription,
           selection:{useAll:payload.selection.useAll,ids:[...new Set(payload.selection.ids)]}};
-        if(next.autoJoin && !auth.getProfile().calendarConnected) throw Error('Connect Google Calendar first.');
+        if(next.autoJoin && !calendarAvailable(auth.getProfile())) throw Error('Connect Google Calendar first.');
         const revision=++settingsRevision, changed=JSON.stringify(settings())!==JSON.stringify(next);
         let cancellation=Promise.resolve();
         if(changed) {
@@ -246,6 +301,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         settingsCache=saved;error=null;emit();await pulse();
       } else if(name==='joinMeeting' || name==='joinMeetingLink') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (manualCapture?.isActive()) throw Error('Stop the manual window recording before starting a meeting recording.');
         const pasted = name==='joinMeetingLink';
         const allowed = ['expectedOwnerUserID', 'includeMicrophone', ...(pasted ? ['url', 'participantsConfirmed'] : ['id'])];
         if (Object.keys(payload).some(key => !allowed.includes(key))
@@ -259,16 +315,73 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         await settingsTail;
         if (version!==generation || revision!==settingsRevision || requireOwner()!==id || closing)
           throw Error('Your account or recording settings changed. Refresh and try again.');
+        if (manualCapture?.isActive()) throw Error('Stop the manual window recording before starting a meeting recording.');
         cache=null;
-        await coordinator.joinMeeting({ ownerUserID:id, microphone:payload.includeMicrophone === true,
-          ...(pasted ? { url:payload.url, participantsConfirmed:payload.participantsConfirmed } : { meetingId:payload.id }) });
+        if (meetingStartPending) throw Error('A meeting join is already in progress.');
+        meetingStartPending=true;
+        try {
+          await coordinator.joinMeeting({ ownerUserID:id, microphone:payload.includeMicrophone === true,
+            ...(pasted ? { url:payload.url, participantsConfirmed:payload.participantsConfirmed } : { meetingId:payload.id }) });
+        } finally { meetingStartPending=false; }
       } else if(name==='cancelJoin') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         await coordinator.cancelJoin(id);
       } else if(name==='retryProcessing') {
-        const id=requireOwner(payload?.expectedOwnerUserID);
-        if (typeof payload?.id !== 'string' || !store.getProcessing({ownerUserID:id,id:payload.id})) throw Error('Recording is unavailable.');
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        const processing=typeof payload?.id==='string' && store.getProcessing({ownerUserID:id,id:payload.id});
+        if (!processing) throw Error('Recording is unavailable.');
+        if (processing.meeting?.manual) throw Error('Choose local or cloud transcription for this recording.');
         void processor?.process({ownerUserID:id,id:payload.id}).catch(()=>{});
+      } else if(name==='transcribeManualRecording') {
+        const id=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!payload || typeof payload!=='object' || Array.isArray(payload)
+          || Object.keys(payload).some(key=>!['expectedOwnerUserID','id','transcriptionConfirmed','transcriptionMode'].includes(key))
+          || typeof payload.id!=='string' || !/^[0-9a-f]{32}$/.test(payload.id)
+          || payload.transcriptionConfirmed!==true || !['local','cloud'].includes(payload.transcriptionMode)
+          || typeof processor?.process!=='function')
+          throw Error('Choose a transcription mode and confirm transcription for this saved recording.');
+        const recording=store.list(id).find(item=>item.id===payload.id);
+        const processing=store.getProcessing({ownerUserID:id,id:payload.id});
+        if (!recording?.manualRecording || processing?.meeting?.manual!==true)
+          throw Error('This saved manual recording is unavailable.');
+        if (processing.transcriptionMode && processing.transcriptionMode!==payload.transcriptionMode)
+          throw Error('This recording already has a saved transcription mode. Retry with that mode.');
+        await processor.process({ownerUserID:id,id:payload.id,transcriptionMode:payload.transcriptionMode});
+        requireOwner(id);
+      } else if(name==='generateLocalSummary') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if(!payload||typeof payload!=='object'||Array.isArray(payload)
+          ||Object.keys(payload).some(key=>!['expectedOwnerUserID','id','summaryConfirmed'].includes(key))
+          ||!/^[0-9a-f]{32}$/.test(payload.id??'')||payload.summaryConfirmed!==true)
+          throw Error('Confirm on-device AI summarization for this saved recording.');
+        const recording=store.list(ownerUserID).find(item=>item.id===payload.id);
+        const processing=store.getProcessing({ownerUserID,id:payload.id});
+        if(!recording||processing?.localOnly!==true||processing.transcriptComplete!==true
+          ||!processing.text?.trim()||!Array.isArray(processing.segments)||!processing.segments.length)
+          throw Error('A completed local-only transcript is required for an on-device summary.');
+        const summaryKey=`${ownerUserID}:${payload.id}`;
+        if(activeLocalSummaries.has(summaryKey))throw Error('An on-device summary is already running for this recording.');
+        const duration=Number.isFinite(recording.durationSeconds)?recording.durationSeconds:
+          Math.max(0,...processing.segments.map(segment=>Number.isFinite(segment.end)?segment.end:0));
+        const fallback=summarizeLocally(processing.segments,duration);
+        let generated=null;
+        activeLocalSummaries.add(summaryKey);
+        try{
+          if(typeof localSummarize==='function'){
+            try{
+              const result=await localSummarize({ownerUserID,id:payload.id,text:localSummaryPrompt(processing.segments)});
+              if(result?.engine==='T5-CNN-25K q8')generated=cleanGeneratedSummary(result.text);
+            }catch{}
+          }
+          requireOwner(ownerUserID);
+          const latest=store.getProcessing({ownerUserID,id:payload.id});
+          if(latest?.localOnly!==true||latest.transcriptComplete!==true||latest.text!==processing.text)
+            throw Error('The saved transcript changed. Refresh your recordings.');
+          await store.saveProcessing({ownerUserID,id:payload.id,processing:{...latest,phase:'completed',error:null,
+            summary:generated??fallback.summary,suggestedTitle:fallback.suggestedTitle,chapters:fallback.chapters,
+            summaryEngine:generated?'t5-cnn-25k-local':(fallback.summary||fallback.suggestedTitle||fallback.chapters.length?'extractive-local':null)}});
+          requireOwner(ownerUserID);
+        }finally{activeLocalSummaries.delete(summaryKey);}
       } else if(name==='playRecording') {
         const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof openRecording !== 'function') throw Error('Recording is unavailable.');
@@ -356,7 +469,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           else await store.rename(args);
           if (version!==generation || requireOwner()!==id) throw Error('The account changed. Refresh your recordings.');
         } finally { if(activeRecordingOperations.get(key)===operation) activeRecordingOperations.delete(key);emit(); }
-      } else if(name==='stopRecording') { await coordinator.cancel();emit(); }
+      } else if(name==='stopRecording') { if(manualCapture?.isActive()) await manualCapture.stop(requireOwner(payload?.expectedOwnerUserID)); else await coordinator.cancel();emit(); }
       else if(name==='refresh') { cache=null;await pulse(); }
       else throw Error('Unknown Reel action.');
     }
@@ -368,7 +481,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     closing=true;calendarController?.abort();auth?.cancelSignIn();processor?.cancel();
     disposePromise=(async()=>{
       // Consent mutations are durable before the process may exit.
-      const cancellation=coordinator?.cancel();
+      const cancellation=Promise.allSettled([coordinator?.cancel(),manualCapture?.dispose?.()]);
       // Keep the app process alive until native exporters release their input
       // and temporary output files; Electron's before-quit handler awaits us.
       await Promise.allSettled([...activeExports.values()]);

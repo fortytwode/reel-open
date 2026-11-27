@@ -66,6 +66,24 @@ test('streams exact fragments to an owner-generated path and persists metadata w
   assert.deepEqual(createLocalRecordingStore({ root }).list('../../owner'), store.list('../../owner'));
 });
 
+test('saved manual window clips keep audio for explicit transcript and share actions', async t => {
+  const { store } = await fixture(t);
+  const writer=await recorded(store,'owner',{manual:true});
+  const saved=await writer.finish({durationSeconds:9});
+  const listed=store.list('owner')[0];
+  assert.equal(listed.id,saved.id);
+  assert.equal(listed.manualRecording,true);
+  assert.equal(listed.processing.transcriptReady,false);
+  assert.equal(listed.processing.transcriptionMode,null,'A new walkthrough must leave both local and cloud choices available.');
+  const processing=store.getProcessing({ownerUserID:'owner',id:saved.id});
+  await store.saveProcessing({ownerUserID:'owner',id:saved.id,processing:{...processing,transcriptionMode:'local'}});
+  assert.equal(store.list('owner')[0].processing.transcriptionMode,'local');
+  assert.equal(store.getProcessing({ownerUserID:'owner',id:saved.id}).meeting.manual,true);
+  const audio=store.getAudioInfo({ownerUserID:'owner',id:saved.id});
+  assert.equal(audio.frameCount,1);
+  assert.equal((await store.getShareRecord({ownerUserID:'owner',id:saved.id})).meeting,true);
+});
+
 test('rejects fragments before init, duplicated init, missing final media and oversized packets', async t => {
   const { store } = await fixture(t);
   for (const operation of [
@@ -193,6 +211,14 @@ test('renderer metadata exposes bounded extractive summary only for its local re
   assert.equal(ownerView.localSummary.chapters[0].start,0);
   assert.equal(Object.hasOwn(ownerView,'text'),false,'Raw transcript text is never included in the renderer metadata.');
   assert.deepEqual(store.list('other'),[],'Owner scoped listing does not expose another user’s local summary.');
+  await store.saveProcessing({ownerUserID:'owner',id:recording.id,processing:{phase:'completed',transcriptionMode:'local',localOnly:true,
+    transcriptComplete:true,text:'Private full transcript never crosses the metadata projection.',summaryEngine:'flan-t5-small-local',
+    suggestedTitle:'Walkthrough',summary:'The walkthrough filters the inventory by warehouse and exports a restocking report.',chapters:[]}});
+  assert.equal(store.list('owner')[0].processing.localSummary.source,'on-device-ai');
+  await store.saveProcessing({ownerUserID:'owner',id:recording.id,processing:{phase:'completed',transcriptionMode:'local',localOnly:true,
+    transcriptComplete:true,text:'Private full transcript never crosses the metadata projection.',summaryEngine:'t5-cnn-25k-local',
+    suggestedTitle:'Walkthrough',summary:'The walkthrough filters the inventory by warehouse and exports a restocking report.',chapters:[]}});
+  assert.equal(store.list('owner')[0].processing.localSummary.source,'on-device-ai');
   await assert.rejects(store.saveProcessing({ownerUserID:'other',id:recording.id,processing:{localOnly:true,summaryEngine:'extractive-local',summary:'private'}}),/Recording no longer exists/u);
 });
 

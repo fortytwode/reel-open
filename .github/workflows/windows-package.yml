@@ -88,6 +88,9 @@ jobs:
           node desktop-windows/probe/node_modules/electron/install.js
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm ci --prefix firebase/tests
+      - name: Install media verifier for packaged capture smoke
+        shell: pwsh
+        run: choco install ffmpeg --no-progress -y
       - name: Verify AAC encoding, decoding and PCM samples
         shell: pwsh
         run: |
@@ -111,6 +114,34 @@ jobs:
           $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
           ./desktop-windows/build-portable.ps1 -ElectronDist desktop-windows/probe/node_modules/electron/dist -ExpectedArchitecture $env:REEL_ARCH -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials -Version "$version-ci" -OutputZip $zip
           Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP/demo-package"
+      - name: Prepare an unmodified synthetic manual-capture QA kit
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'manual-capture-qa-kit'
+          New-Item -ItemType Directory -Force -Path $kit | Out-Null
+          $packageName = "Reel-Windows-$env:REEL_ARCH.zip"
+          $packagePath = Join-Path $kit $packageName
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'demo.zip') -Destination $packagePath
+          Copy-Item -LiteralPath 'desktop-windows/probe/fixture.html' -Destination $kit
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            purpose = 'Manual window capture smoke with synthetic screen pixels and a 440 Hz audio tone.'
+            sourceCommit = '${{ github.sha }}'
+            architecture = $env:REEL_ARCH
+            package = @{ file = $packageName; sha256 = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant() }
+            fixture = @{ file = 'fixture.html'; screen = 'magenta/green checkerboard'; toneHz = 440; microphone = $false; meetingProvider = $false }
+            packageConfiguration = 'CI demo OAuth placeholder only. No organization credential file is included; replace desktop-windows/config.json locally with the authorized installed credentials before sign-in.'
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $kit 'manifest.json') -Encoding utf8NoBOM
+      - name: Upload the synthetic manual-capture QA kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-capture-qa-kit-${{ matrix.arch }}
+          path: ${{ runner.temp }}/manual-capture-qa-kit
+          if-no-files-found: error
+          retention-days: 7
       - name: Snapshot runner and verify reminders before model inference
         shell: pwsh
         run: |
@@ -229,10 +260,23 @@ jobs:
             if (Test-Path $log) { Get-Content -LiteralPath $log }
             $process.Refresh()
             if ($process.ExitCode) { throw "Packaged local Whisper inference/offline cache smoke exited with $($process.ExitCode)" }
+            $summaryLog = Join-Path $env:RUNNER_TEMP "local-summary-$env:REEL_ARCH.log"
+            $env:REEL_LOCAL_SUMMARY_SMOKE = '1'
+            $env:REEL_WHISPER_SMOKE_LOG = $summaryLog
+            $summaryProcess = Start-Process -FilePath $electron -PassThru -NoNewWindow
+            if (-not $summaryProcess.WaitForExit(18 * 60 * 1000)) {
+              if (-not $summaryProcess.HasExited) { $summaryProcess.Kill($true) }
+              throw 'Packaged local summary smoke exceeded its 18 minute bound.'
+            }
+            if (Test-Path $summaryLog) { Get-Content -LiteralPath $summaryLog }
+            $summaryProcess.Refresh()
+            if ($summaryProcess.ExitCode -or -not (Select-String -LiteralPath $summaryLog -Pattern '"phase":"summary_smoke_passed"' -Quiet)) {
+              throw "Packaged local summary inference/offline cache smoke failed on $env:REEL_ARCH."
+            }
           } finally {
             [IO.File]::WriteAllText($packagePath, $originalPackage, (New-Object Text.UTF8Encoding($false)))
             Remove-Item -LiteralPath $smoke,$helper -Force -ErrorAction SilentlyContinue
-            Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_LOG -ErrorAction SilentlyContinue
+            Remove-Item Env:REEL_WHISPER_SMOKE_AUDIO,Env:REEL_WHISPER_SMOKE_ROOT,Env:REEL_WHISPER_SMOKE_ARCH,Env:REEL_WHISPER_SMOKE_LOG,Env:REEL_LOCAL_SUMMARY_SMOKE -ErrorAction SilentlyContinue
           }
       - name: Print packaged local Whisper diagnostics
         if: always()
@@ -240,12 +284,16 @@ jobs:
         run: |
           $log = Join-Path $env:RUNNER_TEMP "whisper-smoke-${{ matrix.arch }}.log"
           if (Test-Path $log) { Get-Content -LiteralPath $log }
+          $summaryLog = Join-Path $env:RUNNER_TEMP "local-summary-${{ matrix.arch }}.log"
+          if (Test-Path $summaryLog) { Get-Content -LiteralPath $summaryLog }
       - name: Upload packaged local Whisper diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: local-whisper-${{ matrix.arch }}-diagnostics
-          path: ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
+          path: |
+            ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
+            ${{ runner.temp }}/local-summary-${{ matrix.arch }}.log
           if-no-files-found: warn
           retention-days: 7
       - name: Snapshot runner after packaged local Whisper inference
@@ -295,3 +343,38 @@ jobs:
       - name: Verify packaged Recorder and Notetaker app entries
         shell: pwsh
         run: node desktop-windows/tests/product-entry-smoke.mjs "$env:RUNNER_TEMP/demo-package"
+      - name: Prepare production manual-capture harness in extracted package
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:RUNNER_TEMP 'demo-package/resources/app'
+          $probe = Join-Path $app 'desktop-windows/probe'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          Copy-Item desktop-windows/probe/adapter-main.mjs, desktop-windows/probe/fixture.html -Destination $probe
+          $manifestPath = Join-Path $app 'package.json'
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $manifest.main = 'desktop-windows/probe/adapter-main.mjs'
+          $utf8 = New-Object Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8), $utf8)
+      - name: Test the packaged Recorder against the available Windows audio hardware
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'manual-capture-smoke'
+          $executable = Join-Path $env:RUNNER_TEMP 'demo-package/Reel.exe'
+          $sessionId = (Get-Process -Id $PID).SessionId
+          $soundDeviceCount = @(Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue).Count
+          Write-Host "Windows session ID=$sessionId; sound device count=$soundDeviceCount"
+          $process = Start-Process -FilePath $executable -ArgumentList @('--manual-picker', '--test-missing-output', "--out=$out") -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode) { throw "Packaged manual capture smoke exited with $($process.ExitCode)" }
+          node desktop-windows/probe/adapter-verify.mjs --manual-picker --test-missing-output "--out=$out"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  click-sampling-fixture:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify selected-window click hit testing and coordinates
+        shell: cmd
+        run: desktop-windows\native\test-click-sampling.cmd

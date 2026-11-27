@@ -83,13 +83,13 @@ $productFiles = @(
     'desktop-windows/organization.json', 'web/reel/organization.js',
     'desktop-windows/main.mjs', 'desktop-windows/preload.cjs',
     'desktop-windows/src/auth.mjs', 'desktop-windows/src/asset-server.mjs',
-    'desktop-windows/src/desktop-service.mjs', 'desktop-windows/src/google-calendar.mjs', 'desktop-windows/src/meeting-reminders.mjs',
+    'desktop-windows/src/desktop-service.mjs', 'desktop-windows/src/google-calendar.mjs', 'desktop-windows/src/outlook-calendar.mjs', 'desktop-windows/src/meeting-reminders.mjs',
     'desktop-windows/src/windows-reminder-tasks.mjs', 'desktop-windows/src/windows-reminder-tasks.ps1',
-    'desktop-windows/src/local-recordings.mjs', 'desktop-windows/src/local-whisper.mjs', 'desktop-windows/src/local-extractive-summary.mjs', 'desktop-windows/src/meeting-coordinator.mjs', 'desktop-windows/src/meeting-processing.mjs', 'desktop-windows/src/meeting-share.mjs',
-    'desktop-windows/src/native-bridge.mjs', 'desktop-windows/src/recorder.mjs',
+    'desktop-windows/src/local-recordings.mjs', 'desktop-windows/src/local-whisper.mjs', 'desktop-windows/src/local-extractive-summary.mjs', 'desktop-windows/src/local-generative-summary.mjs', 'desktop-windows/src/meeting-coordinator.mjs', 'desktop-windows/src/meeting-processing.mjs', 'desktop-windows/src/meeting-share.mjs',
+    'desktop-windows/src/native-bridge.mjs', 'desktop-windows/src/recorder.mjs', 'desktop-windows/src/manual-window-capture.mjs', 'desktop-windows/src/capture-window-preview.mjs',
     'desktop-windows/src/trim-range.mjs',
     'desktop-windows/ui/index.html', 'desktop-windows/ui/setup.css', 'desktop-windows/ui/setup.mjs',
-    'desktop-windows/local-ai/index.html', 'desktop-windows/local-ai/preload.cjs', 'desktop-windows/local-ai/renderer.mjs', 'desktop-windows/local-ai/worker.mjs', 'desktop-windows/local-ai/model-pinning.mjs', 'desktop-windows/local-ai/ONNX-WASM-LICENSE', 'desktop-windows/local-ai/TRANSFORMERS-LICENSE',
+    'desktop-windows/local-ai/index.html', 'desktop-windows/local-ai/preload.cjs', 'desktop-windows/local-ai/renderer.mjs', 'desktop-windows/local-ai/worker.mjs', 'desktop-windows/local-ai/model-pinning.mjs', 'desktop-windows/local-ai/ONNX-WASM-LICENSE', 'desktop-windows/local-ai/TRANSFORMERS-LICENSE', 'desktop-windows/local-ai/T5-CNN-SUMMARY-MODEL-NOTICE',
     'desktop-windows/local-ai/build/transformers.bundle.mjs',
     'desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs', 'desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm',
     'desktop-windows/capture/index.html', 'desktop-windows/capture/preload.cjs', 'desktop-windows/capture/renderer.mjs',
@@ -103,8 +103,8 @@ try {
     & npm run build:local-ai --prefix desktop-windows
     if ($LASTEXITCODE -ne 0) { throw 'Bundling the pinned local AI worker runtime failed.' }
 } finally { Pop-Location }
-$nativeInputs = @('Core.cs', 'WinJoin.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs',
-    'MediaTrim.cs', 'MediaTrimProgram.cs', 'MediaTrimTests.cs', 'build.cmd', 'build-media-trim.ps1')
+$nativeInputs = @('Core.cs', 'ClickSampling.cs', 'WinJoin.cs', 'OutlookCalendar.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs',
+    'ClickSamplingTests.cs', 'MediaTrim.cs', 'MediaTrimProgram.cs', 'MediaTrimTests.cs', 'build.cmd', 'build-fixture.cmd', 'build-media-trim.ps1', 'test-click-sampling.cmd')
 $sourceHashes = [ordered]@{}
 foreach ($relative in $productFiles) {
     $sourceHashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $repo $relative) -Algorithm SHA256).Hash.ToLowerInvariant()

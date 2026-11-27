@@ -63,7 +63,7 @@ test('MSIX product launch arguments select the configured Recorder and Notetaker
   assert.throws(() => desktopProductURL('openRecorder', null), /organization has not configured/);
 });
 
-function fixture({ realCoordinator = false, discover, shareMeeting, reminderScheduler, exportTrimmedCopy } = {}) {
+function fixture({ realCoordinator = false, discover, discoverOutlook, shareMeeting, reminderScheduler, exportTrimmedCopy, manualCapture, processor, localSummarize } = {}) {
   let profile = { userID: 'owner-a', email: 'a@northwind.example', calendarConnected: true };
   let coordinatorOptions, coordinator, status = { phase: 'idle' }, statusNotify;
   const settings = new Map(), recordings = [], calls = [], writes = [], snapshots = [], listeners = new Set();
@@ -75,8 +75,8 @@ function fixture({ realCoordinator = false, discover, shareMeeting, reminderSche
     markCompleted: async () => {}, saveSettings: async value => { writes.push(value); settings.set(value.ownerUserID, value); return value; } };
   store.rename=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');const item=recordings.find(recording=>recording.id===args.id);if(!item)throw Error('unavailable');item.title=args.title.trim();};
   store.deleteRecording=async args=>{if(args.ownerUserID!==profile?.userID||!args.isCurrent())throw Error('account changed');if(args.localOnlyConfirmed!==true)throw Error('confirm local only');const index=recordings.findIndex(recording=>recording.id===args.id);if(index<0)throw Error('unavailable');recordings.splice(index,1);};
-  const service = createDesktopService({org, auth, store, fetch:async () => Response.json({events:[]}),
-    reminderScheduler,
+  const service = createDesktopService({org, auth, store, discoverOutlook, fetch:async () => Response.json({events:[]}),
+    reminderScheduler, manualCapture, processor, localSummarize,
     discover: discover ?? (async ({auth}) => ({ ownerUserID: auth.getProfile().userID, calendars: [{id:'cal',title:'Work'}], meetings: [
       { id:'one', title:'QA', start:'2026-11-06T15:00:00Z',end:'2026-11-06T16:00:00Z',platform:'google_meet',joinURL:'https://meet.google.com/aaa-bbbb-ccc',attendeeEmails:['private@example.com'] } ] })),
     createCoordinator(options) { coordinatorOptions = options; coordinator = realCoordinator ? createMeetingCoordinator({ ...options,
@@ -122,6 +122,65 @@ test('transcript viewer returns only completed text for the active owner and opa
   await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a',path:'/tmp/private.txt'}),/transcript is unavailable/i);
   f.store.getProcessing=()=>({transcriptComplete:false,text:'Partial'});
   await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a'}),/transcript is unavailable/i);
+});
+
+test('manual transcription requires explicit confirmation and a matching owned manual clip', async()=>{
+  const id='c'.repeat(32), processed=[], processor={process:async value=>processed.push(value),onStateChange:()=>()=>{},cancel(){},dispose(){}};
+  const f=fixture({processor});
+  f.recordings.push({id,title:'Saved window',manualRecording:true});
+  f.store.getProcessing=request=>request.ownerUserID==='owner-a'&&request.id===id?{meeting:{manual:true}}:null;
+  await assert.rejects(f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-a'}),/choose a transcription mode/i);
+  await assert.rejects(f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-b',transcriptionConfirmed:true,transcriptionMode:'cloud'}),/account changed/i);
+  await assert.rejects(f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-a',transcriptionConfirmed:true,transcriptionMode:'invalid',transcript:'invented'}),/choose a transcription mode/i);
+  await f.service.action('transcribeManualRecording',{id,expectedOwnerUserID:'owner-a',transcriptionConfirmed:true,transcriptionMode:'cloud'});
+  assert.deepEqual(processed,[{ownerUserID:'owner-a',id,transcriptionMode:'cloud'}]);
+  await f.service.dispose();
+});
+
+test('manual capture service actions remain owner-bound and validate picker payloads', async()=>{
+  const calls=[];let value={phase:'idle',sources:[]},active=false;
+  const manualCapture={state:()=>value,isActive:()=>active,
+    list:async owner=>{calls.push(['list',owner]);value={phase:'idle',ownerUserID:owner,sources:[{id:'opaque',title:'Chrome'}]};},
+    start:async args=>{calls.push(['start',args]);active=true;value={phase:'capturing',ownerUserID:args.ownerUserID,title:'Chrome'};},
+    stop:async owner=>{calls.push(['stop',owner]);active=false;value={phase:'completed',ownerUserID:owner};},clearCatalog(){}};
+  const f=fixture({manualCapture});
+  await f.service.action('listCaptureWindows',{expectedOwnerUserID:'owner-a'});
+  f.status({phase:'capturing'});
+  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/current meeting recording/i);
+  f.status({phase:'idle'});
+  await f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true});
+  assert.equal(f.service.state().manualCapture.phase,'capturing');
+  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true,hwnd:'123'}),/invalid window recording/i);
+  f.changeOwner({userID:'owner-b',email:'b@northwind.example',calendarConnected:true});
+  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/account changed/i);
+  assert.equal(f.service.state().manualCapture.phase,'idle','Another account must not see the previous owner capture state.');
+  assert.deepEqual(calls,[['list','owner-a'],['start',{ownerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true,includeMicrophone:false,highlightClicks:true}],['stop','owner-a']]);
+});
+
+test('manual capture cannot overlap auto-join or an explicit meeting join',async()=>{
+  let active=false,starts=0;
+  const manualCapture={state:()=>({phase:active?'capturing':'idle'}),isActive:()=>active,
+    list:async()=>{},start:async()=>{starts++;active=true;},stop:async()=>{active=false;},dispose:async()=>{active=false;},clearCatalog(){}};
+  const f=fixture({manualCapture});
+  const settings={ownerUserID:'owner-a',expectedOwnerUserID:'owner-a',autoJoin:true,participantConsent:true,systemAudioConsent:true,localTranscription:false,
+    meetingReminders:false,selection:{useAll:true,ids:[]}};
+  await f.service.action('saveSettings',settings);
+  await f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true});
+  await assert.rejects(f.service.action('joinMeetingLink',{expectedOwnerUserID:'owner-a',url:'https://meet.google.com/aaa-bbbb-ccc',participantsConfirmed:true}),/stop the manual window recording/i);
+  assert.equal(starts,1);
+  assert.equal(f.coordinatorOptions().getSettings().autoJoin,false);
+  assert.equal(f.service.state().settings.autoJoin,true);
+  await f.service.action('stopWindowRecording',{expectedOwnerUserID:'owner-a'});
+  assert.equal(f.coordinatorOptions().getSettings().autoJoin,true);
+});
+
+test('shutdown awaits a manual capture save even after its active handle is cleared',async()=>{
+  const gate=deferred();let complete=false;
+  const manualCapture={state:()=>({phase:'saving'}),isActive:()=>false,dispose:()=>gate.promise,clearCatalog(){}};
+  const f=fixture({manualCapture});
+  const closing=f.service.dispose().then(()=>{complete=true;});
+  await settle();assert.equal(complete,false);
+  gate.resolve();await closing;assert.equal(complete,true);
 });
 
 test('trim export resolves only owner-bound local files and validates a non-destructive range', async () => {
@@ -262,6 +321,37 @@ test('rename and delete are owner-bound, reject renderer paths, and confirm loca
   await f.service.action('deleteRecording',{id,localOnlyConfirmed:true,expectedOwnerUserID});
   assert.deepEqual(f.service.state().recordings,[]);
   await f.service.dispose();
+});
+
+test('on-device summary requires an owner-matched local transcript and never delivers it',async()=>{
+  const id='c'.repeat(32),generated='The walkthrough filters the dashboard by region. It exports the selected revenue report.';
+  let processing={phase:'completed',localOnly:true,transcriptComplete:true,text:'A walkthrough of filtering the sales dashboard by region, then exporting the quarterly revenue report.',
+    segments:[{start:0,end:8,text:'A walkthrough of filtering the sales dashboard by region, then exporting the quarterly revenue report.'}]};
+  let inferenceInput;const f=fixture({localSummarize:async value=>{
+    inferenceInput=value;return{text:generated,engine:'T5-CNN-25K q8'};
+  }});f.recordings.push({id,title:'Walkthrough',durationSeconds:8});
+  f.store.getProcessing=args=>args.ownerUserID==='owner-a'&&args.id===id?structuredClone(processing):null;
+  f.store.saveProcessing=async args=>{assert.equal(args.ownerUserID,'owner-a');assert.equal(args.id,id);processing=structuredClone(args.processing);};
+  await f.service.action('generateLocalSummary',{id,summaryConfirmed:true,expectedOwnerUserID:'owner-a'});
+  assert.equal(inferenceInput.ownerUserID,'owner-a');assert.equal(inferenceInput.id,id);
+  assert.match(inferenceInput.text,/\[0:00\] A walkthrough of filtering the sales dashboard/u);
+  assert.equal(processing.summary,generated);assert.equal(processing.summaryEngine,'t5-cnn-25k-local');
+  assert.equal(processing.phase,'completed');assert.equal(processing.localOnly,true);
+  assert.deepEqual(f.calls,[],'Summary generation must not trigger cloud service or delivery calls.');
+  await assert.rejects(f.service.action('generateLocalSummary',{id,summaryConfirmed:true,expectedOwnerUserID:'owner-b'}),/account changed/i);
+  await f.service.dispose();
+});
+
+test('on-device summary failure preserves deterministic local notes',async()=>{
+  const id='d'.repeat(32);let processing={phase:'completed',localOnly:true,transcriptComplete:true,
+    text:'A walkthrough of reviewing the customer support queue and exporting the weekly response-time report.',
+    segments:[{start:0,end:6,text:'A walkthrough of reviewing the customer support queue and exporting the weekly response-time report.'}]};
+  const f=fixture({localSummarize:async()=>{throw Error('model unavailable');}});f.recordings.push({id,title:'Walkthrough',durationSeconds:6});
+  f.store.getProcessing=args=>args.ownerUserID==='owner-a'&&args.id===id?structuredClone(processing):null;
+  f.store.saveProcessing=async args=>{processing=structuredClone(args.processing);};
+  await f.service.action('generateLocalSummary',{id,summaryConfirmed:true,expectedOwnerUserID:'owner-a'});
+  assert.equal(processing.summaryEngine,'extractive-local');assert.ok(processing.summary);
+  assert.equal(processing.phase,'completed');await f.service.dispose();
 });
 
 test('a delayed older enable cannot persist after a newer disable that matches the temporary cache', async () => {
@@ -499,4 +589,20 @@ test('pasted meeting links can record without a calendar, recertify cloud routin
   await rejected;
   assert.equal(joins.length, 1);
   await service.dispose();
+});
+
+test('switching calendar sources requires fresh consent and holds back old settings writes',async()=>{
+  const f=fixture({discoverOutlook:async({auth})=>({ownerUserID:auth.getProfile().userID,
+    calendars:[{id:'outlook:default',title:'Outlook'}],meetings:[]})});
+  await f.service.action('disconnectCalendar');
+  const enabled=await f.service.action('setCalendarSource',{expectedOwnerUserID:'owner-a',source:'outlook'});
+  assert.equal(enabled.calendarAvailable,true);
+  assert.equal(enabled.profile.calendarConnected,false);
+  assert.equal(enabled.settings.autoJoin,false);
+  assert.equal(enabled.settings.participantConsent,false);
+  assert.equal(enabled.calendars[0].id,'outlook:default');
+  await assert.rejects(f.service.action('saveSettings',{...initial('owner-a'),expectedOwnerUserID:'owner-a'}),/source changed/);
+  const disabled=await f.service.action('setCalendarSource',{expectedOwnerUserID:'owner-a',source:'google'});
+  assert.equal(disabled.calendarAvailable,false);
+  assert.deepEqual(disabled.calendars,[]);
 });

@@ -1,14 +1,10 @@
 import {randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {MODEL_ID,MODEL_PATH,MODEL_FILES,MODEL_REVISION} from '../local-ai/model-pinning.mjs';
+import {MODEL_CDN_PATHS,modelForCachePath,modelForRequestPath} from '../local-ai/model-pinning.mjs';
 
 const ID=/^[0-9a-f]{32}$/;
 const check=(condition,message)=>{if(!condition)throw Error(message);};
 const MODEL_CDN_HOSTS=new Set(['us.aws.cdn.hf.co','us.gcp.cdn.hf.co']);
-const MODEL_CDN_PATHS=new Set([
-  '/xet-bridge-us/66fbc1d373c445b0a3a6acfe/8a2747c40e92b6856b7aaccfff90d0342d9fbd4aa095c7d1dc637da59662cdce',
-  '/xet-bridge-us/66fbc1d373c445b0a3a6acfe/2e276de9ccae304a023b1022703be08500c0eb96b7b999e725eebd0af1572f6c',
-]);
 const MODEL_CDN_QUERY_KEYS=['Expires','Hash-Algorithm','Key-Pair-Id','Policy','Signature','X-Xet-Cas-Uid',
   'response-content-disposition','user_id','xip'].sort();
 const SAFE_REMOTE_REQUEST_CLASSES=new Set(['method_options','method_other','non_https_request','hub_model_file',
@@ -36,18 +32,8 @@ const SAFE_PROGRESS_PHASES=new Set(['worker_message_sent','worker_started','mode
 const SAFE_RENDERER_PHASES=new Set(['renderer_script_started','renderer_script_ready','worker_creation_started',
   'worker_created','worker_script_ready','worker_error_before_task','worker_creation_failed','renderer_probe_received']);
 
-function isModelFileURLPath(pathname,prefix=MODEL_PATH){
-  return pathname.startsWith(prefix)&&MODEL_FILES.has(pathname.slice(prefix.length));
-}
-
 function isPinnedHubCacheURL(url){
-  const cachePrefix=`/api/resolve-cache/models/${MODEL_ID}/${MODEL_REVISION}/`;
-  if(url.hostname!=='huggingface.co'||url.protocol!=='https:'||url.port!==''||url.username||url.password||url.hash
-    ||!isModelFileURLPath(url.pathname,cachePrefix))return false;
-  const filePath=url.pathname.slice(cachePrefix.length),originalPath=`${MODEL_PATH}${filePath}`;
-  const entries=[...url.searchParams];
-  return entries.length===2&&entries.some(([key,value])=>key===originalPath&&value==='')
-    &&entries.some(([key,value])=>key==='etag'&&/^"?[a-f0-9]{40}"?$/iu.test(value));
+  return Boolean(modelForCachePath(url));
 }
 
 function modelCDNQueryAllowed(url){
@@ -70,7 +56,8 @@ export function localAIRequestAllowed(requestURL,method,localOrigin,allowedHubRe
     if(url.origin===origin.origin)return url.search===''&&url.hash===''&&url.username===''&&url.password=='';
     if(url.protocol!=='https:'||url.port!=='')return false;
     if(url.hostname==='huggingface.co'){
-      if(isModelFileURLPath(url.pathname))return url.search==='';
+      const model=modelForRequestPath(url.pathname);
+      if(model&&!model.isMain&&model.model.files.has(model.file))return url.search==='';
       return isPinnedHubCacheURL(url)&&allowedHubRedirects.has(url.href);
     }
     // Permit only the exact signed URL observed in an allowed Hub redirect.
@@ -90,11 +77,12 @@ export function localAIRequestClass(requestURL,method,localOrigin){
     }
     if(url.protocol!=='https:'||url.port!=='')return 'non_https_request';
     if(url.hostname==='huggingface.co'){
-      if(url.pathname.startsWith(MODEL_PATH)){
-        if(!isModelFileURLPath(url.pathname))return 'hub_model_other_path';
+      const model=modelForRequestPath(url.pathname);
+      if(model){
+        if(!model.model.files.has(model.file))return 'hub_model_other_path';
         return url.search?'hub_model_file_query':'hub_model_file';
       }
-      if(url.pathname.startsWith(`/api/resolve-cache/models/${MODEL_ID}/`))return 'hub_model_cache_path';
+      if(url.pathname.startsWith('/api/resolve-cache/models/'))return 'hub_model_cache_path';
       return 'hub_other_path';
     }
     if(MODEL_CDN_HOSTS.has(url.hostname))return MODEL_CDN_PATHS.has(url.pathname)?'pinned_cdn_blob':'cdn_other_path';
@@ -126,7 +114,7 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     clearTimeout(rendererStartup.timer);const startup=rendererStartup;rendererStartup=null;
     diagnostic(phase);startup.reject(Error(message));
   }
-  function cancelActive(message='Local transcription was cancelled.'){
+  function cancelActive(message='Local AI processing was cancelled.'){
     const job=active;if(!job)return;
     active=null;job.signal?.removeEventListener('abort',job.abort);job.reject(Object.assign(Error(message),{name:'AbortError'}));
     if(window&&!window.isDestroyed())window.webContents.send('reel-local-ai:task',{type:'cancel',requestID:job.requestID});
@@ -134,10 +122,11 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   ipcMain.on('reel-local-ai:complete',(event,value)=>{
     if(!currentWindow(event)||!active||value?.requestID!==active.requestID)return;
     const job=active;active=null;job.signal?.removeEventListener('abort',job.abort);
-    if(value.ok===true&&typeof value.result?.text==='string'&&value.result.text.length<=200_000
-      &&Array.isArray(value.result.chunks)&&value.result.chunks.length<=10_000)job.resolve(value.result);
-    else if(value.ok===true)job.reject(Error('Local transcription returned an invalid response.'));
-    else job.reject(Error(typeof value.error==='string'?value.error.slice(0,500):'Local transcription failed.'));
+    if(value.ok===true&&typeof value.result?.text==='string'
+      &&value.result.text.length<=(job.type==='summarize'?1_000:200_000)
+      &&(job.type==='summarize'||Array.isArray(value.result.chunks)&&value.result.chunks.length<=10_000))job.resolve(value.result);
+    else if(value.ok===true)job.reject(Error('Local AI task returned an invalid response.'));
+    else job.reject(Error(typeof value.error==='string'?value.error.slice(0,500):'Local AI task failed.'));
   });
   ipcMain.on('reel-local-ai:progress',(event,value)=>{
     if(!currentWindow(event))return;
@@ -165,7 +154,7 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   function createWindow(){
     if(window&&!window.isDestroyed())return Promise.resolve(window);
     if(loading)return loading;
-    const createdWindow=new BrowserWindow({width:520,height:300,minWidth:420,minHeight:260,show:false,title:'Local meeting transcription',
+    const createdWindow=new BrowserWindow({width:520,height:300,minWidth:420,minHeight:260,show:false,title:'Local on-device AI',
       webPreferences:{preload:fileURLToPath(new URL('../local-ai/preload.cjs',import.meta.url)),sandbox:true,contextIsolation:true,nodeIntegration:false,
         partition:'persist:reel-local-ai',backgroundThrottling:false}});
     window=createdWindow;
@@ -231,7 +220,7 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     });
     createdWindow.on('closed',()=>{
       if(window===createdWindow){window=null;cancelActive();}
-      rejectRendererStartup(contents,'renderer_closed_before_ready','Local transcription window closed before initialization.');
+      rejectRendererStartup(contents,'renderer_closed_before_ready','Local AI window closed before initialization.');
     });
     let startupResolve,startupReject;
     const startupReady=new Promise((resolve,reject)=>{startupResolve=resolve;startupReject=reject;});
@@ -250,15 +239,16 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       const safeFailure=safeLoadFailure(cause);
       diagnostic('renderer_load_rejected',undefined,undefined,safeFailure.loadErrorCode,safeFailure.loadFailureClass,safeFailure.loadErrorToken);
       if(window===createdWindow){createdWindow.destroy();window=null;}
-      throw Error(`Local transcription window could not start: ${cause.message}`);
+      throw Error(`Local AI window could not start: ${cause.message}`);
     }).finally(()=>{loading=null;});
     return loading;
   }
-  async function transcribe({ownerUserID,id,samples,language='en',signal}={}){
+  async function runLocalTask(type,{ownerUserID,id,samples,language='en',text,signal}={}){
     check(!disposed&&ownerUserID===ownerID()&&ID.test(id??''),'The meeting owner changed.');
-    check(samples instanceof Float32Array&&samples.length>0&&samples.length<=180*16_000,'Meeting audio has an invalid local inference format.');
-    check(!active,'Local transcription is already running.');
-    if(signal?.aborted)throw Object.assign(Error('Local transcription was cancelled.'),{name:'AbortError'});
+    if(type==='transcribe')check(samples instanceof Float32Array&&samples.length>0&&samples.length<=180*16_000,'Meeting audio has an invalid local inference format.');
+    else check(type==='summarize'&&typeof text==='string'&&text.trim().length>0&&text.length<=200_000,'Local summary input is invalid.');
+    check(!active,'Local AI task is already running.');
+    if(signal?.aborted)throw Object.assign(Error('Local AI task was cancelled.'),{name:'AbortError'});
     diagnostic(window&&!window.isDestroyed()?'window_reused':'window_create_requested');
     const view=await createWindow();
     check(ownerUserID===ownerID()&&!disposed,'The meeting owner changed.');
@@ -267,12 +257,14 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       const requestID=randomUUID();
       const abort=()=>cancelActive();
       const hide=()=>{if(!view.isDestroyed())view.hide();};
-      active={requestID,ownerUserID,id,signal,abort,resolve:result=>{hide();resolve(result);},reject:error=>{hide();reject(error);}};
+      active={requestID,ownerUserID,id,type,signal,abort,resolve:result=>{hide();resolve(result);},reject:error=>{hide();reject(error);}};
       signal?.addEventListener('abort',abort,{once:true});
-      view.webContents.send('reel-local-ai:task',{type:'transcribe',requestID,samples,language});
-    diagnostic('task_sent');
+      view.webContents.send('reel-local-ai:task',{type,requestID,...(type==='transcribe'?{samples,language}:{text})});
+      diagnostic('task_sent');
     });
   }
+  const transcribe=options=>runLocalTask('transcribe',options);
+  const summarize=options=>runLocalTask('summarize',options);
   async function probeRenderer(){
     check(!disposed,'Local transcription is unavailable.');
     const view=await createWindow(),requestID=randomUUID();
@@ -289,5 +281,5 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
     for(const probe of pendingProbes.values()){clearTimeout(probe.timer);probe.reject(Error('Local transcription stopped while Reel closed.'));}
     pendingProbes.clear();if(window&&!window.isDestroyed())window.destroy();window=null;
   }
-  return {transcribe,probeRenderer,dispose};
+  return {transcribe,summarize,probeRenderer,dispose};
 }

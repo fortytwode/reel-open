@@ -90,6 +90,24 @@ test('persists transcript, summary, verified receipt and authoritative calendar 
   await f.processor.process({ ownerUserID, id }); assert.equal(f.calls.length, 3);
 });
 
+test('manual recordings are transcribed only on request and stop before summary or delivery', async t => {
+  const f=await fixture(t);
+  f.set({phase:'pending',title:'Saved window',createdAt:'2026-11-10T09:00:00Z',meeting:{manual:true}});
+  assert.deepEqual(await f.processor.resume(),[]);
+  assert.equal(f.calls.length,0,'Pending manual captures are never processed automatically.');
+  assert.throws(()=>f.processor.process({ownerUserID,id}),/Choose a transcription mode/);
+  assert.equal(f.calls.length,0);
+  const result=await f.processor.process({ownerUserID,id,transcriptionMode:'cloud'});
+  assert.equal(result.phase,'completed');
+  assert.equal(result.transcriptOnly,true);
+  assert.equal(result.text,'Full transcript.');
+  assert.equal(result.summary,undefined);
+  assert.equal(result.receipt,undefined);
+  assert.equal(f.calls.length,1);
+  assert.match(f.calls[0].url,/\/transcription$/);
+  assert.equal(f.tokenCount(),1);
+});
+
 test('local mode transcribes locally, saves timestamps, and makes no service requests or cloud fallback', async t=>{
   let observed;
   const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud request is forbidden in local mode.');},
@@ -109,6 +127,24 @@ test('local mode transcribes locally, saves timestamps, and makes no service req
   let wavChunk;for await(const chunk of pcmChunks(f.info)){wavChunk=chunk;break;}
   const decoded=await whisperSamples(wavChunk.audio);
   assert.equal(decoded.length,16000);assert.ok(Math.abs(decoded[1]-f.samples.readInt16LE(2)/32768)<1e-7);
+});
+
+test('local manual transcription needs the signed-in owner but no recap recipient email',async t=>{
+  const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud must not be called.');},
+    localTranscribe:async()=>({text:'A saved window walkthrough transcript with a few concrete steps.',chunks:[],language:'en',engine:'Whisper large-v3-turbo q8'})});
+  f.set({phase:'pending',title:'Saved window',createdAt:'2026-11-10T09:00:00Z',meeting:{manual:true}});
+  f.changeOwner(ownerUserID); // same signed-in owner, with no email claim
+  const result=await f.processor.process({ownerUserID,id,transcriptionMode:'local'});
+  assert.equal(result.phase,'completed');assert.equal(result.localOnly,true);assert.equal(result.transcriptOnly,true);
+  assert.equal(result.receipt,undefined);assert.equal(f.calls.length,0);
+});
+
+test('manual cloud transcription checks the team account before sending audio',async t=>{
+  const f=await fixture(t);
+  f.set({phase:'pending',title:'Saved window',createdAt:'2026-11-10T09:00:00Z',meeting:{manual:true}});
+  f.changeOwner(ownerUserID); // matching signed-in owner, but no eligible team email
+  await assert.rejects(f.processor.process({ownerUserID,id,transcriptionMode:'cloud'}),/team account to process/u);
+  assert.equal(f.calls.length,0,'Unauthorized manual cloud transcription must not upload audio.');
 });
 
 test('empty local transcription completes without inventing a title or summary',async t=>{

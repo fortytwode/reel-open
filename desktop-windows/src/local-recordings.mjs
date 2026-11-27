@@ -11,7 +11,7 @@ const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantCons
   systemAudioConsent: false, meetingReminders: false, localTranscription: false, selection: { useAll: true, ids: [] } });
 function localSummaryMetadata(recording) {
   const processing=recording.processing;
-  if(processing?.localOnly!==true||processing.summaryEngine!=='extractive-local')return null;
+  if(processing?.localOnly!==true||!['extractive-local','flan-t5-small-local','t5-cnn-25k-local'].includes(processing.summaryEngine))return null;
   const plainText=(value,max)=>typeof value==='string'?Array.from(value.replace(/\s+/gu,' ').trim()).slice(0,max).join(''):null;
   const titleSuggestion=plainText(processing.suggestedTitle,90);
   const summary=plainText(processing.summary,700);
@@ -22,17 +22,19 @@ function localSummaryMetadata(recording) {
     .slice(0,8).map(chapter=>({start:Math.round(chapter.start*10)/10,title:plainText(chapter.title,60)}))
     .filter(chapter=>chapter.title);
   if(!titleSuggestion&&!summary&&!chapters.length)return null;
-  return {suggestedTitle:titleSuggestion,summary,chapters};
+  return {suggestedTitle:titleSuggestion,summary,chapters,source:['flan-t5-small-local','t5-cnn-25k-local'].includes(processing.summaryEngine)?'on-device-ai':'extractive'};
 }
 const metadata = recording => {
   const localSummary=localSummaryMetadata(recording);
   return ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
   durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload), shareIncludesTranscript: recording.share.includeTranscript === true } : {}),
+  ...(recording.processing?.meeting?.manual === true ? { manualRecording: true } : {}),
   ...(recording.share?.access ? { shareAccess: { passwordProtected: Boolean(recording.share.access.key), expiresAt: recording.share.access.expiresAt ?? null,
     updatePending: Boolean(recording.share.accessUpdate) } } : {}),
   ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true,
     transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()),
-    transcriptionMode: recording.processing.transcriptionMode === 'local' ? 'local' : 'cloud', localOnly: recording.processing.localOnly === true,
+    transcriptionMode: recording.processing.transcriptionMode ?? (recording.processing.meeting?.manual === true ? null : 'cloud'),
+    localOnly: recording.processing.localOnly === true,
     ...(localSummary?{localSummary}:{}),
     error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
 };
@@ -414,13 +416,13 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     });
   }
   function getSettings(ownerUserID) { return structuredClone(owner(ownerUserID).state.settings); }
-  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription, selection } = {}) {
+  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription, selection, calendarSource } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The settings owner changed');
     check([autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription].every(flag => typeof flag === 'boolean')
       && typeof selection?.useAll === 'boolean' && Array.isArray(selection.ids) && selection.ids.length <= 250
       && selection.ids.every(id => text(id, 1024)), 'Invalid recording settings');
     check(!autoJoin || (participantConsent && systemAudioConsent), 'Automatic recording requires both permissions');
-    const settings = { ownerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription,
+    const settings = { ownerUserID, ...(calendarSource==='outlook'?{calendarSource}:{}), autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription,
       selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)] } };
     const state = await mutate(owner(ownerUserID), state => { state.settings = settings; return state; });
     return structuredClone(state.settings);
@@ -477,7 +479,8 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     const value = owner(ownerUserID), file = path.join(value.dir, `${id}.mp4`);
     const state = await mutate(value, state => {
       const item = state.recordings.find(recording => recording.id === id);
-      check(item?.processing?.meeting && existsSync(file), 'This saved meeting recording is unavailable.');
+      check(item?.processing?.meeting
+        && existsSync(file), 'This saved recording is unavailable.');
       if (item.share) {
         check(item.share.ownerUserID === ownerUserID && item.share.recordingNonce === recordingNonce
           && item.share.shareID === shareID, 'This recording is already bound to its original owner.');

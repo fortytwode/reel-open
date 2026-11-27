@@ -179,3 +179,20 @@ test('default render endpoint rejects raw device information and unexpected resp
     assert.equal(f.child.killed, true);
   }
 });
+
+test('click sampling accepts only normalized selected-window primary-button samples', async () => {
+  const f=fixture();
+  const sampling=f.bridge.samplePrimaryClick('345');
+  const request=f.sent[0];
+  assert.deepEqual(request,{v:1,id:request.id,op:'samplePrimaryClick',hwnd:'345'});
+  f.reply(request,{ok:true,state:'click_sample',x:0.25,y:0.75});
+  assert.deepEqual(await sampling,{x:0.25,y:0.75});
+  const idle=f.bridge.samplePrimaryClick('345');
+  f.reply(f.sent[1],{ok:true,state:'no_click'});
+  assert.equal(await idle,null);
+  await assert.rejects(f.bridge.samplePrimaryClick('screen:0:0'),/selected window/i);
+  const bad=f.bridge.samplePrimaryClick('345');
+  f.reply(f.sent[2],{ok:true,state:'click_sample',x:1.1,y:0.5});
+  await assert.rejects(bad,/invalid response/i);
+  assert.equal(f.child.killed,true);
+});

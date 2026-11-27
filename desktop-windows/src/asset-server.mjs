@@ -22,7 +22,7 @@ export async function startAssetServer({root=fileURLToPath(new URL('../../',impo
   const server=createServer(async(request,response)=>{
     const send=(code,body,type='text/plain; charset=utf-8')=>{
       response.writeHead(code,{'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
-        'Content-Security-Policy':"default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; connect-src 'none'; media-src 'self' blob:; img-src 'self' blob:; frame-ancestors 'none'",
+        'Content-Security-Policy':"default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; connect-src 'none'; media-src 'self' blob:; img-src 'self' blob:" + (request.url === '/' ? ' data:' : '') + "; frame-ancestors 'none'",
         'Cross-Origin-Resource-Policy':'same-origin'});response.end(body);
     };
     if(request.headers.host!==origin?.slice(7)) return send(403,'Unexpected host');

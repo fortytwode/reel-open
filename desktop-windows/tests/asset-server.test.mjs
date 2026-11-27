@@ -92,3 +92,11 @@ test('local inference assets are served from the supplied extracted package root
   assert.equal(response.status,200);
   assert.equal(await response.text(),'packaged-transformers-runtime');
 });
+
+test('setup policy permits the selected thumbnail while capture stays restricted',async t=>{
+  const server=await startAssetServer();t.after(()=>server.close());
+  const setupPolicy=(await fetch(server.origin+'/')).headers.get('Content-Security-Policy');
+  const capturePolicy=(await fetch(server.origin+'/capture/')).headers.get('Content-Security-Policy');
+  assert.match(setupPolicy,/img-src[^;]*data:/);
+  assert.doesNotMatch(capturePolicy,/img-src[^;]*data:/);
+});

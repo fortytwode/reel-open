@@ -59,7 +59,7 @@ const routingKey = (url, start) => {
 };
 
 /** Main-process only: never let an unavailable cloud policy fall back to local Meet or Teams. */
-export async function routeGoogleMeetings({ auth, snapshot, routingURL, fetch: fetcher = globalThis.fetch, signal, pastedLink, now = new Date() } = {}) {
+export async function routeGoogleMeetings({ auth, snapshot, routingURL, fetch: fetcher = globalThis.fetch, signal, pastedLink, localCalendar = false, now = new Date() } = {}) {
   const owner = auth.getProfile();
   const controller = new AbortController();
   const guard = () => {
@@ -67,7 +67,7 @@ export async function routeGoogleMeetings({ auth, snapshot, routingURL, fetch: f
     const current = auth.getProfile();
     if (!owner?.userID || snapshot.ownerUserID !== owner.userID || current?.userID !== owner.userID
       || current?.email !== owner.email || current?.calendarConnected !== owner.calendarConnected
-      || (!pastedLink && current?.calendarConnected !== true))
+      || (!pastedLink && !localCalendar && current?.calendarConnected !== true))
       throw failure('owner', 'The signed-in account changed. Refresh Google Calendar again.');
   };
   const abort = () => controller.abort();

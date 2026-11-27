@@ -16,7 +16,7 @@ const abortError = () => Object.assign(Error('Recording startup was cancelled.')
  * onFailure fires once for a capture that has already returned its handle.
  */
 export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain, store, origin,
-  defaultRenderEndpoint, onFailure = () => {}, onCompleted = () => {}, onSourceEnded = () => { throw Error('Recording source ended without a save handler.'); } } = {}) {
+  defaultRenderEndpoint, samplePrimaryClick, onFailure = () => {}, onCompleted = () => {}, onSourceEnded = () => { throw Error('Recording source ended without a save handler.'); } } = {}) {
   const parsed = new URL(origin);
   check(parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.port
     && parsed.origin === origin, 'A private loopback capture origin is required');
@@ -34,6 +34,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
   function clear(capture) {
     clearTimeout(capture.timer);
     clearTimeout(capture.audioTimer);
+    capture.pauseChange?.reject(Error('Recording ended during pause control.'));
     capture.signal?.removeEventListener('abort', capture.onAbort);
     captures.delete(capture.token);
     if (current === capture) current = null;
@@ -92,6 +93,13 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
           && Number.isInteger(message.segments) && message.segments > 0, 'Unexpected recording completion');
         check(!capture.doneReceived, 'Duplicate recording completion');
         capture.doneReceived = true; capture.done.resolve({ duration: message.duration, segments: message.segments });
+      } else if (message.type === 'pause_changed') {
+        check(typeof message.paused === 'boolean', 'Invalid pause acknowledgement');
+        const change = capture.pauseChange;
+        if (change && change.paused === message.paused && capture.phase === 'recording') {
+          capture.paused = message.paused;
+          change.resolve();
+        }
       } else if (message.type === 'audio_ended') {
         if (capture.phase === 'starting') fail(capture, Error('System audio ended before capture started.'));
         else if (capture.phase === 'recording' && defaultRenderEndpoint) capture.audioEndpoint = null;
@@ -120,10 +128,26 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
           microphone_unavailable: 'The microphone could not be captured. Check Windows microphone permissions or turn off Include my microphone.' };
         const error = Error(reasons[message.reason] ?? 'The meeting recording failed.');
         if (message.reason === 'microphone_unavailable') error.code = message.reason;
+        if (message.reason === 'capture_failed' && ['AbortError', 'NotAllowedError', 'NotFoundError', 'NotReadableError',
+          'OverconstrainedError', 'TypeError', 'UnknownError'].includes(message.errorName)) error.captureErrorName = message.errorName;
         fail(capture, error);
       } else throw Error('Unexpected capture status');
       return { ok: true };
     } catch (error) { fail(capture, error); throw error; }
+  });
+  ipcMain.handle('reel-capture:click', async (event, message) => {
+    const capture = authenticate(event, message);
+    // Media capture begins as soon as the encoders are ready. Waiting for the
+    // first saved fragment here would permanently disable the renderer's poll.
+    const acceptingFrames = capture.ready && (capture.phase === 'starting' || capture.phase === 'recording');
+    check(capture.manual && capture.clickSamplingEnabled && acceptingFrames && !capture.paused && capture.selectedHwnd,
+    'Click indicators are available only during an active manual window recording.');
+    try { return await samplePrimaryClick(capture.selectedHwnd); }
+    catch {
+      capture.clickSamplingEnabled = false;
+      if (capture.window && !capture.window.isDestroyed()) capture.window.webContents.send(COMMAND, { type: 'click-sampling', token: capture.token, enabled: false });
+      return null;
+    }
   });
   ipcMain.handle('reel-capture:packet', async (event, message) => {
     const capture = authenticate(event, message);
@@ -165,15 +189,18 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     } catch (error) { capture.writer.failAudio?.(); throw error; }
   });
   async function initialize(capture, args) {
-    const writer = await store.begin({ ownerUserID: args.ownerUserID, title: args.meeting.title || 'Meeting',
-      createdAt: new Date().toISOString(), meeting: { attendees: args.meeting.attendeeEmails ?? [], calendar: args.meeting.calendar ?? null } });
+    const title = args.manual === true ? args.title : (args.meeting.title || 'Meeting');
+    const writer = await store.begin({ ownerUserID: args.ownerUserID, title,
+      createdAt: new Date().toISOString(), meeting: args.manual === true ? { manual: true }
+        : { attendees: args.meeting.attendeeEmails ?? [], calendar: args.meeting.calendar ?? null } });
     capture.writer = writer;
     if (terminal(capture)) { await writer.abort(); return; }
     const sources = await desktopCapturer.getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 } });
     if (terminal(capture)) return;
     const matches = sources.filter(source => {
       const match = /^window:(\d+):([01])$/.exec(source?.id ?? '');
-      return match && BigInt(match[1]) === BigInt(args.hwnd);
+      return match && BigInt(match[1]) === BigInt(args.hwnd)
+        && (args.manual !== true || String(source.name ?? '') === args.sourceName);
     });
     check(matches.length === 1, 'Expected one exact owned window capture source.');
     const window = capture.window = new BrowserWindow({ width: 400, height: 180, show: false,
@@ -210,18 +237,26 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     await window.loadURL(captureURL);
     capture.audioEndpoint = await readAudioEndpoint();
     if (terminal(capture)) return;
-    contents.send(COMMAND, { type: 'start', token: capture.token, sourceId: matches[0].id, canRefreshAudio: Boolean(defaultRenderEndpoint), microphone: args.microphone });
+    contents.send(COMMAND, { type: 'start', token: capture.token, sourceId: matches[0].id, canRefreshAudio: Boolean(defaultRenderEndpoint),
+      microphone: args.microphone, ...(capture.clickSamplingEnabled ? { selectedHwnd: capture.selectedHwnd } : {}) });
   }
   function start(args = {}) {
     try {
       check(!current, 'A meeting recording is already active.');
-      check(typeof args.hwnd === 'string' && /^[1-9]\d{0,19}$/.test(args.hwnd) && Number.isSafeInteger(args.pid) && args.pid > 0
-        && typeof args.ownerUserID === 'string' && args.ownerUserID.length > 0 && args.meeting && typeof args.meeting === 'object'
+      check(typeof args.hwnd === 'string' && /^[1-9]\d{0,19}$/.test(args.hwnd)
+        && (args.manual === true ? args.pid === undefined && args.meeting?.manual === true && typeof args.title === 'string'
+          && args.title.trim().length > 0 && args.title.length <= 160 && typeof args.sourceName === 'string'
+          && args.sourceName.length <= 1024 : Number.isSafeInteger(args.pid) && args.pid > 0
+          && args.meeting && typeof args.meeting === 'object')
+        && typeof args.ownerUserID === 'string' && args.ownerUserID.length > 0
         && args.systemAudio === true && typeof args.microphone === 'boolean' && args.signal
+        && (args.highlightClicks === undefined || typeof args.highlightClicks === 'boolean')
         && typeof args.signal.addEventListener === 'function', 'Invalid meeting capture request');
       if (args.signal.aborted) throw abortError();
       const token = randomBytes(16).toString('hex'), handle = Object.freeze({ id: token });
-      const capture = { ownerUserID: args.ownerUserID, token, handle, phase: 'starting', signal: args.signal, window: null, writer: null,
+      const capture = { manual: args.manual === true, selectedHwnd: args.manual === true ? args.hwnd : null,
+        clickSamplingEnabled: args.manual === true && args.highlightClicks !== false && typeof samplePrimaryClick === 'function', paused: false,
+        ownerUserID: args.ownerUserID, token, handle, phase: 'starting', signal: args.signal, window: null, writer: null,
         started: deferred(), done: deferred(), failed: deferred(), ready: false, init: false, index: 0,
         audioRequest: 0, pendingPackets: 0, pendingBytes: 0, packets: Promise.resolve(), returned: false };
       // done may reject before stop() is called; the start promise remains owned by the caller.
@@ -237,12 +272,24 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
       return capture.started.promise;
     } catch (error) { return Promise.reject(error); }
   }
+  async function setPaused(handle, paused) {
+    const capture = handles.get(handle);
+    check(capture?.manual && capture.phase === 'recording' && !capture.pauseChange, 'Cannot change pause state.');
+    if (paused) capture.paused = true;
+    const change = capture.pauseChange = { ...deferred(), paused };
+    const timer = setTimeout(() => change.reject(Error('The recorder did not confirm the pause control.')), 5000);
+    try {
+      capture.window.webContents.send(COMMAND, { type: paused ? 'pause' : 'resume', token: capture.token });
+      await change.promise;
+    } finally { clearTimeout(timer); capture.pauseChange = null; }
+  }
   function stop(handle) {
     const capture = handle && handles.get(handle);
     if (!capture) return Promise.reject(Error('Unknown recording handle.'));
     if (capture.stopPromise) return capture.stopPromise;
     if (capture.failure) return Promise.reject(capture.failure);
     capture.phase = 'stopping';
+    capture.pauseChange?.reject(Error('Recording is being saved.'));
     clearTimeout(capture.audioTimer);
     capture.timer = setTimeout(() => fail(capture, Error('Recording save timed out.')), DEADLINE_MS);
     capture.timer.unref?.();
@@ -263,5 +310,5 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     capture.stopPromise = Promise.race([finish, capture.failed.promise]);
     return capture.stopPromise;
   }
-  return { start, stop };
+  return { start, stop, setPaused };
 }

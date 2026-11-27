@@ -9,7 +9,7 @@
 import { AudioBatch } from "./audio.js?v=20261126-audio-gap";
 import { Muxer, StreamTarget } from "../vendor/mp4-muxer.mjs";
 import { SegmentSplitter, parseInit, fragmentDuration } from "./fmp4.js";
-import { PauseClock, SEGMENT_INTERVAL, drawAnnotations, drawSharedFrame } from "./core.js?v=20261126-drawing";
+import { PauseClock, SEGMENT_INTERVAL, drawAnnotations, drawClickRings, drawSharedFrame } from "./core.js?v=20261127-click-rings";
 
 let S = null;
 let incoming = Promise.resolve();
@@ -34,6 +34,7 @@ async function handleMessage(m) {
     else if (m.type === "begin") begin(m);
     else if (m.type === "pause") {
       closeAudioInterval(m.audioTime);
+      S.freezeScreenFrame = m.freezeScreenFrame === true;
       S.clock.pause(now());
       postTick(m.pauseID);
     }
@@ -44,6 +45,11 @@ async function handleMessage(m) {
     }
     else if (m.type === "layout") { S.composite = m.composite; S.bubbleScale = m.bubbleScale ?? S.bubbleScale; }
     else if (m.type === "annotations" && S) S.annotations = m.strokes;
+    else if (m.type === "click" && S?.running && !S.stopped && Number.isFinite(m.x) && Number.isFinite(m.y)
+      && Number.isFinite(m.time) && m.x >= 0 && m.x <= 1 && m.y >= 0 && m.y <= 1) {
+      S.clicks.push({ x: m.x, y: m.y, time: m.time });
+      if (S.clicks.length > 32) S.clicks.splice(0, S.clicks.length - 32);
+    }
     else if (m.type === "stop") await stop(m);
     else if (m.type === "cancel") cancel();
   } catch (err) {
@@ -73,7 +79,7 @@ async function pickAudioConfig(sampleRate, numberOfChannels) {
 async function start(m) {
   const { width, height, fps, bitrate } = m;
   S = {
-    width, height, fps, layout: m.layout, composite: !!m.composite, bubbleScale: m.bubbleScale || 1, region: m.region, annotations: [],
+    width, height, fps, layout: m.layout, composite: !!m.composite, bubbleScale: m.bubbleScale || 1, region: m.region, annotations: [], clicks: [],
     clock: new PauseClock(), frames: 0, nextKeyFrame: 0, audioFrames: 0,
     audioChannels: m.audioChannels, audioSampleRate: m.audioSampleRate, audioBatch: m.audio ? new AudioBatch(4096, m.audioChannels) : null,
     timestampAudio: !!m.audio && Number.isFinite(m.audioClockTime),
@@ -148,6 +154,12 @@ async function readFrames(stream, which) {
     let r;
     try { r = await reader.read(); } catch { break; }
     if (r.done) break;
+    // A static Windows source may emit nothing after resume. Keep its last
+    // visible frame, and release any images received during the pause.
+    if (which === "screen" && S.freezeScreenFrame && S.clock.isPaused) {
+      r.value.close();
+      continue;
+    }
     const old = S.latest[which];
     S.latest[which] = r.value;
     if (old) old.close();
@@ -291,7 +303,7 @@ function tick() {
     S.waitingForVideoOutput = false;
     S.venc.flush().catch((error) => { if (!S.stopped) fail("Video encoder: " + error.message); });
   }
-  const wall = now();
+  const wall = (performance.timeOrigin + performance.now()) / 1000;
   if (wall - (S.lastTick || 0) >= 0.25) {
     S.lastTick = wall;
     postTick();
@@ -330,6 +342,9 @@ function draw() {
     ctx.beginPath(); ctx.arc(x + d / 2, y + d / 2, d / 2 - ctx.lineWidth / 2, 0, Math.PI * 2); ctx.stroke();
   }
   drawAnnotations(ctx, S.annotations, W, H);
+  const wall = (performance.timeOrigin + performance.now()) / 1000;
+  drawClickRings(ctx, S.clicks, wall, W, H, f);
+  S.clicks = S.clicks.filter(click => wall - click.time < 0.5);
 }
 
 /** Fills (x, y, w, h) with the frame, cropped to cover; mirrored like a selfie view. */

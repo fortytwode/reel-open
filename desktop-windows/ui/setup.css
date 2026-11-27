@@ -22,3 +22,5 @@
 .transcript-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .transcript-heading h2 { overflow-wrap: anywhere; }
 .transcript-content { max-height: calc(82vh - 100px); overflow: auto; margin: 0; color: var(--ink); font: 13px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.manual-window-card{margin:0 0 16px}.manual-window-card .card-heading{margin-bottom:10px}.manual-window-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0}.manual-window-controls label{font-size:12px;font-weight:650}.manual-window-controls select{min-width:260px;flex:1;border:1px solid #e4ddda;border-radius:7px;padding:10px;background:white;color:var(--ink);font:inherit}
+.capture-window-preview{display:block;max-width:min(360px,100%);max-height:220px;object-fit:contain;object-position:left center;border:1px solid var(--line);border-radius:8px;background:#f4f0ee}
