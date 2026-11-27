@@ -30,14 +30,14 @@ const taskQuery = name => command('read scheduled task through Task Scheduler CO
   `if ($sid -notmatch '^S-1-') { $account=$principal; if ($account -notmatch '\\\\') { $account=$env:USERDOMAIN+'\\'+$account }; `+
   `$sid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
   `$current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; `+
-  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current;args=$t.Definition.Actions.Item(1).Arguments;start=$t.Definition.Triggers.Item(1).StartBoundary} | ConvertTo-Json -Compress`);
+  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current} | ConvertTo-Json -Compress`);
 const taskSecurity = name => {
   console.log('Windows reminder smoke: read task security from registered task XML.');
   const started=Date.now(), schtasks=path.join(process.env.SystemRoot || 'C:\\Windows','System32','schtasks.exe');
   const xml=execFileSync(schtasks,['/Query','/TN',name,'/XML'],{encoding:'utf8',windowsHide:true,timeout:15_000});
-  const readTag=tag=>xml.match(new RegExp(`<${tag}>([^<]+)</${tag}>`,'i'))?.[1] ?? '<missing>';
+  const readTag=tag=>xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`,'i'))?.[1] ?? '<missing>';
   console.log(`Windows reminder smoke: task XML query completed in ${Date.now()-started} ms.`);
-  return {logonType:readTag('LogonType'),runLevel:readTag('RunLevel')};
+  return {logonType:readTag('LogonType'),runLevel:readTag('RunLevel'),args:readTag('Arguments'),start:readTag('StartBoundary')};
 };
 const taskCount = () => Number(command('count this scope’s scheduled tasks through Task Scheduler COM',
   `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $f=$s.GetFolder([string][char]92); $count=0; `+
@@ -62,18 +62,18 @@ try {
   // Task Scheduler omits the optional XML RunLevel element when LUA is the default; an elevated task serializes HighestAvailable.
   assert.ok(['<missing>','LeastPrivilege'].includes(security.runLevel),
     'The task uses least privilege; Task Scheduler omits RunLevel from its XML when its least-privilege default applies.');
-  assert.match(info.args, new RegExp(token));
-  assert.equal(Date.parse(info.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
-  assert.ok(!info.args.includes('private calendar title') && !info.args.includes('private-event-id'));
+  assert.match(security.args, new RegExp(token),'The registered task action carries its opaque meeting token.');
+  assert.equal(Date.parse(security.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
+  assert.ok(!security.args.includes('private calendar title') && !security.args.includes('private-event-id'));
   const retryEnd=new Date(Date.now()+60_000).toISOString();
   const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
   manager.sync([{token,start:alreadyDueRetry,retry:true,end:retryEnd}]);
   console.log('Windows reminder smoke: retry task update returned.');
   const retried=taskQuery(taskName);
+  const retriedSecurity=taskSecurity(taskName);
   assert.equal(retried.name,taskName,'Rearming replaces the existing one-shot task instead of leaving a consumed task.');
-  info=retried;
-  assert.ok(Date.parse(info.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
-  assert.ok(Date.parse(info.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
+  assert.ok(Date.parse(retriedSecurity.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
+  assert.ok(Date.parse(retriedSecurity.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
   command('run registered task through Task Scheduler COM',
     `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${info.name}'); $null=$t.Run($null)`);
   const deadline = Date.now()+15_000;
