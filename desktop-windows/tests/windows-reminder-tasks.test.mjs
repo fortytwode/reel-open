@@ -112,6 +112,11 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.ok(workflow.indexOf('Snapshot runner and verify reminders before model inference')
     < workflow.indexOf('Verify packaged local Whisper inference and offline cache'),
     'Task Scheduler smoke runs before high-memory model inference on the Windows package runner.');
+  assert.ok(workflow.indexOf('Parse reminder helper with Windows PowerShell 5.1')
+    < workflow.indexOf('Install pinned local Whisper browser runtime'),
+    'Windows PowerShell 5.1 parses the helper before installs, packaging and model inference.');
+  assert.match(workflow,/\[System\.Management\.Automation\.Language\.Parser\]::ParseFile\([\s\S]*\$parseErrors\.Count/,
+    'The early PowerShell preflight uses the PowerShell AST parser and fails on syntax errors.');
   assert.ok(workflow.includes('Snapshot runner after packaged local Whisper inference')
     && workflow.includes('Sanitized Whisper cache directories remaining')
     && workflow.includes('Remove-Item -LiteralPath $cache.FullName -Recurse -Force'),

@@ -29,6 +29,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Parse reminder helper with Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $parserCommand = @'
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile('desktop-windows/src/windows-reminder-tasks.ps1', [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) {
+            foreach ($parseError in $parseErrors) { [Console]::Error.WriteLine($parseError.Message) }
+            exit 1
+          }
+          '@
+          & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command $parserCommand
+          if ($LASTEXITCODE -ne 0) { throw 'The reminder helper failed Windows PowerShell 5.1 parsing.' }
       - name: Install pinned local Whisper browser runtime
         run: npm ci --ignore-scripts --prefix desktop-windows
       - run: npm --prefix desktop-windows test

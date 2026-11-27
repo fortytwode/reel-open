@@ -213,8 +213,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     if ($launchMode -isnot [string]) { throw 'Invalid reminder launch configuration.' }
     if ($launchMode -eq 'portable') {
         $allowedKeys = @('mode', 'executable', 'arguments', 'diagnosticsFile', 'waitForChildExit')
-        if (-not $launch.Contains('executable') -or -not $launch.Contains('arguments')
-            -or $launch['executable'] -isnot [string] -or $launch['arguments'] -isnot [System.Array]) {
+        if (-not $launch.Contains('executable') -or -not $launch.Contains('arguments') -or $launch['executable'] -isnot [string] -or $launch['arguments'] -isnot [System.Array]) {
             throw 'Invalid reminder launch configuration.'
         }
         foreach ($argument in $launch['arguments']) {
