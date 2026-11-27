@@ -73,6 +73,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The Windows smoke reports the real registered action result and verifies its current-user interactive principal.');
   assert.match(smoke,/\$null=\$t\.Run\(\$null\)[\s\S]*lastTaskResult,0/,
     'The Windows smoke runs the registered task and checks its action result.');
+  assert.match(smoke,/const deadline = Date\.now\(\)\+15_000[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
+    'Trigger delivery is required alongside a completed, non-running scheduler action within a bounded wait.');
   assert.match(smoke,/receiver\.mjs[\s\S]*process\.argv\.find\(argument => \/\^--meeting-reminder-trigger=/,
     'The portable task smoke receiver accepts the same argv trigger flag as the Electron app.');
   assert.doesNotMatch(smoke,/\b(?:info|retried|delayedTask)\.name\b/,

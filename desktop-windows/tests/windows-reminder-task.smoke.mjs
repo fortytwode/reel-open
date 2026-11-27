@@ -126,19 +126,27 @@ try {
   command('run registered task through Task Scheduler COM',
     `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${taskName}'); $null=$t.Run($null)`);
   const immediateStatus=taskStatus(taskName);
+  let finalStatus=immediateStatus;
   console.log(`Sanitized scheduler action status immediately after Run: ${JSON.stringify(immediateStatus)}`);
   const deadline = Date.now()+15_000;
-  while (Date.now()<deadline) {
+  const hasDeliveredTrigger = () => {
     if (mode==='portable') {
-      try { if (readFileSync(path.join(stateRoot,'delivered.txt'),'utf8')===`--meeting-reminder-trigger=${token}`) { completed=true;break; } }
-      catch { /* The task may not have launched yet. */ }
+      try { return readFileSync(path.join(stateRoot,'delivered.txt'),'utf8')===`--meeting-reminder-trigger=${token}`; }
+      catch { return false; }
     }
-    if (mode==='msix' && manager.pending().includes(token)) { completed=true;break; }
-    await new Promise(resolve=>setTimeout(resolve,100));
+    return manager.pending().includes(token);
+  };
+  while (Date.now()<deadline) {
+    completed=hasDeliveredTrigger();
+    if (completed && finalStatus.state!==4 && finalStatus.lastTaskResult!==267009) break;
+    await new Promise(resolve=>setTimeout(resolve,300));
+    finalStatus=taskStatus(taskName);
   }
-  const finalStatus=taskStatus(taskName);
+  completed=hasDeliveredTrigger();
   console.log(`Sanitized scheduler action status after trigger wait: ${JSON.stringify(finalStatus)}`);
   assert.equal(completed,true,'The registered task runs its trigger action.');
+  assert.notEqual(finalStatus.state,4,'Task Scheduler reports that the action has left the Running state.');
+  assert.notEqual(finalStatus.lastTaskResult,267009,'The Scheduler running status has been replaced by the completed action result.');
   assert.equal(finalStatus.lastTaskResult,0,'The task trigger helper exits successfully in the current interactive session.');
   assert.equal(finalStatus.principalMatchesCurrent,true,'The registered trigger action principal is the current Windows user.');
   assert.equal(finalStatus.logonType,3,'The registered trigger action uses an interactive token.');
