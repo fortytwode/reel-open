@@ -46,6 +46,7 @@ export async function startAssetServer({root=fileURLToPath(new URL('../../',impo
     ['/ort-wasm-simd-threaded.mjs','desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs'],
     ['/ort-wasm-simd-threaded.wasm','desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'],
     ['/whisper-languages.js','web/reel/whisper-languages.js'],
+    ['/model-pinning.mjs','desktop-windows/local-ai/model-pinning.mjs'],
     ['/transformers.LICENSE','desktop-windows/local-ai/TRANSFORMERS-LICENSE'],
   ].map(([path,file])=>[path,asset(file)]));
   let localAIOrigin;

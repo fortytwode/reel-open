@@ -24,7 +24,7 @@ test('serves only fixed app assets and rejects mutations, host spoofing and trav
   });
   assert.equal(status,403);
   assert.notEqual(server.localAIOrigin,server.origin);
-  for(const asset of ['/','/renderer.mjs','/worker.mjs','/transformers.bundle.mjs','/ort-wasm-simd-threaded.mjs','/ort-wasm-simd-threaded.wasm','/whisper-languages.js','/transformers.LICENSE']) {
+  for(const asset of ['/','/renderer.mjs','/worker.mjs','/transformers.bundle.mjs','/model-pinning.mjs','/ort-wasm-simd-threaded.mjs','/ort-wasm-simd-threaded.wasm','/whisper-languages.js','/transformers.LICENSE']) {
     const result=await fetch(server.localAIOrigin+asset);
     assert.equal(result.status,200,asset);
     const policy=result.headers.get('content-security-policy');

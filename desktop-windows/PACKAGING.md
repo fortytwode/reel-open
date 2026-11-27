@@ -44,7 +44,9 @@ opt in to local transcription download the pinned model on first use; it remains
 in the Companion's separate model-cache profile for offline retries.
 The isolated inference window allows Hub requests only for known files at the
 pinned revision, then CDN redirects only for the two exact quantized ONNX blob
-paths and their fixed signed-query key set. Hugging Face issues expiring opaque
+paths and their fixed signed-query key set. Transformers.js v4.3.2's progress
+metadata probe defaults to `main`; the worker rewrites only that model's exact
+known file paths to the pinned commit before issuing the request. Hugging Face issues expiring opaque
 CDN signatures that Reel cannot independently validate. Instead, it records the
 exact signed URL returned by an HTTPS redirect from the pinned Hub request and
 permits only that URL; modified signatures or extra query parameters are

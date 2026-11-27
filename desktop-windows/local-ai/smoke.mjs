@@ -6,7 +6,8 @@ import path from 'node:path';
 import {app,BrowserWindow,ipcMain} from 'electron';
 import {startAssetServer} from '../src/asset-server.mjs';
 import {whisperSamples} from '../src/meeting-processing.mjs';
-import {createLocalWhisper} from '../src/local-whisper.mjs';
+import {createLocalWhisper,localAIRequestAllowed} from '../src/local-whisper.mjs';
+import {MODEL_ID,MODEL_PATH,withPinnedModelFetch} from './model-pinning.mjs';
 import {withSmokeTimeout} from '../src/smoke-timeout.mjs';
 
 const audioPath=process.env.REEL_WHISPER_SMOKE_AUDIO;
@@ -107,6 +108,31 @@ async function transcribeWithBounds(name,samples,totalTimeoutMs){
     clearTimeout(phaseTimer);clearTimeout(totalTimer);onPhase=()=>{};
   }
 }
+async function probePinnedModelRequest(){
+  const contents=windows.at(-1).webContents;
+  const seen=await contents.executeJavaScript(`(async()=>{
+    const {withPinnedModelFetch}=await import('/model-pinning.mjs');
+    const seen=[];
+    const intercepted=withPinnedModelFetch(async(input,init)=>{
+      const request=new Request(input,init);
+      seen.push({url:request.url,method:request.method,range:request.headers.get('range')});
+      return new Response('',{status:200});
+    });
+    await intercepted('https://huggingface.co/${MODEL_ID}/resolve/main/config.json',{method:'GET',headers:{Range:'bytes=0-0'}});
+    await intercepted('https://example.com/collect?probe=private',{method:'GET'});
+    await intercepted('https://huggingface.co/${MODEL_ID}/resolve/main/config.json?probe=private',{method:'GET'});
+    return seen;
+  })()`);
+  assert.equal(seen.length,3);
+  assert.equal(seen[0].url,`https://huggingface.co${MODEL_PATH}config.json`);
+  assert.equal(seen[0].method,'GET');assert.equal(seen[0].range,'bytes=0-0');
+  assert.equal(seen[1].url,'https://example.com/collect?probe=private');
+  assert.equal(seen[2].url,`https://huggingface.co/${MODEL_ID}/resolve/main/config.json?probe=private`);
+  assert.equal(localAIRequestAllowed(seen[0].url,'GET',assets.localAIOrigin),true);
+  assert.equal(localAIRequestAllowed(seen[1].url,'GET',assets.localAIOrigin),false);
+  assert.equal(localAIRequestAllowed(seen[2].url,'GET',assets.localAIOrigin),false);
+  log('renderer_model_pin_probe_passed');
+}
 async function runSmoke(){
   try{
     log('smoke_start');
@@ -121,6 +147,7 @@ async function runSmoke(){
       allowRemoteModelRequest:()=>{if(modelNetworkBlocked){blockedRemoteRequests++;return false;}return true;}});
     if(startupOnly){
       await bounded('renderer_task_handoff_probe',()=>local.probeRenderer(),20_000);
+      await bounded('renderer_model_pin_probe',probePinnedModelRequest,10_000);
       log('smoke_startup_preflight_passed');
       return;
     }

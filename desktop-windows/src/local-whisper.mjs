@@ -1,14 +1,9 @@
 import {randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {MODEL_ID,MODEL_PATH,MODEL_FILES,MODEL_REVISION} from '../local-ai/model-pinning.mjs';
 
 const ID=/^[0-9a-f]{32}$/;
 const check=(condition,message)=>{if(!condition)throw Error(message);};
-const MODEL_REVISION='360ebcde2559d60bb474678be3c1de9ef347d01a';
-const MODEL_ID='onnx-community/whisper-large-v3-turbo';
-const MODEL_PATH=`/${MODEL_ID}/resolve/${MODEL_REVISION}/`;
-const MODEL_FILES=new Set(['added_tokens.json','config.json','generation_config.json','merges.txt','normalizer.json',
-  'onnx/decoder_model_merged_quantized.onnx','onnx/encoder_model_quantized.onnx','preprocessor_config.json',
-  'quantize_config.json','special_tokens_map.json','tokenizer.json','tokenizer_config.json','vocab.json']);
 const MODEL_CDN_HOSTS=new Set(['us.aws.cdn.hf.co','us.gcp.cdn.hf.co']);
 const MODEL_CDN_PATHS=new Set([
   '/xet-bridge-us/66fbc1d373c445b0a3a6acfe/8a2747c40e92b6856b7aaccfff90d0342d9fbd4aa095c7d1dc637da59662cdce',

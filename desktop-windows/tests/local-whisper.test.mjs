@@ -4,6 +4,8 @@ import {EventEmitter} from 'node:events';
 import {fileURLToPath} from 'node:url';
 import {startAssetServer} from '../src/asset-server.mjs';
 import {createLocalWhisper,localAIRequestAllowed,localAIRequestClass} from '../src/local-whisper.mjs';
+import {MODEL_ID,MODEL_PATH,MODEL_REVISION,pinModelRequest,withPinnedModelFetch} from '../local-ai/model-pinning.mjs';
+import {buildResourcePaths} from '../node_modules/@huggingface/transformers/src/utils/hub.js';
 
 class FakeWebContents extends EventEmitter {
   constructor(){super();this.url='';this.messages=[];this.session={setPermissionRequestHandler(){},setPermissionCheckHandler(){},setDevicePermissionHandler(){},webRequest:{onBeforeRequest(_filter,handler){this.before=handler;},onHeadersReceived(_filter,handler){this.headers=handler;}}};this.mainFrame={get url(){return this.owner.url;},owner:this};}
@@ -51,6 +53,35 @@ test('local inference network access is restricted to the pinned model and GET r
   assert.equal(localAIRequestClass('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/private.wav','GET',origin),'hub_model_other_path');
   assert.equal(localAIRequestClass('https://example.com/collect','OPTIONS',origin),'method_options');
   assert.equal(localAIRequestClass('https://example.com/collect','GET',origin),'other_remote_host');
+});
+
+test('known Transformers.js main-revision metadata probe is pinned and preserves Range',async()=>{
+  const seen=[];
+  const fetch=withPinnedModelFetch(async(input,init)=>{
+    const request=new Request(input,init);
+    seen.push({url:request.url,method:request.method,range:request.headers.get('range')});
+    return new Response('',{status:200});
+  });
+  const mainURL=`https://huggingface.co/${MODEL_ID}/resolve/main/config.json`;
+  assert.equal(buildResourcePaths(MODEL_ID,'config.json').remoteURL,mainURL,
+    'The pinned Transformers.js v4 pipeline metadata probe currently defaults to main.');
+  await fetch(mainURL,{method:'GET',headers:{Range:'bytes=0-0'}});
+  const arbitrary=`https://example.com/collect?meeting=private`;
+  await fetch(arbitrary,{method:'GET'});
+  const queryURL=`https://huggingface.co/${MODEL_ID}/resolve/main/config.json?meeting=private`;
+  await fetch(queryURL,{method:'GET'});
+  const expected=`https://huggingface.co${MODEL_PATH}config.json`;
+  assert.equal(seen[0].url,expected);
+  assert.equal(seen[0].method,'GET');
+  assert.equal(seen[0].range,'bytes=0-0');
+  assert.equal(seen[1].url,arbitrary);
+  assert.equal(seen[2].url,queryURL);
+  assert.equal(localAIRequestAllowed(seen[0].url,'GET','http://127.0.0.1:4321'),true);
+  assert.equal(localAIRequestAllowed(seen[1].url,'GET','http://127.0.0.1:4321'),false);
+  assert.equal(localAIRequestAllowed(seen[2].url,'GET','http://127.0.0.1:4321'),false);
+  const privateURL=`${mainURL.slice(0,mainURL.lastIndexOf('/'))}/private.wav`;
+  assert.equal(pinModelRequest(privateURL,{method:'GET'}),privateURL);
+  assert.equal(MODEL_REVISION,'360ebcde2559d60bb474678be3c1de9ef347d01a');
 });
 
 test('network denial smoke diagnostics expose only a fixed request category',async()=>{

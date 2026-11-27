@@ -8,6 +8,7 @@ try{
   const paths=[
     ['/',1],['/renderer.mjs',100],['/preload.cjs',100],['/worker.mjs',500],
     ['/transformers.bundle.mjs',400_000],['/ort-wasm-simd-threaded.mjs',1_000],
+    ['/model-pinning.mjs',100],
     ['/ort-wasm-simd-threaded.wasm',1_000_000],['/whisper-languages.js',1_000],
   ];
   let packagedWorker='';
