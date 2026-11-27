@@ -172,6 +172,12 @@ try {
     if ($Sync) { Sync-ReminderTasks $PlanPath $Scope $Diagnostic }
     else { Deliver-ReminderTrigger $Token $Scope }
 } catch {
+    if ($Diagnostic) {
+        $exception = $_.Exception
+        $hresult = '0x{0:X8}' -f [uint32]$exception.HResult
+        [Console]::Error.WriteLine(('Reminder task diagnostic: exception={0}; hresult={1}; line={2}' -f
+            $exception.GetType().FullName, $hresult, $_.InvocationInfo.ScriptLineNumber))
+    }
     [Console]::Error.WriteLine('Reel meeting reminder task failed.')
     exit 1
 }
