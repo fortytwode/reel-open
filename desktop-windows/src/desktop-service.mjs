@@ -66,7 +66,7 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
@@ -274,6 +274,13 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         requireOwner(ownerUserID);
         if (!file) throw Error('Recording is unavailable.');
         await openRecording(file);
+      } else if(name==='revealRecording') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof revealRecording !== 'function') throw Error('Recording is unavailable.');
+        const file=store.getRecordingPath({ownerUserID,id:payload.id});
+        requireOwner(ownerUserID);
+        if (!file) throw Error('Recording is unavailable.');
+        revealRecording(file);
       } else if(name==='copyTranscript') {
         const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof copyText !== 'function') throw Error('Transcript is unavailable.');

@@ -87,7 +87,7 @@ function fixture({ realCoordinator = false, discover, shareMeeting, reminderSche
       refresh: async () => { calls.push('refresh'); }, tick: async () => { calls.push('tick'); },
       cancel: async () => { calls.push('cancel'); }, dispose: async () => { calls.push('dispose'); } }; return coordinator; },
     openExternal: async url => calls.push(url), openProduct: async name => calls.push(name),
-    openRecordings: async owner => calls.push(owner), openRecording: async file => calls.push(['play', file]), copyText: text => calls.push(['copy', text]), shareMeeting, exportTrimmedCopy,
+    openRecordings: async owner => calls.push(owner), openRecording: async file => calls.push(['play', file]), revealRecording: file => calls.push(['reveal', file]), copyText: text => calls.push(['copy', text]), shareMeeting, exportTrimmedCopy,
     onState: value => snapshots.push(value) });
   return { service, auth, store, coordinator, settings, recordings, calls, writes, snapshots, coordinatorOptions: () => coordinatorOptions,
     changeOwner(value) { profile = value; notify(); }, status(value) { status = value; statusNotify(value); } };
@@ -97,12 +97,16 @@ test('local playback and transcript copy are restricted to the active recording 
   f.store.getRecordingPath = request => request.ownerUserID === 'owner-a' && request.id === id ? '/private/meeting.mp4' : null;
   f.store.getProcessing = request => request.ownerUserID === 'owner-a' && request.id === id ? { transcriptComplete: true, text: 'Meeting transcript' } : null;
   await f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' });
+  await f.service.action('revealRecording', { id, expectedOwnerUserID: 'owner-a' });
   await f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-a' });
-  assert.deepEqual(f.calls.filter(value => Array.isArray(value)), [['play', '/private/meeting.mp4'], ['copy', 'Meeting transcript']]);
+  assert.deepEqual(f.calls.filter(value => Array.isArray(value)), [['play', '/private/meeting.mp4'], ['reveal', '/private/meeting.mp4'], ['copy', 'Meeting transcript']]);
   await assert.rejects(f.service.action('playRecording', { id, expectedOwnerUserID: 'another-owner' }));
+  await assert.rejects(f.service.action('revealRecording', { id, expectedOwnerUserID: 'another-owner' }));
   await assert.rejects(f.service.action('copyTranscript', { id: '../escape', expectedOwnerUserID: 'owner-a' }));
+  await assert.rejects(f.service.action('revealRecording', { id: '../escape', expectedOwnerUserID: 'owner-a' }));
   f.changeOwner({ userID: 'owner-b', email: 'b@northwind.example', calendarConnected: true });
   await assert.rejects(f.service.action('playRecording', { id, expectedOwnerUserID: 'owner-a' }));
+  await assert.rejects(f.service.action('revealRecording', { id, expectedOwnerUserID: 'owner-a' }));
   await assert.rejects(f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-b' }));
 });
 
