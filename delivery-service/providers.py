@@ -6,6 +6,8 @@ from contextvars import ContextVar
 from datetime import datetime
 from urllib.parse import urlsplit
 
+import requests
+
 from reel_organization import is_internal_email
 
 if __package__:
@@ -278,14 +280,56 @@ def gmail_pages(method, field, **kwargs):
         seen.add(cursor)
 
 
+class ResendRecaps:
+    def __init__(self, sender, api_key):
+        if not is_internal_email(sender) or not api_key:
+            raise ProviderPending('Resend requires an internal sender and a sending key')
+        self.sender = sender
+
+        self._headers = {'Authorization': 'Bearer ' + api_key}
+
+    def send(self, meeting_id, recipients, message):
+        parts = {part.get_content_subtype(): part.get_payload(decode=True).decode(part.get_content_charset())
+                 for part in message.get_payload()}
+        payload = {
+            'from': f'Reel Notetaker <{self.sender}>',
+            'to': recipients,
+            'subject': message['Subject'],
+            'text': parts['plain'],
+            'html': parts['html'],
+        }
+        _check()
+        try:
+            response = requests.post(
+                'https://api.resend.com/emails',
+                headers={**self._headers, 'Idempotency-Key': f'reel/recap/{meeting_id}'},
+                json=payload, timeout=20, allow_redirects=False,
+            )
+            if not 200 <= response.status_code < 300:
+                raise ProviderPending(f'Resend could not confirm the recap (HTTP {response.status_code})')
+            result = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise ProviderPending('Resend recap was not confirmed') from exc
+        _check()
+        message_id = result.get('id') if isinstance(result, dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            raise ProviderPending('Resend recap has no provider message ID')
+        return {'state': 'sent', 'provider_message_id': message_id}
+
+
 class CanonicalProviders:
     def __init__(self):
         import distribution
         self.canonical = distribution
         self.gmail = None
-        self._configured_recap_sender = os.getenv('REEL_RECAP_SENDER', '').strip().lower()
-        if self._configured_recap_sender and not is_internal_email(self._configured_recap_sender):
+        sender = os.getenv('REEL_RECAP_SENDER', '').strip().lower()
+        transport = os.getenv('REEL_RECAP_TRANSPORT', 'gmail').strip().lower()
+        if transport not in ('gmail', 'resend'):
+            raise ProviderPending('Unknown recap email transport')
+        if sender and not is_internal_email(sender):
             raise ProviderPending('REEL_RECAP_SENDER must be an internal email address')
+        self.resend_recaps = ResendRecaps(sender, os.getenv('REEL_RESEND_API_KEY', '').strip()) if transport == 'resend' else None
+        self._configured_recap_sender = sender if transport == 'gmail' else ''
         install_bounded_transports()
 
     @property

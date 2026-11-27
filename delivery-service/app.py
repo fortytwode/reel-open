@@ -1582,13 +1582,14 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
         with providers.context(fence):
             state = fence()
             email_ledger = ('email_started_at', 'email', 'email_create_uncertain', 'email_retry_after')
-            sender = getattr(providers, 'recap_sender', None)
-            if sender and (state.get('email') or {}).get('state') != 'sent':
-                previous_sender = state.get('email_sender')
-                if previous_sender is None and any(field in state for field in email_ledger):
-                    previous_sender = providers.legacy_recap_sender
-                if previous_sender is not None and previous_sender != sender:
-                    raise ProviderPending('Unresolved recap belongs to a different Gmail mailbox')
+            resend = getattr(providers, 'resend_recaps', None)
+            transport = 'resend' if resend else 'gmail'
+            sender = resend.sender if resend else getattr(providers, 'recap_sender', None)
+            if sender and (state.get('email') or {}).get('state') != 'sent' and any(field in state for field in email_ledger):
+                previous_transport = state.get('email_transport', 'gmail')
+                previous_sender = state.get('email_sender') or providers.legacy_recap_sender
+                if previous_transport != transport or previous_sender != sender:
+                    raise ProviderPending('Unresolved recap belongs to a different email outbox')
             if (retry_slack and slack is not None and 'slack_retry_eligible' not in state
                     and not any(field in state for field in email_ledger)):
                 state = save(slack_retry_eligible=True)
@@ -1741,7 +1742,7 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
             if email.get('state') != 'sent':
                 email_updates = {}
                 if sender and 'email_sender' not in state:
-                    email_updates['email_sender'] = sender
+                    email_updates.update(email_sender=sender, email_transport=transport)
                 if 'email_started_at' not in state:
                     # A fixed lower bound survives arbitrarily late recovery.
                     # Older unresolved receipts lack it, so scan all dates.
@@ -1749,36 +1750,44 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                                                         or state.get('email_retry_after') else clock())
                 if email_updates:
                     state = save(**email_updates)
-                existing = providers.find_email(meeting_id, since=state['email_started_at'])
-                fence()
-                if existing and existing.get('state') == 'sent':
-                    email = existing
+                if resend:
+                    # The timestamp predates the first request. Leave room for the request
+                    # timeout before the provider's 24-hour idempotency window expires.
+                    if clock() >= state['email_started_at'] + 24 * 60 * 60 - 60:
+                        raise ProviderPending('Resend recap requires reconciliation before retry')
+                    message = recap_message(recipients, title, payload['summary'], notes_url, providers.message_id(meeting_id))
+                    email = resend.send(meeting_id, recipients, message)
                 else:
-                    draft_id = (existing or {}).get('provider_draft_id') or email.get('provider_draft_id')
-                    if not draft_id:
-                        if state.get('email_create_uncertain', bool(state.get('email_retry_after'))):
-                            raise Conflict('Gmail draft result remains uncertain; retry to reconcile the original draft')
-                        save(email_retry_after=clock() + 60, email_create_uncertain=True)
-                        attempted.add('email_retry_after')
-                        message = recap_message(recipients, title, payload['summary'], notes_url, providers.message_id(meeting_id))
-                        try:
-                            draft_id = providers.create_draft(meeting_id, message)
-                        except ProviderRejected:
-                            save(email_create_uncertain=False, email_retry_after=0)
-                            attempted.discard('email_retry_after')
-                            raise
+                    existing = providers.find_email(meeting_id, since=state['email_started_at'])
+                    fence()
+                    if existing and existing.get('state') == 'sent':
+                        email = existing
+                    else:
+                        draft_id = (existing or {}).get('provider_draft_id') or email.get('provider_draft_id')
                         if not draft_id:
-                            raise ProviderPending('Gmail draft result is uncertain; retry to reconcile')
-                        state = save(email={'state':'draft', 'provider_draft_id':draft_id}, email_create_uncertain=False)
-                    if (state.get('email') or {}).get('provider_draft_id') != draft_id:
-                        state = save(email={'state':'draft', 'provider_draft_id':draft_id}, email_create_uncertain=False)
-                    fence()
-                    # Never replace this draft after a send ambiguity. Its stable
-                    # ID either sends once or is gone; reconcile the sent mail.
-                    email = providers.send_draft(meeting_id, draft_id)
-                    fence()
-                    if not email or email.get('state') != 'sent' or not email.get('provider_message_id'):
-                        raise ProviderPending('Gmail send result is uncertain; retry to reconcile')
+                            if state.get('email_create_uncertain', bool(state.get('email_retry_after'))):
+                                raise Conflict('Gmail draft result remains uncertain; retry to reconcile the original draft')
+                            save(email_retry_after=clock() + 60, email_create_uncertain=True)
+                            attempted.add('email_retry_after')
+                            message = recap_message(recipients, title, payload['summary'], notes_url, providers.message_id(meeting_id))
+                            try:
+                                draft_id = providers.create_draft(meeting_id, message)
+                            except ProviderRejected:
+                                save(email_create_uncertain=False, email_retry_after=0)
+                                attempted.discard('email_retry_after')
+                                raise
+                            if not draft_id:
+                                raise ProviderPending('Gmail draft result is uncertain; retry to reconcile')
+                            state = save(email={'state':'draft', 'provider_draft_id':draft_id}, email_create_uncertain=False)
+                        if (state.get('email') or {}).get('provider_draft_id') != draft_id:
+                            state = save(email={'state':'draft', 'provider_draft_id':draft_id}, email_create_uncertain=False)
+                        fence()
+                        # Never replace this draft after a send ambiguity. Its stable
+                        # ID either sends once or is gone; reconcile the sent mail.
+                        email = providers.send_draft(meeting_id, draft_id)
+                        fence()
+                        if not email or email.get('state') != 'sent' or not email.get('provider_message_id'):
+                            raise ProviderPending('Gmail send result is uncertain; retry to reconcile')
                 state = save(email=email, email_create_uncertain=False)
             if submit_followups and route['kind'] == 'client' and calendar_context and state.get('followup_actions') and not state.get('followups_accepted'):
                 if not email.get('provider_message_id'):
