@@ -69,7 +69,7 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 export function createDesktopService({auth,org,store,discover,discoverOutlook,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,manualCapture,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
-  let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
+  let meetingStartPending=false, pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
   const activeShares=new Set();
   const activeRecordingOperations=new Map();
   const activeExports=new Map();
@@ -200,9 +200,8 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
           || (payload.includeMicrophone!==undefined && typeof payload.includeMicrophone!=='boolean'))
           throw Error('Invalid window recording request.');
         const meetingPhase=coordinator?.getState()?.phase ?? 'idle';
-        if (['joining','capturing','saving','close_required','retry_wait'].includes(meetingPhase))
+        if (meetingStartPending || ['joining','capturing','saving','close_required','retry_wait'].includes(meetingPhase))
           throw Error('Finish the current meeting recording before starting a window recording.');
-        if (settings().autoJoin) throw Error('Turn off automatic joining before starting a manual window recording.');
         await manualCapture.start({ownerUserID:requireOwner(payload.expectedOwnerUserID),sourceID:payload.sourceID,
           consentConfirmed:payload.consentConfirmed,includeMicrophone:payload.includeMicrophone ?? false});
       } else {
@@ -270,7 +269,6 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
         const next={ownerUserID:id,...(source==='outlook'?{calendarSource:source}:{}),autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
           participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,meetingReminders:payload.meetingReminders,localTranscription:payload.localTranscription,
           selection:{useAll:payload.selection.useAll,ids:[...new Set(payload.selection.ids)]}};
-        if (manualCapture?.isActive() && next.autoJoin) throw Error('Stop the manual window recording before enabling automatic joining.');
         if(next.autoJoin && !calendarAvailable(auth.getProfile())) throw Error('Connect Google Calendar first.');
         const revision=++settingsRevision, changed=JSON.stringify(settings())!==JSON.stringify(next);
         let cancellation=Promise.resolve();
@@ -314,8 +312,12 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
           throw Error('Your account or recording settings changed. Refresh and try again.');
         if (manualCapture?.isActive()) throw Error('Stop the manual window recording before starting a meeting recording.');
         cache=null;
-        await coordinator.joinMeeting({ ownerUserID:id, microphone:payload.includeMicrophone === true,
-          ...(pasted ? { url:payload.url, participantsConfirmed:payload.participantsConfirmed } : { meetingId:payload.id }) });
+        if (meetingStartPending) throw Error('A meeting join is already in progress.');
+        meetingStartPending=true;
+        try {
+          await coordinator.joinMeeting({ ownerUserID:id, microphone:payload.includeMicrophone === true,
+            ...(pasted ? { url:payload.url, participantsConfirmed:payload.participantsConfirmed } : { meetingId:payload.id }) });
+        } finally { meetingStartPending=false; }
       } else if(name==='cancelJoin') {
         const id=requireOwner(payload?.expectedOwnerUserID ?? null);
         await coordinator.cancelJoin(id);

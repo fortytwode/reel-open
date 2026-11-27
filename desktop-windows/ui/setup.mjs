@@ -141,7 +141,6 @@ function renderDashboard() {
 function renderManualWindowCapture(signedIn) {
   const capture=snapshot?.manualCapture ?? {phase:'idle'}, select=byId('captureWindowSelect');
   const choices=capture.sources ?? [], previous=select.value;
-  const autoJoinBlocked=snapshot?.settings?.autoJoin===true;
   byId('manualWindowCapture').classList.toggle('hidden',!signedIn);
   clear(select);
   const placeholder=node('option','','Choose an open window'); placeholder.value=''; select.append(placeholder);
@@ -158,7 +157,7 @@ function renderManualWindowCapture(signedIn) {
   byId('resumeWindowRecording').classList.toggle('hidden',capture.phase!=='paused');
   byId('captureWindowConsent').disabled=!signedIn || busy;
   byId('startWindowRecording').classList.toggle('hidden',['capturing','paused','saving'].includes(capture.phase));
-  byId('startWindowRecording').disabled=!signedIn || busy || autoJoinBlocked || !select.value || !byId('captureWindowConsent').checked;
+  byId('startWindowRecording').disabled=!signedIn || busy || !select.value || !byId('captureWindowConsent').checked;
   byId('stopWindowRecording').classList.toggle('hidden',!['starting','capturing','paused','saving'].includes(capture.phase));
   byId('stopWindowRecording').disabled=!['starting','capturing','paused'].includes(capture.phase);
   byId('manualCaptureStatus').textContent=capture.phase==='capturing' ? `Recording “${capture.title}” locally.`
@@ -167,7 +166,7 @@ function renderManualWindowCapture(signedIn) {
     : capture.phase==='saving' ? 'Saving the recording…'
     : capture.phase==='completed' ? 'Window recording saved locally.'
     : capture.phase==='cancelled' ? 'Window recording cancelled.'
-    : autoJoinBlocked ? 'Turn off automatic joining before starting a manual window recording.'
+
     : capture.message ?? (choices.length ? `${choices.length} open windows available.` : 'Refresh windows to choose a source.');
 }
 function phaseLabel(phase) { return ({capturing:'Recording your meeting',cancelled:'Meeting join cancelled',saving:'Saving your recording',close_required:'Close the meeting window manually to continue',completed:'Recording saved',joining:'Joining a meeting',scheduled:'Ready for your next meeting',calendar_unavailable:'Calendar needs attention',save_failed:'Could not save recording',failed:'Meeting could not start',retry_wait:'Retrying meeting connection',idle:'Waiting for your next meeting'})[phase] ?? 'Reel status'; }

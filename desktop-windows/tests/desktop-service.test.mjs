@@ -165,12 +165,13 @@ test('manual capture cannot overlap auto-join or an explicit meeting join',async
   const settings={ownerUserID:'owner-a',expectedOwnerUserID:'owner-a',autoJoin:true,participantConsent:true,systemAudioConsent:true,localTranscription:false,
     meetingReminders:false,selection:{useAll:true,ids:[]}};
   await f.service.action('saveSettings',settings);
-  await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/turn off automatic joining/i);
-  assert.equal(starts,0);
-  await f.service.action('saveSettings',{...settings,autoJoin:false});
   await f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true});
   await assert.rejects(f.service.action('joinMeetingLink',{expectedOwnerUserID:'owner-a',url:'https://meet.google.com/aaa-bbbb-ccc',participantsConfirmed:true}),/stop the manual window recording/i);
-  await assert.rejects(f.service.action('saveSettings',settings),/stop the manual window recording/i);
+  assert.equal(starts,1);
+  assert.equal(f.coordinatorOptions().getSettings().autoJoin,false);
+  assert.equal(f.service.state().settings.autoJoin,true);
+  await f.service.action('stopWindowRecording',{expectedOwnerUserID:'owner-a'});
+  assert.equal(f.coordinatorOptions().getSettings().autoJoin,true);
 });
 
 test('shutdown awaits a manual capture save even after its active handle is cleared',async()=>{
