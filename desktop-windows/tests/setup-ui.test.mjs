@@ -17,13 +17,14 @@ test('the dashboard can retry a saved recording through the restricted preload',
   await api.action('shareRecording', recording);
   await api.action('updateMeetingShareAccess', recording);
   await api.action('playRecording', recording);
+  await api.action('revealRecording', recording);
   await api.action('copyTranscript', recording);
   await api.action('renameRecording', recording);
   await api.action('deleteRecording', recording);
   await api.action('exportTrimmedCopy', recording);
   await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
   assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording],
-    ['reel-desktop:action', 'updateMeetingShareAccess', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'copyTranscript', recording],
+    ['reel-desktop:action', 'updateMeetingShareAccess', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'revealRecording', recording], ['reel-desktop:action', 'copyTranscript', recording],
     ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording],
     ['reel-desktop:action', 'exportTrimmedCopy', recording]]);
 });
@@ -161,17 +162,20 @@ test('local playback and transcript controls pass only the selected ID and owner
   await new Promise(resolve=>setImmediate(resolve));
   const entries=getElement('recordingsList').children;
   const play=entries[0].children[0].children.find(child=>child.dataset.action==='playRecording');
+  const reveal=entries[0].children[0].children.find(child=>child.dataset.action==='revealRecording');
   const copy=entries[1].children[0].children.find(child=>child.dataset.action==='copyTranscript');
   const trimControls=entries[0].children[0].children.find(child=>child.className==='trim-export-controls');
   const trim=trimControls?.children.at(-1);
-  assert.ok(play); assert.ok(copy);
+  assert.ok(play); assert.ok(reveal); assert.ok(copy);
   onClick({target:{closest:selector=>selector==='[data-action]'?play:null}});
+  onClick({target:{closest:selector=>selector==='[data-action]'?reveal:null}});
   onClick({target:{closest:selector=>selector==='[data-action]'?copy:null}});
   trimControls.children[1].children[0].value='2'; trimControls.children[2].children[0].value='7';
   trim.listeners.click();
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(JSON.parse(JSON.stringify(calls)),[
     ['playRecording',{id:'old',expectedOwnerUserID:'owner-a'}],
+    ['revealRecording',{id:'old',expectedOwnerUserID:'owner-a'}],
     ['copyTranscript',{id:'meeting',expectedOwnerUserID:'owner-a'}],
     ['exportTrimmedCopy',{id:'old',expectedOwnerUserID:'owner-a',start:2,end:7}]]);
 });

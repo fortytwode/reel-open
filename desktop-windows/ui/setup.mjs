@@ -181,6 +181,8 @@ function renderRecordings() {
     left.append(node('div','recording-meta',[formatDate(recording.createdAt),duration].filter(Boolean).join(' · ')));
     const play=node('button','','Play recording');
     play.type='button'; play.dataset.action='playRecording'; play.dataset.recordingId=recording.id; left.append(play);
+    const reveal=node('button','','Show in Explorer');
+    reveal.type='button'; reveal.dataset.action='revealRecording'; reveal.dataset.recordingId=recording.id; left.append(reveal);
     const trimControls=node('div','trim-export-controls');
     const startLabel=node('label','trim-export-setting','Start (seconds)');
     const start=node('input'); start.type='number'; start.min='0'; start.max=String(recording.durationSeconds); start.step='0.001'; start.value='0'; start.setAttribute('aria-label',`Trim start for ${recording.title || 'recording'}`); startLabel.append(start);
@@ -379,7 +381,7 @@ document.addEventListener('click', event=>{
   const target=event.target.closest('[data-action]'); if(!target || target.disabled) return;
   const action=target.dataset.action;
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
-  if(action==='playRecording'||action==='copyTranscript') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if(action==='playRecording'||action==='revealRecording'||action==='copyTranscript') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='setCompanionStartup') { perform(action,{enabled:target.dataset.enabled==='true'}); return; }
   if (action === 'joinMeeting') {
     const id = target.dataset.meetingId;

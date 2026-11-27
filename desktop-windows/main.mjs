@@ -190,6 +190,7 @@ async function run() {
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
     openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },
+    revealRecording:file=>shell.showItemInFolder(file),
     exportTrimmedCopy:async({file,title,start,end})=>{
       const safeTitle=String(title || 'Meeting').replace(/[<>:"/\\|?*\u0000-\u001f]/g,' ').replace(/[. ]+$/,'').slice(0,120) || 'Meeting';
       const result=await dialog.showSaveDialog(window,{title:'Export trimmed meeting copy',buttonLabel:'Export copy',
