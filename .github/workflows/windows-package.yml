@@ -114,6 +114,34 @@ jobs:
           $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
           ./desktop-windows/build-portable.ps1 -ElectronDist desktop-windows/probe/node_modules/electron/dist -ExpectedArchitecture $env:REEL_ARCH -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials -Version "$version-ci" -OutputZip $zip
           Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP/demo-package"
+      - name: Prepare an unmodified synthetic manual-capture QA kit
+        shell: pwsh
+        env:
+          REEL_ARCH: ${{ matrix.arch }}
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'manual-capture-qa-kit'
+          New-Item -ItemType Directory -Force -Path $kit | Out-Null
+          $packageName = "Reel-Windows-$env:REEL_ARCH.zip"
+          $packagePath = Join-Path $kit $packageName
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'demo.zip') -Destination $packagePath
+          Copy-Item -LiteralPath 'desktop-windows/probe/fixture.html' -Destination $kit
+          $manifest = [ordered]@{
+            schemaVersion = 1
+            purpose = 'Manual window capture smoke with synthetic screen pixels and a 440 Hz audio tone.'
+            sourceCommit = '${{ github.sha }}'
+            architecture = $env:REEL_ARCH
+            package = @{ file = $packageName; sha256 = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant() }
+            fixture = @{ file = 'fixture.html'; screen = 'magenta/green checkerboard'; toneHz = 440; microphone = $false; meetingProvider = $false }
+            packageConfiguration = 'CI demo OAuth placeholder only. No organization credential file is included; replace desktop-windows/config.json locally with the authorized installed credentials before sign-in.'
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $kit 'manifest.json') -Encoding utf8NoBOM
+      - name: Upload the synthetic manual-capture QA kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-capture-qa-kit-${{ matrix.arch }}
+          path: ${{ runner.temp }}/manual-capture-qa-kit
+          if-no-files-found: error
+          retention-days: 7
       - name: Snapshot runner and verify reminders before model inference
         shell: pwsh
         run: |

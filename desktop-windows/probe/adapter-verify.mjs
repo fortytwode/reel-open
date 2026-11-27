@@ -16,7 +16,13 @@ assert.equal(result.recorderWindowHidden, true);
 if (manualPicker) {
   assert.match(result.pickerChoiceID, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i);
   assert.match(result.pickerTitle, /REEL CAPTURE FIXTURE 9C41/);
-  assert.equal(result.recording.processing, undefined, 'Manual captures must not create a processing or transcript job.');
+  assert.equal(result.recording.processing?.phase, 'pending', 'Manual captures must wait for an explicit transcription request.');
+  assert.equal(result.recording.processing?.meeting?.manual, true);
+  assert.equal(result.recording.processing?.transcriptComplete, undefined);
+  assert.equal(result.recording.processing?.receipt, undefined, 'Manual captures must not create or deliver a recap.');
+  assert.equal(result.recording.processing?.localOnly, undefined, 'Manual captures must remain unprocessed until the user asks.');
+  assert.equal(result.recording.share, undefined, 'Manual captures must not be shared automatically.');
+  assert.ok(Number.isSafeInteger(result.recording.processing?.audioFrames) && result.recording.processing.audioFrames > 0);
 } else {
   assert.match(result.sourceId, /^window:\d+:[01]$/);
   assert.equal(result.sourceId.split(':')[1], result.hwnd);
@@ -25,9 +31,13 @@ assert.equal(result.recording?.playable, true);
 assert.ok(result.recording.durationSeconds >= 12 && result.segmentCount >= 3);
 const ownerHash = createHash('sha256').update('synthetic-probe').digest('hex');
 const recordingPath = path.resolve(result.recording.path);
+const sidecarTones = {};
 if (manualPicker) {
-  await assert.rejects(readFile(recordingPath.replace(/\.mp4$/, '.pcm')), { code: 'ENOENT' },
-    'Manual captures must not create a transcription sidecar.');
+  const pcmPath = recordingPath.replace(/\.mp4$/, '.pcm');
+  const sidecar = await readFile(pcmPath);
+  assert.equal(sidecar.length, result.recording.processing.audioFrames * 2,
+    'Manual capture must retain all recovered mono PCM frames locally.');
+  assert.equal(sidecar.length, result.pcmBytes);
 } else {
   const sidecar = await readFile(recordingPath.replace(/\.mp4$/, '.pcm'));
   assert.ok(sidecar.length >= 12 * 16000 * 2 && sidecar.length <= (result.outputSwitched ? result.recording.durationSeconds + 3 : 20) * 16000 * 2, 'Expected complete 16 kHz mono PCM sidecar');
@@ -86,17 +96,20 @@ function tone(seconds, frequency = 440, input = recordingPath) {
   return { rms, frequency, bestSignal, best550, ...(frequency === 440 ? { best440: bestSignal } : {}) };
 }
 const lateTime = result.outputSwitched ? Number(probe.format.duration) - 3 : 10;
-if (result.outputSwitched) {
+if (manualPicker) {
+  const pcmPath = recordingPath.replace(/\.mp4$/, '.pcm');
+  sidecarTones.early = tone(1, 440, pcmPath);
+  sidecarTones.late = tone(10, 440, pcmPath);
+} else if (result.outputSwitched) {
   assert.ok(Number.isFinite(result.changeAfterStartSeconds) && result.changeAfterStartSeconds >= 5);
   assert.ok(lateTime > result.changeAfterStartSeconds, 'Late sample must follow the Windows output change');
 }
-const sidecarTones = {};
 if (result.outputSwitched) {
   const pcmPath = recordingPath.replace(/\.mp4$/, '.pcm');
   sidecarTones.early = tone(1, 440, pcmPath);
   sidecarTones.late = tone(lateTime, 660, pcmPath);
 }
-console.log(JSON.stringify({ ...(result.outputSwitched ? { sidecarTones } : {}), verified: true,
+console.log(JSON.stringify({ ...(manualPicker || result.outputSwitched ? { sidecarTones } : {}), verified: true,
   ...(manualPicker ? { pickerTitle: result.pickerTitle, pickerChoiceID: result.pickerChoiceID } : { sourceId: result.sourceId }), fragments: result.segmentCount,
   bytes: result.bytes, durationSeconds: result.recording.durationSeconds,
   earlyPixels: pixels(2), latePixels: pixels(lateTime + 1), earlyTone: tone(1), lateTone: tone(lateTime, result.outputSwitched ? 660 : 440) }));
