@@ -53,6 +53,20 @@ jobs:
           '@
           & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command $parserCommand
           if ($LASTEXITCODE -ne 0) { throw 'The reminder helper failed Windows PowerShell 5.1 parsing.' }
+          $helperPath = (Resolve-Path 'desktop-windows/src/windows-reminder-tasks.ps1').Path
+          $diagnosticsPath = [IO.Path]::Combine($env:RUNNER_TEMP, 'reminder-config-preflight.log')
+          $configs = @(
+            @{ name='portable-production'; value=[ordered]@{ mode='portable'; executable='C:\Program Files\Reel.exe'; arguments=@() } },
+            @{ name='portable-diagnostic'; value=[ordered]@{ mode='portable'; executable='C:\Program Files\Reel.exe'; arguments=@('--probe'); diagnosticsFile=$diagnosticsPath; waitForChildExit=$true } },
+            @{ name='msix-production'; value=[ordered]@{ mode='msix' } },
+            @{ name='msix-diagnostic'; value=[ordered]@{ mode='msix'; diagnosticsFile=$diagnosticsPath } }
+          )
+          foreach ($config in $configs) {
+            $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ($config.name + '.json'))
+            [IO.File]::WriteAllText($configPath, ($config.value | ConvertTo-Json -Compress -Depth 4))
+            & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helperPath -ValidateLaunchConfig -LaunchConfigPath $configPath -Diagnostic
+            if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell 5.1 rejected reminder config $($config.name)." }
+          }
       - name: Install pinned local Whisper browser runtime
         run: npm ci --ignore-scripts --prefix desktop-windows
       - run: npm --prefix desktop-windows test

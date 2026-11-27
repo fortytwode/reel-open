@@ -86,26 +86,29 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.match(taskHelper,/scope-identity-before[\s\S]*WindowsIdentity\]::GetCurrent\(\)\.User\.Value[\s\S]*scope-identity-after[\s\S]*scope-hash-before[\s\S]*ComputeHash[\s\S]*scope-hash-after/,
     'Smoke diagnostics bracket account identity and scope hashing so a slow call can be isolated.');
   const deliveryFunction=taskHelper.match(/function Deliver-ReminderTrigger[\s\S]*?(?=\n}\n\ntry)/)?.[0] ?? '';
+  const launchParserFunction=taskHelper.match(/function Read-ReminderLaunchConfiguration[\s\S]*?(?=\n}\n\nfunction ConvertTo-UtcDateTimeOffset)/)?.[0] ?? '';
   assert.match(deliveryFunction,/\[IO\.Path\]::Combine\(\$PSScriptRoot, 'reminder-launch\.json'\)[\s\S]*\[IO\.File\]::Exists\(\$launchPath\)[\s\S]*\[IO\.File\]::ReadAllText\(\$launchPath\)[\s\S]*launch-config-parse-after/,
     'The trigger path uses .NET path/file APIs and separately marks config existence, read and JSON parse.');
-  assert.match(deliveryFunction,/System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*MaxJsonLength = 65536[\s\S]*RecursionLimit = 8[\s\S]*DeserializeObject\(\$launchJson\)/,
+  assert.match(launchParserFunction,/System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*MaxJsonLength = 65536[\s\S]*RecursionLimit = 8[\s\S]*DeserializeObject\(\$json\)/,
     'Cold-path JSON parsing uses the bounded .NET Framework parser available to Windows PowerShell 5.1.');
-  assert.match(deliveryFunction,/\$launch -isnot \[System\.Collections\.IDictionary\][\s\S]*\$allowedKeys[\s\S]*-notin \$allowedKeys[\s\S]*diagnosticsFile/,
+  assert.match(launchParserFunction,/\$launch -isnot \[System\.Collections\.Generic\.Dictionary\[string,object\]\][\s\S]*ContainsKey\('mode'\)[\s\S]*\$allowedKeys[\s\S]*-notin \$allowedKeys[\s\S]*diagnosticsFile/,
     'The launch parser requires an object and rejects fields outside the portable/MSIX schema.');
-  assert.doesNotMatch(deliveryFunction,/ConvertFrom-Json/,
+  assert.doesNotMatch(launchParserFunction,/\.Contains\(/,
+    'The generic dictionary is queried with its public ContainsKey API rather than the IDictionary overload.');
+  assert.doesNotMatch(launchParserFunction,/ConvertFrom-Json/,
     'Scheduled delivery does not invoke the slow PowerShell JSON cmdlet on the ARM cold path.');
-  assert.match(deliveryFunction,/launch-parser-assembly-load-before[\s\S]*Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*launch-parser-assembly-load-after[\s\S]*launch-parser-create-before[\s\S]*launch-parser-create-after[\s\S]*launch-json-deserialize-before[\s\S]*launch-json-deserialize-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,
+  assert.match(launchParserFunction,/launch-parser-assembly-load-before[\s\S]*Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*launch-parser-assembly-load-after[\s\S]*launch-parser-create-before[\s\S]*launch-parser-create-after[\s\S]*launch-json-deserialize-before[\s\S]*launch-json-deserialize-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,
     'The scheduled smoke can distinguish parser assembly load, serializer construction, JSON parse and schema validation.');
-  assert.ok(deliveryFunction.includes("'launch-json-deserialize-error:'")
-    && deliveryFunction.includes('$exception.GetType().FullName')
-    && deliveryFunction.includes('$exception.HResult')
-    && deliveryFunction.includes('ScriptLineNumber'),
+  assert.ok(launchParserFunction.includes("'launch-json-deserialize-error:'")
+    && launchParserFunction.includes('$exception.GetType().FullName')
+    && launchParserFunction.includes('$exception.HResult')
+    && launchParserFunction.includes('ScriptLineNumber'),
     'Parser errors retain only safe exception type, HRESULT and source line for diagnostics.');
   assert.doesNotMatch(deliveryFunction,/\b(?:Join-Path|Test-Path|Get-Content|New-Item|Remove-Item)\b/,
     'Scheduled delivery does not invoke filesystem provider cmdlets on its cold PowerShell path.');
-  assert.match(taskHelper,/\$launch\.Contains\('diagnosticsFile'\)/,
+  assert.match(taskHelper,/\$launch\.ContainsKey\('diagnosticsFile'\)/,
     'Production launch configuration safely omits the smoke-only diagnostic field under StrictMode.');
-  assert.match(taskHelper,/\$launch\.Contains\('waitForChildExit'\)/,
+  assert.match(taskHelper,/\$launch\.ContainsKey\('waitForChildExit'\)/,
     'Production portable launch configuration safely omits the smoke-only child wait flag under StrictMode.');
   assert.match(smoke,/Object\.hasOwn\(productionLaunchConfig,'diagnosticsFile'\),false[\s\S]*Object\.hasOwn\(productionLaunchConfig,'waitForChildExit'\),false[\s\S]*productionLaunchConfig[\s\S]*The production launch configuration delivers the reminder trigger[\s\S]*productionStatus\.lastTaskResult,0/,
     'Windows CI runs and verifies an actual reminder task with production launch JSON and absent optional diagnostic properties.');
@@ -126,6 +129,10 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The early PowerShell preflight uses the PowerShell AST parser and fails on syntax errors.');
   assert.match(workflow,/Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*DeserializeObject[\s\S]*\$portable[\s\S]*\$msix/,
     'The early Windows PowerShell 5.1 preflight verifies the parser assembly and both production launch JSON shapes.');
+  assert.match(workflow,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*-ValidateLaunchConfig -LaunchConfigPath[\s\S]*Windows PowerShell 5\.1 rejected reminder config/,
+    'Windows PowerShell 5.1 invokes the full helper validator for production and diagnostic portable/MSIX JSON.');
+  assert.match(workflow,/portable-production[\s\S]*portable-diagnostic[\s\S]*msix-production[\s\S]*msix-diagnostic[\s\S]*-ValidateLaunchConfig -LaunchConfigPath[\s\S]*Windows PowerShell 5\.1 rejected reminder config/,
+    'Windows PowerShell 5.1 invokes the helper’s full schema validator for all four production/diagnostic launch shapes.');
   assert.ok(workflow.includes('Snapshot runner after packaged local Whisper inference')
     && workflow.includes('Sanitized Whisper cache directories remaining')
     && workflow.includes('Remove-Item -LiteralPath $cache.FullName -Recurse -Force'),

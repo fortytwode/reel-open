@@ -5,7 +5,9 @@ param(
     [string]$PlanPath,
     [string]$Token,
     [string]$Scope,
-    [string]$DiagnosticPath
+    [string]$DiagnosticPath,
+    [switch]$ValidateLaunchConfig,
+    [string]$LaunchConfigPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -46,6 +48,56 @@ function Write-TaskDiagnostic([string]$filePath, [string]$phase) {
             [IO.File]::AppendAllText($fullPath, $phase + [Environment]::NewLine, [Text.Encoding]::ASCII)
         }
     } catch { }
+}
+
+function Read-ReminderLaunchConfiguration([string]$json, [string]$diagnosticsPath) {
+    if ($json.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
+    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-assembly-load-before'
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-assembly-load-after'
+    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-create-before'
+    $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
+    Write-TaskDiagnostic $diagnosticsPath 'launch-parser-create-after'
+    $serializer.MaxJsonLength = 65536
+    $serializer.RecursionLimit = 8
+    Write-TaskDiagnostic $diagnosticsPath 'launch-json-deserialize-before'
+    try { $launch = $serializer.DeserializeObject($json) }
+    catch {
+        $exception = $_.Exception
+        $hresult = '0x' + ([int]$exception.HResult).ToString('X8')
+        Write-TaskDiagnostic $diagnosticsPath ('launch-json-deserialize-error:' + $exception.GetType().FullName + ':' + $hresult + ':line=' + [int]$_.InvocationInfo.ScriptLineNumber)
+        throw 'Invalid reminder launch configuration.'
+    }
+    Write-TaskDiagnostic $diagnosticsPath 'launch-json-deserialize-after'
+    Write-TaskDiagnostic $diagnosticsPath 'launch-config-schema-check-before'
+    if ($launch -isnot [System.Collections.Generic.Dictionary[string,object]] -or -not $launch.ContainsKey('mode')) {
+        throw 'Invalid reminder launch configuration.'
+    }
+    $launchMode = $launch['mode']
+    if ($launchMode -isnot [string]) { throw 'Invalid reminder launch configuration.' }
+    if ($launchMode -eq 'portable') {
+        $allowedKeys = @('mode', 'executable', 'arguments', 'diagnosticsFile', 'waitForChildExit')
+        if (-not $launch.ContainsKey('executable') -or -not $launch.ContainsKey('arguments') -or $launch['executable'] -isnot [string] -or $launch['arguments'] -isnot [System.Array]) {
+            throw 'Invalid reminder launch configuration.'
+        }
+        foreach ($argument in $launch['arguments']) {
+            if ($argument -isnot [string] -or $argument.Length -gt 2048) { throw 'Invalid reminder launch configuration.' }
+        }
+        if ($launch['arguments'].Length -gt 16) { throw 'Invalid reminder launch configuration.' }
+        if ($launch.ContainsKey('waitForChildExit') -and $launch['waitForChildExit'] -isnot [bool]) {
+            throw 'Invalid reminder launch configuration.'
+        }
+    } elseif ($launchMode -eq 'msix') {
+        $allowedKeys = @('mode', 'diagnosticsFile')
+    } else { throw 'Invalid reminder launch configuration.' }
+    foreach ($key in $launch.Keys) {
+        if ($key -notin $allowedKeys) { throw 'Invalid reminder launch configuration.' }
+    }
+    if ($launch.ContainsKey('diagnosticsFile') -and $launch['diagnosticsFile'] -isnot [string]) {
+        throw 'Invalid reminder launch configuration.'
+    }
+    Write-TaskDiagnostic $diagnosticsPath 'launch-config-schema-check-after'
+    return $launch
 }
 
 function ConvertTo-UtcDateTimeOffset($value) {
@@ -200,54 +252,10 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     $launchJson = [IO.File]::ReadAllText($launchPath)
     Write-TaskDiagnostic $DiagnosticPath ('launch-config-read-after:' + $launchJson.Length)
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-before'
-    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-assembly-load-before'
-    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-assembly-load-after'
-    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-create-before'
-    $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
-    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-create-after'
-    $serializer.MaxJsonLength = 65536
-    $serializer.RecursionLimit = 8
-    Write-TaskDiagnostic $DiagnosticPath 'launch-json-deserialize-before'
-    try { $launch = $serializer.DeserializeObject($launchJson) }
-    catch {
-        $exception = $_.Exception
-        $hresult = '0x' + ([int]$exception.HResult).ToString('X8')
-        Write-TaskDiagnostic $DiagnosticPath ('launch-json-deserialize-error:' + $exception.GetType().FullName + ':' + $hresult + ':line=' + [int]$_.InvocationInfo.ScriptLineNumber)
-        throw 'Invalid reminder launch configuration.'
-    }
-    Write-TaskDiagnostic $DiagnosticPath 'launch-json-deserialize-after'
-    Write-TaskDiagnostic $DiagnosticPath 'launch-config-schema-check-before'
-    if ($launch -isnot [System.Collections.IDictionary] -or -not $launch.Contains('mode')) {
-        throw 'Invalid reminder launch configuration.'
-    }
-    $launchMode = $launch['mode']
-    if ($launchMode -isnot [string]) { throw 'Invalid reminder launch configuration.' }
-    if ($launchMode -eq 'portable') {
-        $allowedKeys = @('mode', 'executable', 'arguments', 'diagnosticsFile', 'waitForChildExit')
-        if (-not $launch.Contains('executable') -or -not $launch.Contains('arguments') -or $launch['executable'] -isnot [string] -or $launch['arguments'] -isnot [System.Array]) {
-            throw 'Invalid reminder launch configuration.'
-        }
-        foreach ($argument in $launch['arguments']) {
-            if ($argument -isnot [string] -or $argument.Length -gt 2048) { throw 'Invalid reminder launch configuration.' }
-        }
-        if ($launch['arguments'].Length -gt 16) { throw 'Invalid reminder launch configuration.' }
-        if ($launch.Contains('waitForChildExit') -and $launch['waitForChildExit'] -isnot [bool]) {
-            throw 'Invalid reminder launch configuration.'
-        }
-    } elseif ($launchMode -eq 'msix') {
-        $allowedKeys = @('mode', 'diagnosticsFile')
-    } else { throw 'Invalid reminder launch configuration.' }
-    foreach ($key in $launch.Keys) {
-        if ($key -notin $allowedKeys) { throw 'Invalid reminder launch configuration.' }
-    }
-    if ($launch.Contains('diagnosticsFile') -and $launch['diagnosticsFile'] -isnot [string]) {
-        throw 'Invalid reminder launch configuration.'
-    }
-    Write-TaskDiagnostic $DiagnosticPath 'launch-config-schema-check-after'
+    $launch = Read-ReminderLaunchConfiguration $launchJson $DiagnosticPath
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-after'
     $diagnosticsFile = ''
-    if ($launch.Contains('diagnosticsFile')) {
+    if ($launch.ContainsKey('diagnosticsFile')) {
         $diagnosticCandidate = [IO.Path]::GetFullPath([string]$launch['diagnosticsFile'])
         $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
         if ($diagnosticCandidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $diagnosticsFile = $diagnosticCandidate }
@@ -283,7 +291,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
         $child = Start-Process -FilePath ([string]$launch['executable']) -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-returned'
         $waitForChildExit = $false
-        if ($launch.Contains('waitForChildExit')) { $waitForChildExit = $launch['waitForChildExit'] -eq $true }
+        if ($launch.ContainsKey('waitForChildExit')) { $waitForChildExit = $launch['waitForChildExit'] -eq $true }
         if ($waitForChildExit) {
             $child.WaitForExit()
             $child.Refresh()
@@ -298,7 +306,15 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
 
 try {
     Write-TaskDiagnostic $DiagnosticPath 'helper-script-entry'
-    if ($Sync) { Sync-ReminderTasks $PlanPath $Scope $Diagnostic }
+    if ($ValidateLaunchConfig) {
+        if ([string]::IsNullOrEmpty($LaunchConfigPath) -or -not [IO.File]::Exists($LaunchConfigPath)) {
+            throw 'Reminder launch configuration is unavailable.'
+        }
+        $launchFile = [IO.FileInfo]::new($LaunchConfigPath)
+        if ($launchFile.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
+        $launchJson = [IO.File]::ReadAllText($LaunchConfigPath)
+        $null = Read-ReminderLaunchConfiguration $launchJson $DiagnosticPath
+    } elseif ($Sync) { Sync-ReminderTasks $PlanPath $Scope $Diagnostic }
     else { Deliver-ReminderTrigger $Token $Scope }
 } catch {
     if ($Diagnostic -or -not [string]::IsNullOrEmpty($DiagnosticPath)) {
