@@ -12,7 +12,7 @@ class FakeWebContents extends EventEmitter {
   getURL(){return this.url;}
   setWindowOpenHandler(){}
   send(channel,value){this.messages.push({channel,value});}
-  loadURL(url){this.url=url;if(FakeWindow.loadError){const error=FakeWindow.loadError;FakeWindow.loadError=null;return Promise.reject(error);}setImmediate(()=>FakeWindow.onLoad?.(this));return Promise.resolve();}
+  loadURL(url){this.url=url;if(FakeWindow.loadError){const error=FakeWindow.loadError;FakeWindow.loadError=null;return Promise.reject(error);}let blocked=false;this.emit('will-navigate',{preventDefault(){blocked=true;}},url);if(blocked)return Promise.reject(Error('Navigation was blocked.'));setImmediate(()=>FakeWindow.onLoad?.(this));return Promise.resolve();}
 }
 class FakeWindow extends EventEmitter {
   constructor(){super();this.webContents=new FakeWebContents();this.destroyed=false;FakeWindow.last=this;}
@@ -211,6 +211,20 @@ test('renderer load rejection logs only an allowlisted Chromium error token',asy
   assert.ok(diagnostics.some(value=>value.phase==='renderer_load_rejected'&&value.loadErrorToken==='ERR_ABORTED'));
   assert.doesNotMatch(JSON.stringify(diagnostics),/private-meeting-data|127\.0\.0\.1/u);
   f.bridge.dispose();
+});
+
+test('isolated renderer navigation allows its fixed destination and blocks other URLs',async()=>{
+  const f=setup(),operation=f.bridge.probeRenderer();
+  await new Promise(resolve=>setImmediate(resolve));
+  const contents=FakeWindow.last.webContents;
+  let navigationBlocked=false,redirectBlocked=false;
+  contents.emit('will-navigate',{preventDefault(){navigationBlocked=true;}},'https://example.com/');
+  contents.emit('will-redirect',{preventDefault(){redirectBlocked=true;}},'https://example.com/');
+  assert.equal(navigationBlocked,true);
+  assert.equal(redirectBlocked,true);
+  const requestID=contents.messages[0].value.requestID;
+  f.ipcMain.emit('reel-local-ai:progress',{sender:contents,senderFrame:contents.mainFrame},{requestID,phase:'renderer_probe_received'});
+  await operation;f.bridge.dispose();
 });
 
 test('renderer startup waits for worker module and task channel probe without starting inference',async()=>{

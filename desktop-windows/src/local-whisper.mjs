@@ -220,8 +220,12 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       callback({cancel:!allowed});
     });
     contents.setWindowOpenHandler(()=>({action:'deny'}));
-    contents.on('will-navigate',event=>{if(contents.getURL()!==pageURL)event.preventDefault();});
-    contents.on('will-redirect',event=>event.preventDefault());
+    contents.on('will-navigate',(event,targetURL)=>{
+      if(targetURL!==pageURL){event.preventDefault();diagnostic('renderer_navigation_blocked');}
+    });
+    contents.on('will-redirect',(event,targetURL)=>{
+      if(targetURL!==pageURL){event.preventDefault();diagnostic('renderer_redirect_blocked');}
+    });
     createdWindow.on('closed',()=>{
       if(window===createdWindow){window=null;cancelActive();}
       rejectRendererStartup(contents,'renderer_closed_before_ready','Local transcription window closed before initialization.');
