@@ -33,7 +33,8 @@ const metadata = recording => {
     updatePending: Boolean(recording.share.accessUpdate) } } : {}),
   ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true,
     transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()),
-    transcriptionMode: recording.processing.transcriptionMode === 'local' ? 'local' : 'cloud', localOnly: recording.processing.localOnly === true,
+    transcriptionMode: recording.processing.transcriptionMode ?? (recording.processing.meeting?.manual === true ? null : 'cloud'),
+    localOnly: recording.processing.localOnly === true,
     ...(localSummary?{localSummary}:{}),
     error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
 };

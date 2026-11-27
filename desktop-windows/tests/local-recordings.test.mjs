@@ -74,6 +74,10 @@ test('saved manual window clips keep audio for explicit transcript and share act
   assert.equal(listed.id,saved.id);
   assert.equal(listed.manualRecording,true);
   assert.equal(listed.processing.transcriptReady,false);
+  assert.equal(listed.processing.transcriptionMode,null,'A new walkthrough must leave both local and cloud choices available.');
+  const processing=store.getProcessing({ownerUserID:'owner',id:saved.id});
+  await store.saveProcessing({ownerUserID:'owner',id:saved.id,processing:{...processing,transcriptionMode:'local'}});
+  assert.equal(store.list('owner')[0].processing.transcriptionMode,'local');
   assert.equal(store.getProcessing({ownerUserID:'owner',id:saved.id}).meeting.manual,true);
   const audio=store.getAudioInfo({ownerUserID:'owner',id:saved.id});
   assert.equal(audio.frameCount,1);
