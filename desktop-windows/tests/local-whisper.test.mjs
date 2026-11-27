@@ -86,6 +86,19 @@ test('known Transformers.js main-revision metadata probe is pinned and preserves
   assert.equal(MODEL_REVISION,'360ebcde2559d60bb474678be3c1de9ef347d01a');
 });
 
+test('main metadata probes reuse only the immutable revision browser-cache entry before fetch',async()=>{
+  const mainURL=`https://huggingface.co/${MODEL_ID}/resolve/main/config.json`;
+  const pinnedURL=`https://huggingface.co${MODEL_PATH}config.json`;
+  const cacheReads=[];let fetchCalls=0;
+  const fetch=withPinnedModelFetch(async()=>{fetchCalls++;return new Response('network');},{cacheName:'transformers-cache',cacheStorage:{
+    async open(name){assert.equal(name,'transformers-cache');return{async match(request){cacheReads.push(request.url);return request.url===pinnedURL?new Response('cached'):undefined;}};}
+  }});
+  const response=await fetch(mainURL,{method:'GET',headers:{Range:'bytes=0-0'}});
+  assert.equal(await response.text(),'cached');
+  assert.deepEqual(cacheReads,[pinnedURL]);
+  assert.equal(fetchCalls,0,'A pinned browser-cache hit must avoid any network fallback.');
+});
+
 test('network denial smoke diagnostics expose only a fixed request category',async()=>{
   const diagnostics=[];const f=setup({onDiagnostic:value=>diagnostics.push(value)});
   const operation=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
@@ -96,6 +109,21 @@ test('network denial smoke diagnostics expose only a fixed request category',asy
   assert.deepEqual(result,{cancel:true});
   assert.ok(diagnostics.some(value=>value.phase==='model_network_blocked'&&value.requestClass==='hub_model_file_query'));
   assert.doesNotMatch(JSON.stringify(diagnostics),/private-meeting-data|secret/);
+  f.bridge.dispose();
+  await assert.rejects(operation,{name:'AbortError'});
+});
+
+test('offline consent denial preserves only a fixed request category and reason',async()=>{
+  const diagnostics=[];const f=setup({allowRemoteModelRequest:()=>false,onDiagnostic:value=>diagnostics.push(value)});
+  const operation=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  let result;
+  const blockedURL='https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json';
+  FakeWindow.last.webContents.session.webRequest.before({url:blockedURL,method:'GET'},value=>{result=value;});
+  assert.deepEqual(result,{cancel:true});
+  assert.ok(diagnostics.some(value=>value.phase==='model_network_blocked'&&value.requestClass==='hub_model_file'
+    &&value.denialReason==='remote_consent_denied'));
+  assert.doesNotMatch(JSON.stringify(diagnostics),/huggingface|onnx-community|config\.json/u);
   f.bridge.dispose();
   await assert.rejects(operation,{name:'AbortError'});
 });

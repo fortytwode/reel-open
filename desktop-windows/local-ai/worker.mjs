@@ -6,7 +6,7 @@ const MODEL='onnx-community/whisper-large-v3-turbo';
 const REVISION='360ebcde2559d60bb474678be3c1de9ef347d01a';
 let transcriber;
 env.allowRemoteModels=true;env.allowLocalModels=false;env.useBrowserCache=true;
-env.fetch=withPinnedModelFetch(env.fetch);
+env.fetch=withPinnedModelFetch(env.fetch,{cacheName:env.cacheKey});
 env.backends.onnx.wasm.wasmPaths={
   mjs:new URL('./ort-wasm-simd-threaded.mjs',import.meta.url).href,
   wasm:new URL('./ort-wasm-simd-threaded.wasm',import.meta.url).href,

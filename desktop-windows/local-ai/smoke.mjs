@@ -24,17 +24,20 @@ const safeRequestClasses=new Set(['method_options','method_other','non_https_req
   'hub_model_file_query','hub_model_other_path','hub_model_cache_path','hub_other_path','pinned_cdn_blob',
   'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied','local_method_options',
   'local_method_other','local_url_extras','local_asset_request']);
+const safeDenialReasons=new Set(['remote_consent_denied']);
 const safeLoadErrorTokens=new Set(['ERR_ABORTED','ERR_BLOCKED_BY_CLIENT','ERR_CACHE_MISS','ERR_CONNECTION_CLOSED',
   'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_FAILED','ERR_FILE_NOT_FOUND','ERR_INTERNET_DISCONNECTED',
   'ERR_HTTP_RESPONSE_CODE_FAILURE','ERR_INVALID_URL','ERR_NAME_NOT_RESOLVED','ERR_NETWORK_CHANGED',
   'ERR_TIMED_OUT','ERR_TOO_MANY_REDIRECTS','ERR_UNSAFE_REDIRECT']);
-function log(phase,progress,requestClass,loadErrorCode,loadFailureClass,loadErrorToken){
+function log(phase,progress,requestClass,loadErrorCode,loadFailureClass,loadErrorToken,denialReason,cacheEntries){
   const item={time:new Date().toISOString(),run:currentRun,phase};
   if(Number.isFinite(progress))item.progress=Math.round(Math.max(0,Math.min(1,progress))*100)/100;
   if(safeRequestClasses.has(requestClass))item.requestClass=requestClass;
   if(Number.isInteger(loadErrorCode)&&loadErrorCode>=-10_000&&loadErrorCode<=0)item.loadErrorCode=loadErrorCode;
   if(['Error','TypeError','AbortError'].includes(loadFailureClass))item.loadFailureClass=loadFailureClass;
   if(safeLoadErrorTokens.has(loadErrorToken))item.loadErrorToken=loadErrorToken;
+  if(safeDenialReasons.has(denialReason))item.denialReason=denialReason;
+  if(Number.isInteger(cacheEntries)&&cacheEntries>=0&&cacheEntries<=100)item.cacheEntries=cacheEntries;
   const line=JSON.stringify(item);
   appendFileSync(logPath,line+'\n');
   process.stdout.write(line+'\n');
@@ -76,10 +79,10 @@ function reportProgress(event){
   if(Number.isFinite(event.progress)){
     const bucket=Math.floor(Math.max(0,Math.min(1,event.progress))*20);
     if(!loggedPhases.has(key)||bucket>(lastProgressBucket.get(key)??-1)){
-      log(event.phase,event.progress,event.requestClass,event.loadErrorCode,event.loadFailureClass,event.loadErrorToken);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
+      log(event.phase,event.progress,event.requestClass,event.loadErrorCode,event.loadFailureClass,event.loadErrorToken,event.denialReason,event.cacheEntries);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
     }
   }else if(!loggedPhases.has(key)){
-    log(event.phase,undefined,event.requestClass,event.loadErrorCode,event.loadFailureClass,event.loadErrorToken);loggedPhases.add(key);
+    log(event.phase,undefined,event.requestClass,event.loadErrorCode,event.loadFailureClass,event.loadErrorToken,event.denialReason,event.cacheEntries);loggedPhases.add(key);
   }
   if(!phaseLimits[event.phase])return;
   if(event.phase===currentPhase)return;
@@ -122,7 +125,7 @@ async function transcribeWithBounds(name,samples,totalTimeoutMs){
 }
 async function probePinnedModelRequest(){
   const contents=windows.at(-1).webContents;
-  const seen=await contents.executeJavaScript(`(async()=>{
+  const result=await contents.executeJavaScript(`(async()=>{
     const {withPinnedModelFetch}=await import('/model-pinning.mjs');
     const seen=[];
     const intercepted=withPinnedModelFetch(async(input,init)=>{
@@ -133,8 +136,17 @@ async function probePinnedModelRequest(){
     await intercepted('https://huggingface.co/${MODEL_ID}/resolve/main/config.json',{method:'GET',headers:{Range:'bytes=0-0'}});
     await intercepted('https://example.com/collect?probe=private',{method:'GET'});
     await intercepted('https://huggingface.co/${MODEL_ID}/resolve/main/config.json?probe=private',{method:'GET'});
-    return seen;
+    const cache=await caches.open('transformers-cache');
+    const pinned='https://huggingface.co${MODEL_PATH}config.json';
+    await cache.put(pinned,new Response('cached-pinned-config'));
+    let networkCalls=0;
+    const cacheAware=withPinnedModelFetch(async()=>{networkCalls++;return new Response('network');});
+    const cached=await cacheAware('https://huggingface.co/${MODEL_ID}/resolve/main/config.json',{method:'GET',headers:{Range:'bytes=0-0'}});
+    const cachedBody=await cached.text();
+    await cache.delete(pinned);
+    return {seen,cacheProbe:{networkCalls,cachedBody}};
   })()`);
+  const seen=result.seen;
   assert.equal(seen.length,3);
   assert.equal(seen[0].url,`https://huggingface.co${MODEL_PATH}config.json`);
   assert.equal(seen[0].method,'GET');assert.equal(seen[0].range,'bytes=0-0');
@@ -143,7 +155,13 @@ async function probePinnedModelRequest(){
   assert.equal(localAIRequestAllowed(seen[0].url,'GET',assets.localAIOrigin),true);
   assert.equal(localAIRequestAllowed(seen[1].url,'GET',assets.localAIOrigin),false);
   assert.equal(localAIRequestAllowed(seen[2].url,'GET',assets.localAIOrigin),false);
+  assert.deepEqual(result.cacheProbe,{networkCalls:0,cachedBody:'cached-pinned-config'},
+    'The real browser Cache API must satisfy a main-revision metadata probe from the pinned revision without network access.');
   log('renderer_model_pin_probe_passed');
+}
+async function transformersCacheEntryCount(){
+  return windows.at(-1).webContents.executeJavaScript(
+    `caches.open('transformers-cache').then(cache=>cache.keys().then(keys=>keys.length))`);
 }
 async function runSmoke(){
   try{
@@ -173,6 +191,9 @@ async function runSmoke(){
     assert.ok(first.text.trim(),'Whisper must decode speech from the synthetic WAV.');
     assert.ok(/local|meeting|privacy|transcription|device/iu.test(first.text),`Unexpected Whisper output: ${first.text.slice(0,180)}`);
     log('first_transcription_complete');
+    const cacheEntries=await bounded('model_cache_snapshot',transformersCacheEntryCount,10_000);
+    assert.ok(Number.isInteger(cacheEntries)&&cacheEntries>0,'The successful first inference must leave model resources in the persistent Transformers.js browser cache.');
+    log('model_cache_snapshot_complete',undefined,undefined,undefined,undefined,undefined,undefined,cacheEntries);
     modelNetworkBlocked=true;
     log('offline_policy_enabled');
     await bounded('offline_window_recreation',()=>{
@@ -181,6 +202,9 @@ async function runSmoke(){
     },5_000);
     await bounded('offline_renderer_recreation_probe',()=>local.probeRenderer(),20_000);
     log('offline_renderer_recreation_probe_passed');
+    const offlineCacheEntries=await bounded('offline_cache_snapshot',transformersCacheEntryCount,10_000);
+    assert.equal(offlineCacheEntries,cacheEntries,'The recreated isolated renderer must see the same persistent model cache.');
+    log('offline_cache_snapshot_complete',undefined,undefined,undefined,undefined,undefined,undefined,offlineCacheEntries);
     const second=await transcribeWithBounds('offline',samples,12*60_000);
     assert.equal(second.engine,'Whisper large-v3-turbo q8');
     assert.ok(/local|meeting|privacy|transcription|device/iu.test(second.text),`Offline cached inference failed: ${second.text.slice(0,180)}`);

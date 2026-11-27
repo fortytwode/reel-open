@@ -15,6 +15,7 @@ const SAFE_REMOTE_REQUEST_CLASSES=new Set(['method_options','method_other','non_
   'hub_model_file_query','hub_model_other_path','hub_model_cache_path','hub_other_path','pinned_cdn_blob',
   'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied','local_method_options',
   'local_method_other','local_url_extras','local_asset_request']);
+const SAFE_REMOTE_DENIAL_REASONS=new Set(['remote_consent_denied']);
 const SAFE_LOAD_ERROR_TOKENS=new Set(['ERR_ABORTED','ERR_BLOCKED_BY_CLIENT','ERR_CACHE_MISS','ERR_CONNECTION_CLOSED',
   'ERR_CONNECTION_REFUSED','ERR_CONNECTION_RESET','ERR_FAILED','ERR_FILE_NOT_FOUND','ERR_INTERNET_DISCONNECTED',
   'ERR_HTTP_RESPONSE_CODE_FAILURE','ERR_INVALID_URL','ERR_NAME_NOT_RESOLVED','ERR_NETWORK_CHANGED',
@@ -111,12 +112,13 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   let window=null,loading=null,active=null,disposed=false,rendererStartup=null;
   const pendingProbes=new Map();
   const pageURL=origin+'/';
-  const diagnostic=(phase,progress,requestClass,loadErrorCode,loadFailureClass,loadErrorToken)=>{
+  const diagnostic=(phase,progress,requestClass,loadErrorCode,loadFailureClass,loadErrorToken,denialReason)=>{
     try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{}),
       ...(SAFE_REMOTE_REQUEST_CLASSES.has(requestClass)?{requestClass}:{}),
       ...(Number.isInteger(loadErrorCode)&&loadErrorCode>=-10_000&&loadErrorCode<=0?{loadErrorCode}:{}),
       ...(['Error','TypeError','AbortError'].includes(loadFailureClass)?{loadFailureClass}:{}),
-      ...(SAFE_LOAD_ERROR_TOKENS.has(loadErrorToken)?{loadErrorToken}:{})});}catch{}
+      ...(SAFE_LOAD_ERROR_TOKENS.has(loadErrorToken)?{loadErrorToken}:{}),
+      ...(SAFE_REMOTE_DENIAL_REASONS.has(denialReason)?{denialReason}:{})});}catch{}
   };
   function currentWindow(event){return window&&!window.isDestroyed()&&event.sender===window.webContents&&event.senderFrame===window.webContents.mainFrame&&event.senderFrame?.url===pageURL;}
   function rejectRendererStartup(contents,phase,message){
@@ -207,14 +209,15 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       let allowed=false,remote=false,consentAllowed=true,requestClass='invalid_request_url';
       try{
         remote=new URL(details.url).origin!==parsedOrigin.origin;
+        requestClass=localAIRequestClass(details.url,details.method,origin);
         allowed=localAIRequestAllowed(details.url,details.method,origin,allowedHubRedirects);
-        if(!allowed)requestClass=localAIRequestClass(details.url,details.method,origin);
         if(allowed&&remote){
           consentAllowed=allowRemoteModelRequest()===true;
           allowed=consentAllowed;
         }
         if(remote)diagnostic(allowed?'model_network_allowed':'model_network_blocked',undefined,
-          allowed?undefined:(consentAllowed?requestClass:'remote_consent_denied'));
+          allowed?undefined:requestClass,undefined,undefined,undefined,
+          !consentAllowed?'remote_consent_denied':undefined);
         else if(!allowed)diagnostic('local_request_blocked',undefined,requestClass);
       }catch{}
       callback({cancel:!allowed});

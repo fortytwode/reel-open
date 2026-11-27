@@ -22,7 +22,16 @@ export function pinModelRequest(input,init){
   return new Request(url,request);
 }
 
-export function withPinnedModelFetch(fetchImpl){
+export function withPinnedModelFetch(fetchImpl,{cacheStorage=globalThis.caches,cacheName='transformers-cache'}={}){
   if(typeof fetchImpl!=='function')throw TypeError('A fetch implementation is required.');
-  return (input,init)=>fetchImpl(pinModelRequest(input,init),init);
+  return async(input,init)=>{
+    const pinned=pinModelRequest(input,init);
+    if(pinned!==input&&cacheStorage&&typeof cacheStorage.open==='function'){
+      try{
+        const cache=await cacheStorage.open(cacheName),cached=await cache.match(pinned);
+        if(cached)return cached;
+      }catch{}
+    }
+    return fetchImpl(pinned,init);
+  };
 }
