@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -80,8 +80,8 @@ const taskStatus = name => JSON.parse(command('read task action result and regis
   `[pscustomobject]@{state=[int]$t.State;lastTaskResult=[int]$t.LastTaskResult;lastRunUtc=$t.LastRunTime.ToUniversalTime().ToString('o'); `+
   `principalMatchesCurrent=($taskSid -eq $identity.User.Value);logonType=[int]$t.Definition.Principal.LogonType; `+
   `sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`));
-const taskLaunchDiagnostics = name => JSON.parse(command('inspect task launch process and scheduler events',
-  `$processes=@(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'meeting-reminder-task[.]ps1' } | ForEach-Object { `+
+const taskLaunchDiagnostics = (name, scriptName='meeting-reminder-task[.]ps1') => JSON.parse(command('inspect task launch process and scheduler events',
+  `$processes=@(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '${scriptName}' } | ForEach-Object { `+
   `$process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; $parent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$_.ParentProcessId) -ErrorAction SilentlyContinue; `+
   `[pscustomobject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;exe=[IO.Path]::GetFileName([string]$_.ExecutablePath); `+
   `parentExe=[IO.Path]::GetFileName([string]$parent.ExecutablePath);sessionId=[int]$_.SessionId; `+
@@ -91,12 +91,78 @@ const taskLaunchDiagnostics = name => JSON.parse(command('inspect task launch pr
   `Where-Object { $_.Message -like ('*'+ '${name}' + '*') } | Select-Object -First 20 | ForEach-Object { `+
   `[pscustomobject]@{id=[int]$_.Id;timeUtc=$_.TimeCreated.ToUniversalTime().ToString('o');level=[int]$_.Level} }) } catch { }; `+
   `[pscustomobject]@{taskActionExe='${powershell.replaceAll("'", "''")}';matchedProcesses=$processes;recentSchedulerEvents=$events} | ConvertTo-Json -Compress -Depth 4`,12_000));
+const psQuote = value => `'${value.replaceAll("'", "''")}'`;
+const runPowerShellStartupProbe = runtime => {
+  const taskName = `ReelReminderStartupProbe_${randomUUID().replaceAll('-', '')}`;
+  const scriptPath = path.join(stateRoot, 'scheduler-startup-probe.ps1');
+  const markerPath = path.join(stateRoot, 'scheduler-startup-probe.txt');
+  const requestedPath = path.join(stateRoot, 'scheduler-startup-requested.txt');
+  writeFileSync(scriptPath,
+    `[IO.File]::AppendAllText(${psQuote(markerPath)}, 'entry|' + [DateTime]::UtcNow.ToString('o') + [Environment]::NewLine)\r\n`+
+    `[IO.File]::AppendAllText(${psQuote(markerPath)}, 'complete|' + [DateTime]::UtcNow.ToString('o') + [Environment]::NewLine)\r\n`);
+  const actionArguments = `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${scriptPath.replaceAll('"', '\\"')}"`;
+  const setup = `$service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); $folder=$service.GetFolder([string][char]92); `+
+    `$identity=[Security.Principal.WindowsIdentity]::GetCurrent(); $task=$service.NewTask(0); `+
+    `$task.Principal.UserId=$identity.User.Value; $task.Principal.LogonType=3; $task.Principal.RunLevel=0; `+
+    `$task.Settings.Enabled=$true; $task.Settings.StartWhenAvailable=$true; $task.Settings.ExecutionTimeLimit='PT2M'; `+
+    `$trigger=$task.Triggers.Create(1); $trigger.StartBoundary=[DateTime]::UtcNow.AddMinutes(5).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); `+
+    `$action=$task.Actions.Create(0); $action.Path=${psQuote(powershell)}; $action.Arguments=${psQuote(actionArguments)}; `+
+    `$null=$folder.RegisterTaskDefinition(${psQuote(taskName)},$task,6,$identity.Name,$null,3,$null); `+
+    `[IO.File]::WriteAllText(${psQuote(requestedPath)},[DateTime]::UtcNow.ToString('o')); `+
+    `$null=$folder.GetTask(${psQuote(taskName)}).Run($null)`;
+  console.log('Windows reminder smoke: measure scheduled PowerShell cold-start with a no-op action.');
+  execFileSync(powershell,['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(setup,'utf16le').toString('base64')],
+    {windowsHide:true,timeout:30_000,stdio:'pipe'});
+  const requestedAt=Date.parse(readFileSync(requestedPath,'utf8'));
+  const waitForLines = async (timeoutMs, count) => {
+    const deadline=Date.now()+timeoutMs;
+    while(Date.now()<deadline) {
+      let lines=[];
+      try { lines=readFileSync(markerPath,'utf8').trim().split(/\r?\n/); } catch { /* The scheduled process may not have reached script entry. */ }
+      if(lines.length>=count) return lines;
+      await new Promise(resolve=>setTimeout(resolve,200));
+    }
+    return [];
+  };
+  return (async()=>{
+    try {
+      const entryLines=await waitForLines(45_000,1);
+      if(entryLines.length<1) {
+        console.log(`Sanitized PowerShell startup-probe launch diagnostics: ${JSON.stringify(taskLaunchDiagnostics(taskName,'scheduler-startup-probe[.]ps1'))}`);
+        throw Error('The scheduled PowerShell no-op did not reach its script entry within 45 seconds.');
+      }
+      const completeLines=entryLines.length>=2?entryLines:await waitForLines(10_000,2);
+      assert.ok(completeLines.length>=2,'The scheduled PowerShell no-op action completed within 10 seconds after script entry.');
+      const entryAt=Date.parse(entryLines[0].slice('entry|'.length));
+      const completeAt=Date.parse(completeLines[1].slice('complete|'.length));
+      const status=taskStatus(taskName);
+      assert.notEqual(status.state,4,'The scheduled PowerShell no-op task has completed.');
+      assert.equal(status.lastTaskResult,0,'The scheduled PowerShell no-op task exited successfully.');
+      assert.equal(status.principalMatchesCurrent,true,'The startup probe uses the current Windows user SID.');
+      assert.equal(status.logonType,3,'The startup probe uses an interactive token.');
+      assert.equal(status.sessionId,runtime.sessionId,'The startup probe stays in the current interactive session.');
+      const timing={entryMs:entryAt-requestedAt,completionMs:completeAt-requestedAt,actionMs:completeAt-entryAt};
+      console.log(`Sanitized scheduled PowerShell startup timing: ${JSON.stringify(timing)}`);
+      return timing;
+    } finally {
+      try {
+        const deleteTask=`$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder([string][char]92);`+
+          `try{$t=$f.GetTask(${psQuote(taskName)});$t.Stop(0)}catch{};$f.DeleteTask(${psQuote(taskName)},0)`;
+        execFileSync(powershell,['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(deleteTask,'utf16le').toString('base64')],
+          {windowsHide:true,timeout:10_000,stdio:'pipe'});
+      } catch { /* Best-effort removal of the unique smoke-only task. */ }
+    }
+  })();
+};
 let completed = false;
 try {
   const runtime=JSON.parse(command('inspect Task Scheduler PowerShell host',
     `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`,30_000));
   assert.equal(runtime.is64Bit,true,'Task Scheduler COM is queried from a 64-bit PowerShell host.');
   console.log(`Task Scheduler host: ${JSON.stringify({architecture:runtime.architecture,is64Bit:runtime.is64Bit,sessionId:runtime.sessionId,sessionName:runtime.sessionName})}`);
+  const startupTiming=await runPowerShellStartupProbe(runtime);
+  const taskWaitMs=Math.min(60_000,Math.max(15_000,startupTiming.entryMs+10_000));
+  console.log(`Windows reminder smoke: task action completion bound is ${taskWaitMs} ms, derived from measured scheduled PowerShell startup.`);
   const sidHash=createHash('sha256').update(runtime.sid,'utf8').digest('hex');
   const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
@@ -131,7 +197,7 @@ try {
   const immediateStatus=taskStatus(taskName);
   let finalStatus=immediateStatus;
   console.log(`Sanitized scheduler action status immediately after Run: ${JSON.stringify(immediateStatus)}`);
-  const deadline = Date.now()+15_000;
+  const deadline = Date.now()+taskWaitMs;
   const hasDeliveredTrigger = () => {
     if (mode==='portable') {
       try { return readFileSync(path.join(stateRoot,'delivered.txt'),'utf8')===`--meeting-reminder-trigger=${token}`; }
@@ -160,6 +226,7 @@ try {
   assert.equal(finalStatus.principalMatchesCurrent,true,'The registered trigger action principal is the current Windows user.');
   assert.equal(finalStatus.logonType,3,'The registered trigger action uses an interactive token.');
   assert.equal(finalStatus.sessionId,runtime.sessionId,'The task status probe is running in the same interactive Windows session as the smoke process.');
+  assert.ok(launchMilestones.includes('helper-script-entry'),'The scheduled PowerShell process entered the reminder helper script.');
   assert.ok(launchMilestones.includes('helper-config-loaded'),'The task helper read its launch configuration.');
   assert.ok(launchMilestones.includes('trigger-marker-written'),'The task helper wrote its pending trigger marker.');
   if(mode==='portable') {

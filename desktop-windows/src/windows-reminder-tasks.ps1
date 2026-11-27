@@ -4,7 +4,8 @@ param(
     [switch]$Diagnostic,
     [string]$PlanPath,
     [string]$Token,
-    [string]$Scope
+    [string]$Scope,
+    [string]$DiagnosticPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -95,6 +96,19 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $currentName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $powershell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $diagnosticPath = ''
+    $launchConfigPath = Join-Path $PSScriptRoot 'reminder-launch.json'
+    if (Test-Path -LiteralPath $launchConfigPath -PathType Leaf) {
+        try {
+            $launchConfig = Get-Content -LiteralPath $launchConfigPath -Raw | ConvertFrom-Json
+            $candidateDiagnosticPath = [string]$launchConfig.diagnosticsFile
+            if (-not [string]::IsNullOrEmpty($candidateDiagnosticPath)) {
+                $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+                $candidate = [IO.Path]::GetFullPath($candidateDiagnosticPath)
+                if ($candidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $diagnosticPath = $candidate }
+            }
+        } catch { $diagnosticPath = '' }
+    }
     $registeredCount = 0
     $rearmedCount = 0
     $skippedAtEndCount = 0
@@ -147,6 +161,9 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         $action = $task.Actions.Create(0) # TASK_ACTION_EXEC
         $action.Path = $powershell
         $action.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $PSCommandPath + '" -Token ' + $token + ' -Scope ' + $scopeValue
+        if (-not [string]::IsNullOrEmpty($diagnosticPath)) {
+            $action.Arguments += ' -DiagnosticPath ' + (Quote-CommandLineArgument $diagnosticPath)
+        }
         $taskName = $prefix + $token
         $null = $folder.RegisterTaskDefinition($taskName, $task, 6, $currentName, $null, 3, $null) # CREATE_OR_UPDATE, INTERACTIVE_TOKEN
         $registeredCount++
@@ -201,6 +218,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
 }
 
 try {
+    Write-TaskDiagnostic $DiagnosticPath 'helper-script-entry'
     if ($Sync) { Sync-ReminderTasks $PlanPath $Scope $Diagnostic }
     else { Deliver-ReminderTrigger $Token $Scope }
 } catch {

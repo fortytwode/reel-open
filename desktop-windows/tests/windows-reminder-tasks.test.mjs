@@ -74,12 +74,16 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The Windows smoke reports the real registered action result and verifies its current-user interactive principal.');
   assert.match(smoke,/\$null=\$t\.Run\(\$null\)[\s\S]*lastTaskResult,0/,
     'The Windows smoke runs the registered task and checks its action result.');
-  assert.match(smoke,/taskLaunchDiagnostics[\s\S]*CommandLine -match 'meeting-reminder-task\[\.\]ps1'[\s\S]*matchedProcesses=\$processes;recentSchedulerEvents=\$events/,
+  assert.match(smoke,/taskLaunchDiagnostics = \(name, scriptName='meeting-reminder-task\[\.\]ps1'\)[\s\S]*CommandLine -match '\$\{scriptName\}'[\s\S]*matchedProcesses=\$processes;recentSchedulerEvents=\$events/,
     'A stalled task reports sanitized matching process/session/runtime and Task Scheduler event diagnostics without exposing command lines.');
+  assert.match(smoke,/runPowerShellStartupProbe[\s\S]*scheduler-startup-probe\.ps1[\s\S]*entryMs:entryAt-requestedAt[\s\S]*startupTiming\.entryMs\+10_000/,
+    'Windows CI measures an interactive scheduled PowerShell no-op before deriving the product action wait bound.');
+  assert.match(taskHelper,/Write-TaskDiagnostic \$DiagnosticPath 'helper-script-entry'/,
+    'The scheduled reminder helper records entry before it begins account and launch configuration work.');
   assert.match(smoke,/security\.command\)\.toLowerCase\(\),\/\^powershell/,
     'The registered action executable is validated as Windows PowerShell.');
-  assert.match(smoke,/const deadline = Date\.now\(\)\+15_000[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
-    'Trigger delivery is required alongside a completed, non-running scheduler action within a bounded wait.');
+  assert.match(smoke,/const deadline = Date\.now\(\)\+taskWaitMs[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
+    'Trigger delivery is required alongside a completed, non-running scheduler action within the measured bounded wait.');
   assert.ok(smoke.indexOf("command('run registered task through Task Scheduler COM'")
     < smoke.indexOf('manager.sync([{token,start:alreadyDueRetry'),
     'The actual task action runs before the due-retry fixture can create an overlapping scheduled trigger.');
@@ -99,7 +103,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');
-  for(const phase of ['helper-config-loaded','trigger-marker-written','portable-start-process-called',
+  for(const phase of ['helper-script-entry','helper-config-loaded','trigger-marker-written','portable-start-process-called',
     'portable-start-process-returned','portable-child-exited:']) {
     assert.ok(taskHelper.includes(phase),`The task helper reports sanitized launch milestone ${phase}.`);
   }
