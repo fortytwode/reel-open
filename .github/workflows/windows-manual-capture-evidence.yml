@@ -41,8 +41,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $kit = Join-Path $env:RUNNER_TEMP 'manual-capture-qa-kit'
           $manifest = Get-Content -Raw (Join-Path $kit 'manifest.json') | ConvertFrom-Json
-          if ($manifest.schemaVersion -ne 1 -or $manifest.sourceCommit -notmatch '^[0-9a-f]{40}$'
-            -or $manifest.architecture -ne $env:REEL_ARCH) { throw 'The downloaded QA kit does not match the expected PR test-merge architecture.' }
+          if ($manifest.schemaVersion -ne 1 -or $manifest.sourceCommit -notmatch '^[0-9a-f]{40}$' -or $manifest.architecture -ne $env:REEL_ARCH) { throw 'The downloaded QA kit does not match the expected PR test-merge architecture.' }
           if ($manifest.packageConfiguration -notlike 'CI demo OAuth placeholder only*') { throw 'The QA kit is not marked as a CI demo package.' }
           $zip = Join-Path $kit $manifest.package.file
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
@@ -88,7 +87,7 @@ jobs:
           $main = Join-Path $app 'desktop-windows/probe/adapter-main.mjs'
           $text = [IO.File]::ReadAllText($main)
           $old = 'const start = () => manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true });'
-          $new = 'const start = () => manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true, includeMicrophone: process.argv.includes('--test-microphone') });'
+          $new = "const start = () => manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true, includeMicrophone: process.argv.includes('--test-microphone') });"
           if ([regex]::Matches($text, [regex]::Escape($old)).Count -ne 1) { throw 'The exact manual picker probe patch point changed.' }
           [IO.File]::WriteAllText($main, $text.Replace($old, $new), [Text.UTF8Encoding]::new($false))
       - name: Install the media verifier
