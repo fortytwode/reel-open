@@ -6,6 +6,7 @@ import path from 'node:path';
 import {app,BrowserWindow,ipcMain} from 'electron';
 import {startAssetServer} from '../src/asset-server.mjs';
 import {whisperSamples} from '../src/meeting-processing.mjs';
+import {localSummaryPrompt} from '../src/local-generative-summary.mjs';
 import {createLocalWhisper,localAIRequestAllowed} from '../src/local-whisper.mjs';
 import {MODEL_ID,MODEL_PATH,SUMMARY_MODEL_ID,SUMMARY_MODEL_PATH,SUMMARY_MODEL_REVISION,withPinnedModelFetch} from './model-pinning.mjs';
 import {withSmokeTimeout} from '../src/smoke-timeout.mjs';
@@ -95,7 +96,8 @@ function logSummaryQuality(run,result){
     expectedEngine:result?.engine==='Flan-T5-small q8',
     inventorySubject:/inventory|dashboard/iu.test(result?.text??''),
     distinctiveItem:/8421/iu.test(result?.text??''),
-    exportAction:/export|CSV|low-stock/iu.test(result?.text??'')};
+    exportAction:/export|CSV|low-stock/iu.test(result?.text??''),
+    syntheticOutput:String(result?.text??'').slice(0,400)};
   const line=JSON.stringify(item);appendFileSync(logPath,line+'\n');process.stdout.write(line+'\n');
 }
 async function transcribeWithBounds(name,samples,totalTimeoutMs){
@@ -224,7 +226,12 @@ async function runSmoke(){
       return;
     }
     if(summaryOnly){
-      const sample='Mina opens the inventory dashboard, filters it to the North warehouse, and exports the low-stock report for item 8421 as a CSV.';
+      const sample=localSummaryPrompt([
+        {start:0,text:'Mina opens the inventory dashboard.'},
+        {start:8,text:'She filters the table to the North warehouse.'},
+        {start:16,text:'She selects item 8421.'},
+        {start:24,text:'She exports the low-stock report as a CSV and sends it to the purchasing team.'},
+      ]);
       await bounded('summary_renderer_startup',()=>local.probeRenderer(),20_000);
       await bounded('summary_model_pin_probe',probeSummaryModelRequest,10_000);
       const first=await summarizeWithBounds('first_summary',sample,12*60_000);
