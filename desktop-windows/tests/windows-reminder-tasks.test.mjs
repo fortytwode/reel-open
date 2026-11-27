@@ -74,6 +74,10 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The Windows smoke reports the real registered action result and verifies its current-user interactive principal.');
   assert.match(smoke,/\$null=\$t\.Run\(\$null\)[\s\S]*lastTaskResult,0/,
     'The Windows smoke runs the registered task and checks its action result.');
+  assert.match(smoke,/taskLaunchDiagnostics[\s\S]*CommandLine -match 'meeting-reminder-task\[\.\]ps1'[\s\S]*matchedProcesses=\$processes;recentSchedulerEvents=\$events/,
+    'A stalled task reports sanitized matching process/session/runtime and Task Scheduler event diagnostics without exposing command lines.');
+  assert.match(smoke,/security\.command\)\.toLowerCase\(\),\/\^powershell/,
+    'The registered action executable is validated as Windows PowerShell.');
   assert.match(smoke,/const deadline = Date\.now\(\)\+15_000[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,
     'Trigger delivery is required alongside a completed, non-running scheduler action within a bounded wait.');
   assert.ok(smoke.indexOf("command('run registered task through Task Scheduler COM'")

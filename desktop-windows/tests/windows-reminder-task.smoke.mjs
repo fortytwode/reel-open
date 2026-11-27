@@ -67,7 +67,7 @@ const taskSecurity = name => {
   const xml=execFileSync(schtasks,['/Query','/TN',name,'/XML'],{encoding:'utf8',windowsHide:true,timeout:15_000});
   const readTag=tag=>xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`,'i'))?.[1] ?? '<missing>';
   console.log(`Windows reminder smoke: task XML query completed in ${Date.now()-started} ms.`);
-  return {name,logonType:readTag('LogonType'),runLevel:readTag('RunLevel'),args:readTag('Arguments'),start:readTag('StartBoundary')};
+  return {name,command:readTag('Command'),logonType:readTag('LogonType'),runLevel:readTag('RunLevel'),args:readTag('Arguments'),start:readTag('StartBoundary')};
 };
 const taskCount = () => Number(command('count this scope’s scheduled tasks through Task Scheduler COM',
   `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $f=$s.GetFolder([string][char]92); $count=0; `+
@@ -80,6 +80,17 @@ const taskStatus = name => JSON.parse(command('read task action result and regis
   `[pscustomobject]@{state=[int]$t.State;lastTaskResult=[int]$t.LastTaskResult;lastRunUtc=$t.LastRunTime.ToUniversalTime().ToString('o'); `+
   `principalMatchesCurrent=($taskSid -eq $identity.User.Value);logonType=[int]$t.Definition.Principal.LogonType; `+
   `sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`));
+const taskLaunchDiagnostics = name => JSON.parse(command('inspect task launch process and scheduler events',
+  `$processes=@(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'meeting-reminder-task[.]ps1' } | ForEach-Object { `+
+  `$process=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; $parent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$_.ParentProcessId) -ErrorAction SilentlyContinue; `+
+  `[pscustomobject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;exe=[IO.Path]::GetFileName([string]$_.ExecutablePath); `+
+  `parentExe=[IO.Path]::GetFileName([string]$parent.ExecutablePath);sessionId=[int]$_.SessionId; `+
+  `elapsedMs=[int]((Get-Date).ToUniversalTime()-$_.CreationDate.ToUniversalTime()).TotalMilliseconds; `+
+  `cpuSeconds=[math]::Round([double]$process.CPU,1);workingSetMB=[math]::Round([double]$process.WorkingSet64/1MB,1)} }); `+
+  `$events=@(); try { $events=@(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TaskScheduler/Operational';StartTime=(Get-Date).AddMinutes(-3)} -ErrorAction Stop | `+
+  `Where-Object { $_.Message -like ('*'+ '${name}' + '*') } | Select-Object -First 20 | ForEach-Object { `+
+  `[pscustomobject]@{id=[int]$_.Id;timeUtc=$_.TimeCreated.ToUniversalTime().ToString('o');level=[int]$_.Level} }) } catch { }; `+
+  `[pscustomobject]@{taskActionExe='${powershell.replaceAll("'", "''")}';matchedProcesses=$processes;recentSchedulerEvents=$events} | ConvertTo-Json -Compress -Depth 4`,12_000));
 let completed = false;
 try {
   const runtime=JSON.parse(command('inspect Task Scheduler PowerShell host',
@@ -103,6 +114,8 @@ try {
   const security=taskSecurity(taskName);
   console.log(`Sanitized task registration: ${JSON.stringify({principalMatchesCurrent:info.userSid===info.currentSid,logonType:security.logonType,runLevel:security.runLevel,start:security.start})}`);
   assert.equal(security.name,taskName,'The exact-name schtasks XML query confirms the task exists.');
+  assert.match(path.basename(security.command).toLowerCase(),/^powershell(?:\.exe)?$/,
+    'The registered action launches Windows PowerShell from the expected executable path.');
   assert.equal(info.userSid, info.currentSid, `Task principal ${info.user} resolves to the current Windows user SID.`);
   assert.equal(security.logonType,'InteractiveToken','The task uses TASK_LOGON_INTERACTIVE_TOKEN and stores no password.');
   // Task Scheduler omits the optional XML RunLevel element when LUA is the default; an elevated task serializes HighestAvailable.
@@ -134,6 +147,9 @@ try {
   }
   completed=hasDeliveredTrigger();
   console.log(`Sanitized scheduler action status after trigger wait: ${JSON.stringify(finalStatus)}`);
+  if (!completed || finalStatus.state===4 || finalStatus.lastTaskResult===267009) {
+    console.log(`Sanitized scheduler launch diagnostics: ${JSON.stringify(taskLaunchDiagnostics(taskName))}`);
+  }
   let launchMilestones=[];
   try { launchMilestones=readFileSync(diagnosticsFile,'utf8').trim().split(/\r?\n/).filter(Boolean); } catch { /* No helper milestone means the task did not reach config loading. */ }
   console.log(`Sanitized reminder launch milestones: ${JSON.stringify(launchMilestones)}`);
