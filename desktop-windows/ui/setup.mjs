@@ -12,6 +12,7 @@ let pendingJoin = false;
 let microphoneMeetingId = null;
 let pendingReminderMeetingID = null;
 let actionError = null;
+let transcriptOpening = false;
 
 function node(tag, className, text) {
   const el = document.createElement(tag);
@@ -200,6 +201,8 @@ function renderRecordings() {
     trimControls.append(node('div','recording-meta','Exports a separate MP4. The original stays unchanged.'),startLabel,endLabel,trim); left.append(trimControls);
     if(recording.processing) {
       if(recording.processing.transcriptReady) {
+        const openTranscript=node('button','','Open transcript');
+        openTranscript.type='button'; openTranscript.dataset.action='openTranscript'; openTranscript.dataset.recordingId=recording.id; left.append(openTranscript);
         const transcript=node('button','','Copy transcript');
         transcript.type='button'; transcript.dataset.action='copyTranscript'; transcript.dataset.recordingId=recording.id; left.append(transcript);
       }
@@ -296,6 +299,8 @@ function applySnapshot(next, expectedGeneration = null) {
   if (!next || (expectedGeneration !== null && expectedGeneration !== renderGeneration)) return;
   const owner=next.profile?.userID ?? null;
   if (owner !== currentOwner || (snapshot?.profile?.calendarConnected === true && next.profile?.calendarConnected !== true)) {
+    const transcriptDialog=byId('transcriptDialog');
+    if (transcriptDialog.open) transcriptDialog.close();
     clearTimeout(saveTimer); saveTimer=null; saving=false; localSettings=null; renderGeneration++;
     pendingSignIn=null;
     pendingJoin=false;
@@ -353,6 +358,30 @@ async function perform(name,payload) {
     }
   }
 }
+async function openTranscript(id, expectedOwnerUserID) {
+  const dialog=byId('transcriptDialog');
+  if (!expectedOwnerUserID || expectedOwnerUserID !== snapshot?.profile?.userID || transcriptOpening || dialog.open) return;
+  transcriptOpening=true;
+  const generation=renderGeneration;
+  try {
+    const result=await api.action('getTranscript',{id,expectedOwnerUserID});
+    if (generation!==renderGeneration || expectedOwnerUserID!==snapshot?.profile?.userID
+      || typeof result?.text!=='string' || !result.text.trim()) return;
+    byId('transcriptTitle').textContent=`Transcript: ${String(result.title || 'Recording')}`;
+    byId('transcriptContent').textContent=result.text;
+    dialog.showModal();
+    byId('transcriptClose').focus();
+  } catch(error) {
+    if (generation===renderGeneration && expectedOwnerUserID===snapshot?.profile?.userID) {
+      actionError=error?.message || 'Transcript is unavailable.';
+      showError(actionError);
+    }
+  } finally { transcriptOpening=false; }
+}
+byId('transcriptDialog').addEventListener('close',()=>{
+  byId('transcriptTitle').textContent='Transcript';
+  byId('transcriptContent').textContent='';
+});
 function collectSettings() {
   const settings=currentSettings();
   document.querySelectorAll('[data-setting]').forEach(input=>settings[input.dataset.setting]=input.checked);
@@ -383,6 +412,8 @@ document.addEventListener('click', event=>{
   const action=target.dataset.action;
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='playRecording'||action==='revealRecording'||action==='copyTranscript') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if(action==='openTranscript') { void openTranscript(target.dataset.recordingId,snapshot?.profile?.userID); return; }
+  if(action==='closeTranscript') { byId('transcriptDialog').close(); return; }
   if(action==='setCompanionStartup') { perform(action,{enabled:target.dataset.enabled==='true'}); return; }
   if (action === 'joinMeeting') {
     const id = target.dataset.meetingId;

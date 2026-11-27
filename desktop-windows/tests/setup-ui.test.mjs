@@ -19,14 +19,22 @@ test('the dashboard can retry a saved recording through the restricted preload',
   await api.action('playRecording', recording);
   await api.action('revealRecording', recording);
   await api.action('copyTranscript', recording);
+  await api.action('getTranscript', recording);
   await api.action('renameRecording', recording);
   await api.action('deleteRecording', recording);
   await api.action('exportTrimmedCopy', recording);
   await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
   assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording],
-    ['reel-desktop:action', 'updateMeetingShareAccess', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'revealRecording', recording], ['reel-desktop:action', 'copyTranscript', recording],
+    ['reel-desktop:action', 'updateMeetingShareAccess', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'revealRecording', recording], ['reel-desktop:action', 'copyTranscript', recording], ['reel-desktop:action', 'getTranscript', recording],
     ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording],
     ['reel-desktop:action', 'exportTrimmedCopy', recording]]);
+});
+
+test('transcript dialog labels the window without announcing the entire transcript as its description', async () => {
+  const html=await readFile(new URL('../ui/index.html',import.meta.url),'utf8');
+  assert.match(html,/<dialog[^>]+aria-labelledby="transcriptTitle"/);
+  assert.doesNotMatch(html,/aria-describedby="transcriptContent"/);
+  assert.match(html,/<button[^>]+data-action="closeTranscript"[^>]*>Close transcript<\/button>/);
 });
 
 class Element {
@@ -39,6 +47,9 @@ class Element {
   }
   append(...children) { this.children.push(...children); }
   addEventListener(name, fn) { this.listeners[name] = fn; }
+  showModal() { this.open = true; }
+  close() { this.open = false; this.listeners.close?.(); }
+  focus() { this.focused = true; }
   checkValidity() { return true; }
   reportValidity() { return true; }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); }
@@ -154,7 +165,8 @@ test('local playback and transcript controls pass only the selected ID and owner
     meetings:[],status:{phase:'idle'},recordings:[
       {id:'old',title:'Old recording',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9},
       {id:'meeting',title:'Meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9,processing:{phase:'completed',transcriptReady:true}}]};
-  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
+  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);
+    return Promise.resolve(name==='getTranscript'?{title:'Meeting',text:'Transcript <b>literal</b> & safe'}:snapshot);}};
   const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
     addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
   vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),
@@ -163,21 +175,56 @@ test('local playback and transcript controls pass only the selected ID and owner
   const entries=getElement('recordingsList').children;
   const play=entries[0].children[0].children.find(child=>child.dataset.action==='playRecording');
   const reveal=entries[0].children[0].children.find(child=>child.dataset.action==='revealRecording');
+  const openTranscript=entries[1].children[0].children.find(child=>child.dataset.action==='openTranscript');
   const copy=entries[1].children[0].children.find(child=>child.dataset.action==='copyTranscript');
   const trimControls=entries[0].children[0].children.find(child=>child.className==='trim-export-controls');
   const trim=trimControls?.children.at(-1);
-  assert.ok(play); assert.ok(reveal); assert.ok(copy);
+  assert.ok(play); assert.ok(reveal); assert.ok(openTranscript); assert.ok(copy);
   onClick({target:{closest:selector=>selector==='[data-action]'?play:null}});
   onClick({target:{closest:selector=>selector==='[data-action]'?reveal:null}});
+  onClick({target:{closest:selector=>selector==='[data-action]'?openTranscript:null}});
   onClick({target:{closest:selector=>selector==='[data-action]'?copy:null}});
   trimControls.children[1].children[0].value='2'; trimControls.children[2].children[0].value='7';
   trim.listeners.click();
   await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(getElement('transcriptDialog').open,true);
+  assert.equal(getElement('transcriptContent').textContent,'Transcript <b>literal</b> & safe');
+  assert.equal(getElement('transcriptContent').innerHTML,undefined);
+  assert.equal(getElement('transcriptClose').focused,true);
   assert.deepEqual(JSON.parse(JSON.stringify(calls)),[
     ['playRecording',{id:'old',expectedOwnerUserID:'owner-a'}],
     ['revealRecording',{id:'old',expectedOwnerUserID:'owner-a'}],
+    ['getTranscript',{id:'meeting',expectedOwnerUserID:'owner-a'}],
     ['copyTranscript',{id:'meeting',expectedOwnerUserID:'owner-a'}],
     ['exportTrimmedCopy',{id:'old',expectedOwnerUserID:'owner-a',start:2,end:7}]]);
+  const close=getElement('transcriptClose');
+  close.dataset.action='closeTranscript';
+  onClick({target:{closest:selector=>selector==='[data-action]'?close:null}});
+  assert.equal(getElement('transcriptDialog').open,false);
+  assert.equal(getElement('transcriptContent').textContent,'');
+});
+
+test('a late transcript response from a previous owner is not displayed', async () => {
+  const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onState,onClick,finishTranscript;
+  const ownerA={userID:'owner-a',email:'a@example.com',calendarConnected:true};
+  const ownerB={userID:'owner-b',email:'b@example.com',calendarConnected:true};
+  const snapshot={configured:true,profile:ownerA,settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},
+    meetings:[],status:{phase:'idle'},recordings:[{id:'meeting',title:'Meeting',createdAt:'2026-11-06T12:00:00Z',durationSeconds:9,
+      processing:{phase:'completed',transcriptReady:true}}]};
+  const api={onState:fn=>{onState=fn;},state:async()=>snapshot,action:()=>new Promise(resolve=>{finishTranscript=resolve;})};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),
+    {window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise});
+  await new Promise(resolve=>setImmediate(resolve));
+  const button=getElement('recordingsList').children[0].children[0].children.find(child=>child.dataset.action==='openTranscript');
+  onClick({target:{closest:selector=>selector==='[data-action]'?button:null}});
+  onState({...snapshot,profile:ownerB});
+  finishTranscript({title:'Meeting',text:'owner A private transcript'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.notEqual(getElement('transcriptDialog').open,true);
+  assert.notEqual(getElement('transcriptContent').textContent,'owner A private transcript');
 });
 
 test('a saved meeting is shared only when its explicit button is selected', async () => {
