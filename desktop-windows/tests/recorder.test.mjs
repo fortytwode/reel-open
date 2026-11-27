@@ -73,11 +73,15 @@ test('click sampling is bound to the active consented manual window and stops be
   const samples=[];
   const f=fixture({sources:[{id:'window:123:0',name:'Chrome'}],samplePrimaryClick:async hwnd=>{samples.push(hwnd);return {x:0.25,y:0.75};},
     requestArgs:signal=>({hwnd:'123',manual:true,title:'Chrome',sourceName:'Chrome',meeting:{manual:true},ownerUserID:'owner',systemAudio:true,microphone:false,signal})});
-  await settle(); await f.ready(); await f.init(); await f.fragment(1);
+  await settle();
+  await assert.rejects(f.invoke('reel-capture:click',{}),/click indicators/i);
+  await f.ready();
+  assert.deepEqual(await f.invoke('reel-capture:click',{}),{x:0.25,y:0.75},'The first rendered seconds precede the first saved fragment.');
+  await f.init(); await f.fragment(1);
   const handle=await f.start, window=f.windows[0];
   assert.equal(window.command.selectedHwnd,'123');
   const click=await f.invoke('reel-capture:click',{});
-  assert.deepEqual(click,{x:0.25,y:0.75}); assert.deepEqual(samples,['123']);
+  assert.deepEqual(click,{x:0.25,y:0.75}); assert.deepEqual(samples,['123','123']);
   const stop=f.recorder.stop(handle);
   await assert.rejects(f.invoke('reel-capture:click',{}),/click indicators/i);
   await f.status({type:'done',duration:4,segments:1}); await stop;

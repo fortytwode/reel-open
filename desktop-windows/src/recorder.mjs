@@ -137,8 +137,10 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
   });
   ipcMain.handle('reel-capture:click', async (event, message) => {
     const capture = authenticate(event, message);
-    check(capture.manual && capture.clickSamplingEnabled && capture.phase === 'recording' && !capture.paused
-      && capture.selectedHwnd && typeof samplePrimaryClick === 'function',
+    // Media capture begins as soon as the encoders are ready. Waiting for the
+    // first saved fragment here would permanently disable the renderer's poll.
+    const acceptingFrames = capture.ready && (capture.phase === 'starting' || capture.phase === 'recording');
+    check(capture.manual && capture.clickSamplingEnabled && acceptingFrames && !capture.paused && capture.selectedHwnd,
     'Click indicators are available only during an active manual window recording.');
     try { return await samplePrimaryClick(capture.selectedHwnd); }
     catch {
@@ -253,7 +255,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
       if (args.signal.aborted) throw abortError();
       const token = randomBytes(16).toString('hex'), handle = Object.freeze({ id: token });
       const capture = { manual: args.manual === true, selectedHwnd: args.manual === true ? args.hwnd : null,
-        clickSamplingEnabled: args.manual === true && args.highlightClicks !== false, paused: false,
+        clickSamplingEnabled: args.manual === true && args.highlightClicks !== false && typeof samplePrimaryClick === 'function', paused: false,
         ownerUserID: args.ownerUserID, token, handle, phase: 'starting', signal: args.signal, window: null, writer: null,
         started: deferred(), done: deferred(), failed: deferred(), ready: false, init: false, index: 0,
         audioRequest: 0, pendingPackets: 0, pendingBytes: 0, packets: Promise.resolve(), returned: false };
