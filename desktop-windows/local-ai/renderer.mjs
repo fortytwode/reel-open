@@ -46,7 +46,9 @@ api.onTask(task=>{
     else worker.postMessage({type:'summarize',requestID:task.requestID,text:task.text});
     api.progress({requestID:task.requestID,phase:'worker_message_sent',progress:0});
   }catch{
-    active=null;status.textContent='Local AI task could not start. Retry the saved recording.';progress.hidden=true;
+    active=null;
+    status.textContent=task.type==='summarize'?'Local summary could not start. Retry the saved recording.':'Local transcription could not start. Retry the saved recording.';
+    progress.hidden=true;
     api.progress({requestID:task.requestID,phase:'worker_dispatch_failed'});
     api.complete({requestID:task.requestID,ok:false,error:status.textContent});
   }
