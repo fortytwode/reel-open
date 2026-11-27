@@ -72,9 +72,9 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     foreach ($token in $wanted.Keys) {
         $entry = $wanted[$token]
         $start = $entry.start
-        if ($entry.retry -and $start -le [DateTimeOffset]::UtcNow) {
+        if ($start -le [DateTimeOffset]::UtcNow) {
             $start = [DateTimeOffset]::UtcNow.AddSeconds(15)
-            if ($start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); continue }
+            if ($null -eq $entry.end -or $start -ge $entry.end) { $folder.DeleteTask($prefix + $token, 0); continue }
         }
         $ticksWithinSecond = $start.Ticks % [TimeSpan]::TicksPerSecond
         if ($ticksWithinSecond -ne 0) {

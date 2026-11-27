@@ -55,6 +55,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Fractional meeting starts are rounded upward before Task Scheduler registration.');
   assert.match(taskHelper,/\$null -ne \$entry\.end -and \$start -ge \$entry\.end/,
     'A rounded boundary at or after meeting end is not registered.');
+  assert.match(taskHelper,/\$start -le \[DateTimeOffset\]::UtcNow[\s\S]*AddSeconds\(15\)[\s\S]*\$null -eq \$entry\.end -or \$start -ge \$entry\.end/,
+    'A sync that arrives after meeting start retries soon only while the meeting is still active.');
   assert.match(taskHelper,/ToString\("yyyy-MM-dd'T'HH:mm:ss'Z'"/,
     'Task Scheduler receives whole-second boundaries after they are safely rounded upward.');
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);

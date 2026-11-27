@@ -90,6 +90,12 @@ try {
   assert.equal(completed,true,'The registered task runs its trigger action.');
   manager.sync([{token,start:new Date(Date.now()-10_000).toISOString(),retry:true,end:new Date(Date.now()+2_000).toISOString()}]);
   assert.equal(taskCount(),0,'No retry task remains when its safe delay would reach the meeting end.');
+  const delayedSyncEnd=new Date(Date.now()+60_000).toISOString();
+  manager.sync([{token,start:new Date(Date.now()-1_000).toISOString(),end:delayedSyncEnd}]);
+  const delayedTask=taskQuery(taskName), delayedSecurity=taskSecurity(taskName);
+  assert.equal(delayedTask.name,taskName,'A regular meeting task is re-armed if sync finishes after its start boundary.');
+  assert.ok(Date.parse(delayedSecurity.start)>Date.now()+10_000,'A delayed sync moves an already-due start to a safe future boundary.');
+  assert.ok(Date.parse(delayedSecurity.start)<Date.parse(delayedSyncEnd),'A delayed sync does not schedule past the meeting end.');
   const endBoundary=Math.ceil((Date.now()+60_001)/1000)*1000;
   manager.sync([{token,start:new Date(endBoundary-1).toISOString(),end:new Date(endBoundary).toISOString()}]);
   assert.equal(taskCount(),0,'Rounding a fractional start to the next second removes a reminder that would start at its meeting end.');
