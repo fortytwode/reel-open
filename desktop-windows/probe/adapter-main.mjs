@@ -1,6 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain } from 'electron';
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -148,26 +148,33 @@ async function run() {
       await manualController.stop(ownerUserID);
       activeCapture = null;
       const recordings = store.list(ownerUserID);
-      if (recordings.length !== 1 || recordings[0].processing !== undefined) {
-        throw Error('Manual capture did not save exactly one local-only recording without processing metadata');
+      if (recordings.length !== 1 || recordings[0].processing?.phase !== 'pending'
+        || recordings[0].processing?.transcriptReady || recordings[0].shareStatus !== undefined
+        || recordings[0].manualRecording !== true) {
+        throw Error('Manual capture did not remain saved locally without automatic transcription or sharing');
       }
       if (!completedRecording?.playable || completedRecording.id !== recordings[0].id) {
         throw Error('The production recorder did not complete a playable local recording');
+      }
+      const processing = store.getProcessing({ ownerUserID, id: recordings[0].id });
+      if (processing?.phase !== 'pending' || processing.meeting?.manual !== true
+        || processing.transcriptComplete || processing.receipt || processing.summary
+        || processing.localOnly !== undefined || !Number.isSafeInteger(processing.audioFrames) || processing.audioFrames <= 0) {
+        throw Error('Manual capture started processing or sharing before the user requested transcription');
       }
       const directory = path.join(outDir, 'recordings', createHash('sha256').update(ownerUserID).digest('hex'));
       const filePath = path.join(directory, `${recordings[0].id}.mp4`);
       const file = await readFile(filePath);
       const audioSidecar = path.join(directory, `${recordings[0].id}.pcm`);
-      let sidecarExists = true;
-      try { await stat(audioSidecar); } catch (error) { if (error.code === 'ENOENT') sidecarExists = false; else throw error; }
-      if (sidecarExists) throw Error('Manual capture unexpectedly created a transcription audio sidecar');
+      const sidecar = await readFile(audioSidecar);
+      if (sidecar.length !== processing.audioFrames * 2) throw Error('Manual capture did not retain every PCM audio frame');
       const segmentCount = fragments(file);
       if (!recordings[0].durationSeconds || segmentCount < 3 || file.length < 10_000 || file.length > 20 * 1024 * 1024 || failures.length) {
         throw Error('The packaged manual capture did not save a complete local MP4');
       }
       recording = completedRecording;
       return { ok: true, method: 'production-manual-picker-recorder', recording, bytes: file.length,
-        segmentCount, pickerChoiceID: pickerChoice.id, pickerTitle: pickerChoice.title,
+        segmentCount, pcmBytes: sidecar.length, pickerChoiceID: pickerChoice.id, pickerTitle: pickerChoice.title,
         recorderWindowHidden: true, electron: process.versions.electron, chromium: process.versions.chrome };
     }
     recording = await recorder.stop(activeCapture);
