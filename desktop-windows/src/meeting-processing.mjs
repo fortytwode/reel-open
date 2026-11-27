@@ -1,6 +1,7 @@
 import { open } from 'node:fs/promises';
 
 import { internalEmail } from '../../web/reel/organization.js';
+import { summarizeLocally } from './local-extractive-summary.mjs';
 const RATE = 16_000, CHUNK_FRAMES = 180 * RATE, SEARCH_FRAMES = 10 * RATE, WINDOW = 320;
 const ID = /^[0-9a-f]{32}$/;
 const check = (value, message) => { if (!value) throw Error(message); };
@@ -193,7 +194,14 @@ export function createMeetingProcessor({ auth, store, fetch: fetcher = globalThi
         await save(ownerUserID, id, controller, processing);
       }
       if(transcriptionMode==='local'){
-        processing={...processing,phase:'completed',localOnly:true,summary:null,summaryEngine:null,actionItems:[],error:null};
+        const lastSegment=(processing.segments??[]).at(-1);
+        const duration=Number.isSafeInteger(processing.transcribedFrames)?processing.transcribedFrames/RATE:
+          (Number.isFinite(lastSegment?.end)?Math.max(0,lastSegment.end):0);
+        const summary=summarizeLocally(processing.segments??[],duration);
+        const hasSummary=Boolean(summary.suggestedTitle||summary.summary||summary.chapters.length);
+        processing={...processing,phase:'completed',localOnly:true,summary:summary.summary,
+          suggestedTitle:summary.suggestedTitle,chapters:summary.chapters,
+          summaryEngine:hasSummary?'extractive-local':null,actionItems:[],noSpeech:!processing.text?.trim(),error:null};
         await save(ownerUserID,id,controller,processing);
         return processing;
       }

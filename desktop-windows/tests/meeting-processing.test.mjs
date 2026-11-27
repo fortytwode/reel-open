@@ -93,18 +93,31 @@ test('persists transcript, summary, verified receipt and authoritative calendar 
 test('local mode transcribes locally, saves timestamps, and makes no service requests or cloud fallback', async t=>{
   let observed;
   const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud request is forbidden in local mode.');},
-    localTranscribe:async input=>{observed=input;return{text:'Local words here.',chunks:[{timestamp:[0,.5],text:'Local words.'},{timestamp:[.5,1],text:'Here.'}],language:'en',engine:'Whisper large-v3-turbo q8'};}});
+    localTranscribe:async input=>{observed=input;return{text:'Quarterly revenue dashboard. The dashboard shows revenue by channel. First, review churn numbers. Finally, the revenue forecast looks strong.',chunks:[
+      {timestamp:[0,.25],text:'Quarterly revenue dashboard.'},{timestamp:[.25,.5],text:'The dashboard shows revenue by channel.'},
+      {timestamp:[.5,.75],text:'First, review churn numbers.'},{timestamp:[.75,1],text:'Finally, the revenue forecast looks strong.'}],language:'en',engine:'Whisper large-v3-turbo q8'};}});
   const result=await f.processor.process({ownerUserID,id});
   assert.equal(result.phase,'completed');assert.equal(result.localOnly,true);assert.equal(result.transcriptionMode,'local');
   assert.equal(result.engine,'Whisper large-v3-turbo q8');assert.equal(result.timingGranularity,'segment');
-  assert.equal(result.summary,null);assert.equal(result.summaryEngine,null);assert.equal(result.receipt,undefined);
-  assert.equal(result.text,'Local words. Here.');assert.equal(result.segments[0].start,0);assert.equal(result.segments[1].start,.5);assert.equal(result.language,'en');
+  assert.equal(result.summaryEngine,'extractive-local');assert.equal(result.receipt,undefined);
+  assert.match(result.summary,/revenue/i);assert.match(result.suggestedTitle,/revenue/i);assert.deepEqual(result.chapters,[]);
+  assert.equal(result.title,'Planning','The generated title remains a suggestion and never replaces the calendar meeting title.');
+  assert.match(result.text,/Quarterly revenue dashboard/);assert.equal(result.segments[0].start,0);assert.equal(result.segments[1].start,.25);assert.equal(result.language,'en');
   assert.equal(f.calls.length,0);assert.ok(observed.samples instanceof Float32Array);assert.equal(observed.samples.length,16000);
   assert.equal(f.tokenCount(),0);
   assert.equal(observed.ownerUserID,ownerUserID);assert.equal(observed.id,id);assert.equal(observed.language,'en');
   let wavChunk;for await(const chunk of pcmChunks(f.info)){wavChunk=chunk;break;}
   const decoded=await whisperSamples(wavChunk.audio);
   assert.equal(decoded.length,16000);assert.ok(Math.abs(decoded[1]-f.samples.readInt16LE(2)/32768)<1e-7);
+});
+
+test('empty local transcription completes without inventing a title or summary',async t=>{
+  const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud request is forbidden in local mode.');},
+    localTranscribe:async()=>({text:'',chunks:[],language:'en',engine:'Whisper large-v3-turbo q8'})});
+  const result=await f.processor.process({ownerUserID,id});
+  assert.equal(result.phase,'completed');assert.equal(result.noSpeech,true);assert.equal(result.localOnly,true);
+  assert.equal(result.summary,null);assert.equal(result.suggestedTitle,null);assert.equal(result.summaryEngine,null);
+  assert.deepEqual(result.chapters,[]);assert.equal(result.receipt,undefined);assert.equal(f.calls.length,0);assert.equal(f.tokenCount(),0);
 });
 
 test('local model failure is recorded locally and never falls back to cloud',async t=>{

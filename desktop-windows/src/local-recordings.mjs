@@ -9,14 +9,33 @@ const text = (value, max = 4096) => typeof value === 'string' && value.length > 
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
   systemAudioConsent: false, meetingReminders: false, localTranscription: false, selection: { useAll: true, ids: [] } });
-const metadata = recording => ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
+function localSummaryMetadata(recording) {
+  const processing=recording.processing;
+  if(processing?.localOnly!==true||processing.summaryEngine!=='extractive-local')return null;
+  const plainText=(value,max)=>typeof value==='string'?Array.from(value.replace(/\s+/gu,' ').trim()).slice(0,max).join(''):null;
+  const titleSuggestion=plainText(processing.suggestedTitle,90);
+  const summary=plainText(processing.summary,700);
+  const duration=Number.isFinite(recording.durationSeconds)?recording.durationSeconds:Infinity;
+  const chapters=(Array.isArray(processing.chapters)?processing.chapters:[]).filter(chapter=>Number.isFinite(chapter?.start)
+    &&chapter.start>=0&&chapter.start<duration&&typeof chapter.title==='string')
+    .sort((left,right)=>left.start-right.start).filter((chapter,index,values)=>index===0||chapter.start-values[index-1].start>=20)
+    .slice(0,8).map(chapter=>({start:Math.round(chapter.start*10)/10,title:plainText(chapter.title,60)}))
+    .filter(chapter=>chapter.title);
+  if(!titleSuggestion&&!summary&&!chapters.length)return null;
+  return {suggestedTitle:titleSuggestion,summary,chapters};
+}
+const metadata = recording => {
+  const localSummary=localSummaryMetadata(recording);
+  return ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
   durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload), shareIncludesTranscript: recording.share.includeTranscript === true } : {}),
   ...(recording.share?.access ? { shareAccess: { passwordProtected: Boolean(recording.share.access.key), expiresAt: recording.share.access.expiresAt ?? null,
     updatePending: Boolean(recording.share.accessUpdate) } } : {}),
   ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true,
     transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()),
     transcriptionMode: recording.processing.transcriptionMode === 'local' ? 'local' : 'cloud', localOnly: recording.processing.localOnly === true,
+    ...(localSummary?{localSummary}:{}),
     error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
+};
 
 // Only the boxes and sample tables produced by Reel's pinned fragmented muxer are accepted.
 // This detects damaged/out-of-order appends; playback still requires the real media probe.

@@ -204,6 +204,31 @@ test('local playback and transcript controls pass only the selected ID and owner
   assert.equal(getElement('transcriptContent').textContent,'');
 });
 
+test('local extractive notes render as plain text without replacing the calendar title', async () => {
+  const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  const snapshot={configured:true,profile:{userID:'owner-a',email:'a@example.com',calendarConnected:true},
+    settings:{participantConsent:true,systemAudioConsent:true,localTranscription:true,autoJoin:false,selection:{useAll:true,ids:[]}},
+    meetings:[],status:{phase:'idle'},recordings:[{id:'meeting',title:'Calendar title',createdAt:'2026-11-06T12:00:00Z',durationSeconds:180,
+      processing:{phase:'completed',transcriptReady:true,transcriptionMode:'local',localOnly:true,
+        localSummary:{suggestedTitle:'Suggested title',summary:'<b>Literal transcript words</b>',chapters:[{start:0,title:'Opening'}]}}}]};
+  const api={onState:()=>{},state:async()=>snapshot,action:async()=>snapshot};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,addEventListener(){}};
+  const source=await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8');
+  vm.runInNewContext(source,{window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise});
+  await new Promise(resolve=>setImmediate(resolve));
+  const children=getElement('recordingsList').children[0].children[0].children;
+  assert.ok(children.some(child=>child.textContent==='Calendar title'));
+  assert.ok(children.some(child=>String(child.textContent??'').includes('Transcript and local extractive notes saved on this computer')));
+  const details=children.find(child=>child.tagName==='details');
+  assert.ok(details);
+  assert.equal(details.children[0].textContent,'Local extractive notes (not AI-generated)');
+  assert.equal(details.children[1].textContent,'Suggested title (not applied): Suggested title');
+  assert.equal(details.children[2].textContent,'<b>Literal transcript words</b>');
+  assert.equal(details.children[2].innerHTML,undefined);
+  assert.deepEqual(details.children[3].children.map(child=>child.textContent),['0:00 Opening']);
+  assert.match(source,/deterministic extractive notes.*not with an AI model.*leaves the meeting title unchanged/u);
+});
+
 test('a late transcript response from a previous owner is not displayed', async () => {
   const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
   let onState,onClick,finishTranscript;
