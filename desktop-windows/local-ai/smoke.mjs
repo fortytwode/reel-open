@@ -202,6 +202,10 @@ async function transformersCacheEntryCount(){
   return windows.at(-1).webContents.executeJavaScript(
     `caches.open('transformers-cache').then(cache=>cache.keys().then(keys=>keys.length))`);
 }
+async function transformersCacheEntryPaths(){
+  return windows.at(-1).webContents.executeJavaScript(
+    `caches.open('transformers-cache').then(cache=>cache.keys().then(keys=>keys.map(key=>new URL(key.url).pathname)))`);
+}
 async function runSmoke(){
   try{
     log('smoke_start');
@@ -255,6 +259,7 @@ async function runSmoke(){
       const cacheEntries=await bounded('model_cache_snapshot',transformersCacheEntryCount,10_000);
       assert.ok(Number.isInteger(cacheEntries)&&cacheEntries>0,'The first summary must leave assets in the persistent browser model cache.');
       log('model_cache_snapshot_complete',undefined,undefined,undefined,undefined,undefined,undefined,cacheEntries);
+      process.stdout.write(JSON.stringify({run:'synthetic_summary',phase:'cache_entry_paths',paths:await transformersCacheEntryPaths()})+'\n');
       modelNetworkBlocked=true;log('offline_policy_enabled');
       await bounded('offline_window_recreation',()=>{windows.at(-1).destroy();return new Promise(resolve=>setImmediate(resolve));},5_000);
       await bounded('offline_renderer_recreation_probe',()=>local.probeRenderer(),20_000);log('offline_renderer_recreation_probe_passed');
