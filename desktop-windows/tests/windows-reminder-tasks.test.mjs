@@ -67,6 +67,12 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Both regular and retry plans parse their required UTC end bound directly.');
   assert.match(smoke,/GetTask\('\$\{taskName\}'\)/,
     'The trigger run uses the exact validated task name instead of a COM-serialized name field.');
+  assert.match(smoke,/lastTaskResult=\[uint32\]\$t\.LastTaskResult[\s\S]*principalMatchesCurrent[\s\S]*logonType=/,
+    'The Windows smoke reports the real registered action result and verifies its current-user interactive principal.');
+  assert.match(smoke,/\$null=\$t\.Run\(\$null\)[\s\S]*lastTaskResult,0/,
+    'The Windows smoke runs the registered task and checks its action result.');
+  assert.match(smoke,/receiver\.mjs[\s\S]*process\.argv\.find\(argument => \/\^--meeting-reminder-trigger=/,
+    'The portable task smoke receiver accepts the same argv trigger flag as the Electron app.');
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');

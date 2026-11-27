@@ -12,11 +12,16 @@ if (!['portable', 'msix'].includes(mode)) throw Error('Select the portable or ms
 const scope = '7'.repeat(64), token = '8'.repeat(32);
 const stateRoot = mkdtempSync(path.join(os.tmpdir(), 'reel-reminder-task-'));
 const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-const receiver = path.join(stateRoot, 'receiver.ps1');
-writeFileSync(receiver, `param([string]$Activation)\n[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'delivered.txt'), $Activation)\n`);
+const receiver = path.join(stateRoot, 'receiver.mjs');
+writeFileSync(receiver, `import { writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const activation = process.argv.find(argument => /^--meeting-reminder-trigger=[a-f0-9]{32}$/.test(argument));
+if (activation) writeFileSync(join(dirname(fileURLToPath(import.meta.url)), 'delivered.txt'), activation);
+`);
 let lastSyncSummary = null;
-const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: powershell,
-  launchArguments: mode === 'portable' ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', receiver] : [],
+const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: process.execPath,
+  launchArguments: mode === 'portable' ? [receiver] : [],
   exec:(file,args,options)=>{
     const planPath=args[args.indexOf('-PlanPath')+1];
     const plan=JSON.parse(readFileSync(planPath,'utf8'));
@@ -55,10 +60,18 @@ const taskSecurity = name => {
 const taskCount = () => Number(command('count this scope’s scheduled tasks through Task Scheduler COM',
   `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $f=$s.GetFolder([string][char]92); $count=0; `+
   `foreach($task in @($f.GetTasks(0))) { if($task.Name.StartsWith('ReelReminder_${scope}_',[StringComparison]::Ordinal)) { $count++ } }; $count`));
+const taskStatus = name => JSON.parse(command('read task action result and registered principal',
+  `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${name}'); `+
+  `$identity=[Security.Principal.WindowsIdentity]::GetCurrent(); $principal=[string]$t.Definition.Principal.UserId; $taskSid=$principal; `+
+  `if ($taskSid -notmatch '^S-1-') { $account=$principal; if ($account -notmatch '\\') { $account=$env:USERDOMAIN+'\'+$account }; `+
+  `$taskSid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
+  `[pscustomobject]@{state=[int]$t.State;lastTaskResult=[uint32]$t.LastTaskResult;lastRunUtc=$t.LastRunTime.ToUniversalTime().ToString('o'); `+
+  `principalMatchesCurrent=($taskSid -eq $identity.User.Value);logonType=[int]$t.Definition.Principal.LogonType; `+
+  `sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`));
 let completed = false;
 try {
   const runtime=JSON.parse(command('inspect Task Scheduler PowerShell host',
-    `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value} | ConvertTo-Json -Compress`,30_000));
+    `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;sessionId=(Get-Process -Id $PID).SessionId;sessionName=$env:SESSIONNAME} | ConvertTo-Json -Compress`,30_000));
   assert.equal(runtime.is64Bit,true,'Task Scheduler COM is queried from a 64-bit PowerShell host.');
   console.log(`Task Scheduler PowerShell host: ${JSON.stringify(runtime)}`);
   const sidHash=createHash('sha256').update(runtime.sid,'utf8').digest('hex');
@@ -111,6 +124,8 @@ try {
   assert.ok(Date.parse(retriedSecurity.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
   command('run registered task through Task Scheduler COM',
     `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${taskName}'); $null=$t.Run($null)`);
+  const immediateStatus=taskStatus(taskName);
+  console.log(`Sanitized scheduler action status immediately after Run: ${JSON.stringify(immediateStatus)}`);
   const deadline = Date.now()+15_000;
   while (Date.now()<deadline) {
     if (mode==='portable') {
@@ -120,7 +135,13 @@ try {
     if (mode==='msix' && manager.pending().includes(token)) { completed=true;break; }
     await new Promise(resolve=>setTimeout(resolve,100));
   }
+  const finalStatus=taskStatus(taskName);
+  console.log(`Sanitized scheduler action status after trigger wait: ${JSON.stringify(finalStatus)}`);
   assert.equal(completed,true,'The registered task runs its trigger action.');
+  assert.equal(finalStatus.lastTaskResult,0,'The task trigger helper exits successfully in the current interactive session.');
+  assert.equal(finalStatus.principalMatchesCurrent,true,'The registered trigger action principal is the current Windows user.');
+  assert.equal(finalStatus.logonType,3,'The registered trigger action uses an interactive token.');
+  assert.equal(finalStatus.sessionId,runtime.sessionId,'The task status probe is running in the same interactive Windows session as the smoke process.');
   manager.sync([{token,start:new Date(Date.now()-10_000).toISOString(),retry:true,end:new Date(Date.now()+2_000).toISOString()}]);
   assert.deepEqual(syncCounts(),{registered:0,rearmed:1,skippedAtEnd:1,skippedPast:0},
     'The helper reports the retry was suppressed because its safe delay reached meeting end.');
