@@ -80,6 +80,12 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Windows CI measures an interactive scheduled PowerShell no-op before deriving the product action wait bound.');
   assert.match(taskHelper,/Write-TaskDiagnostic \$DiagnosticPath 'helper-script-entry'/,
     'The scheduled reminder helper records entry before it begins account and launch configuration work.');
+  assert.match(taskHelper,/scope-identity-before[\s\S]*WindowsIdentity\]::GetCurrent\(\)\.User\.Value[\s\S]*scope-identity-after[\s\S]*scope-hash-before[\s\S]*ComputeHash[\s\S]*scope-hash-after/,
+    'Smoke diagnostics bracket account identity and scope hashing so a slow call can be isolated.');
+  assert.match(taskHelper,/launch-path-check-before[\s\S]*Test-Path -LiteralPath \$launchPath[\s\S]*launch-path-check-after[\s\S]*launch-config-read-before[\s\S]*launch-config-read-after[\s\S]*launch-config-parse-before[\s\S]*launch-config-parse-after/,
+    'Smoke diagnostics bracket launch config existence, file read and JSON parse separately.');
+  assert.match(taskHelper,/\$launch\.PSObject\.Properties\.Name -contains 'diagnosticsFile'/,
+    'Production launch configuration safely omits the smoke-only diagnostic field under StrictMode.');
   assert.match(smoke,/security\.command\)\.toLowerCase\(\),\/\^powershell/,
     'The registered action executable is validated as Windows PowerShell.');
   assert.match(smoke,/const deadline = Date\.now\(\)\+taskWaitMs[\s\S]*completed=hasDeliveredTrigger\(\)[\s\S]*finalStatus\.state!==4[\s\S]*finalStatus\.lastTaskResult!==267009/,

@@ -10,11 +10,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Get-TaskPrefix([string]$scopeValue) {
+function Get-TaskPrefix([string]$scopeValue, [string]$diagnosticsFile) {
     if ($scopeValue -notmatch '^[a-f0-9]{64}$') { throw 'Invalid reminder scope.' }
+    Write-TaskDiagnostic $diagnosticsFile 'scope-identity-before'
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    Write-TaskDiagnostic $diagnosticsFile 'scope-identity-after'
     $sha = [Security.Cryptography.SHA256]::Create()
-    try { $sidHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sid)))).Replace('-', '').ToLowerInvariant() }
+    try {
+        Write-TaskDiagnostic $diagnosticsFile 'scope-hash-before'
+        $sidHash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sid)))).Replace('-', '').ToLowerInvariant()
+        Write-TaskDiagnostic $diagnosticsFile 'scope-hash-after'
+    }
     finally { $sha.Dispose() }
     return "ReelReminder_${scopeValue}_${sidHash}_"
 }
@@ -175,20 +181,40 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
 }
 
 function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
+    Write-TaskDiagnostic $DiagnosticPath 'trigger-token-validation-before'
     if ($token -notmatch '^[a-f0-9]{32}$') { throw 'Invalid reminder token.' }
-    $null = Get-TaskPrefix $scopeValue
+    Write-TaskDiagnostic $DiagnosticPath 'trigger-token-validation-after'
+    Write-TaskDiagnostic $DiagnosticPath 'trigger-scope-prefix-before'
+    $null = Get-TaskPrefix $scopeValue $DiagnosticPath
+    Write-TaskDiagnostic $DiagnosticPath 'trigger-scope-prefix-after'
     $launchPath = Join-Path $PSScriptRoot 'reminder-launch.json'
-    if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) { return }
-    $launch = Get-Content -LiteralPath $launchPath -Raw | ConvertFrom-Json
-    $diagnosticsFile = [string]$launch.diagnosticsFile
+    Write-TaskDiagnostic $DiagnosticPath 'launch-path-check-before'
+    $launchExists = Test-Path -LiteralPath $launchPath -PathType Leaf
+    Write-TaskDiagnostic $DiagnosticPath ('launch-path-check-after:' + [bool]$launchExists)
+    if (-not $launchExists) { return }
+    Write-TaskDiagnostic $DiagnosticPath 'launch-config-read-before'
+    $launchJson = Get-Content -LiteralPath $launchPath -Raw
+    Write-TaskDiagnostic $DiagnosticPath ('launch-config-read-after:' + $launchJson.Length)
+    Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-before'
+    $launch = ConvertFrom-Json -InputObject $launchJson
+    Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-after'
+    $diagnosticsFile = ''
+    if ($launch.PSObject.Properties.Name -contains 'diagnosticsFile') { $diagnosticsFile = [string]$launch.diagnosticsFile }
     Write-TaskDiagnostic $diagnosticsFile 'helper-config-loaded'
     $triggerDir = Join-Path $PSScriptRoot 'reminder-triggers'
+    Write-TaskDiagnostic $diagnosticsFile 'trigger-directory-create-before'
     New-Item -ItemType Directory -Force -Path $triggerDir | Out-Null
+    Write-TaskDiagnostic $diagnosticsFile 'trigger-directory-create-after'
     $marker = Join-Path $triggerDir ($token + '.trigger')
-    if (Test-Path -LiteralPath $marker) { Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-already-present'; return }
+    Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-check-before'
+    $markerExists = Test-Path -LiteralPath $marker
+    Write-TaskDiagnostic $diagnosticsFile ('trigger-marker-check-after:' + [bool]$markerExists)
+    if ($markerExists) { Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-already-present'; return }
+    Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-create-before'
     $stream = [IO.File]::Open($marker, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $bytes = [Text.Encoding]::ASCII.GetBytes($token); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
     finally { $stream.Dispose() }
+    Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-create-after'
     Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-written'
 
     if ($launch.mode -eq 'msix') {
