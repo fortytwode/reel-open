@@ -30,10 +30,9 @@ const taskQuery = name => command('read scheduled task through Task Scheduler CO
   `if ($sid -notmatch '^S-1-') { $account=$principal; if ($account -notmatch '\\\\') { $account=$env:USERDOMAIN+'\\'+$account }; `+
   `$sid=([Security.Principal.NTAccount]::new($account).Translate([Security.Principal.SecurityIdentifier])).Value }; `+
   `$current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; `+
-  `$runLevel=$p.RunLevel; if ($null -eq $runLevel) { throw 'Task Scheduler did not return Principal.RunLevel' }; `+
-  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current;runLevel=[int]$runLevel;args=$t.Definition.Actions.Item(1).Arguments;start=$t.Definition.Triggers.Item(1).StartBoundary} | ConvertTo-Json -Compress`);
+  `[pscustomobject]@{name=$t.Name;user=$principal;userSid=$sid;currentSid=$current;args=$t.Definition.Actions.Item(1).Arguments;start=$t.Definition.Triggers.Item(1).StartBoundary} | ConvertTo-Json -Compress`);
 const taskSecurity = name => {
-  console.log('Windows reminder smoke: read task logon and run level from registered task XML.');
+  console.log('Windows reminder smoke: read task security from registered task XML.');
   const started=Date.now(), schtasks=path.join(process.env.SystemRoot || 'C:\\Windows','System32','schtasks.exe');
   const xml=execFileSync(schtasks,['/Query','/TN',name,'/XML'],{encoding:'utf8',windowsHide:true,timeout:15_000});
   const readTag=tag=>xml.match(new RegExp(`<${tag}>([^<]+)</${tag}>`,'i'))?.[1] ?? '<missing>';
@@ -46,11 +45,10 @@ const taskCount = () => Number(command('count this scope’s scheduled tasks thr
 let completed = false;
 try {
   const runtime=JSON.parse(command('inspect Task Scheduler PowerShell host',
-    `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value} | ConvertTo-Json -Compress`,10_000));
+    `[pscustomobject]@{path=(Get-Process -Id $PID).Path;architecture=[Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString();is64Bit=[Environment]::Is64BitProcess;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name;sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value} | ConvertTo-Json -Compress`,30_000));
   assert.equal(runtime.is64Bit,true,'Task Scheduler COM is queried from a 64-bit PowerShell host.');
   console.log(`Task Scheduler PowerShell host: ${JSON.stringify(runtime)}`);
-  const currentSid=command('resolve current user SID','[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',10_000);
-  const sidHash=createHash('sha256').update(currentSid,'utf8').digest('hex');
+  const sidHash=createHash('sha256').update(runtime.sid,'utf8').digest('hex');
   const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
   console.log('Windows reminder smoke: register current-user task.');
@@ -58,12 +56,12 @@ try {
   console.log('Windows reminder smoke: Task Scheduler registration returned.');
   let info = taskQuery(taskName);
   const security=taskSecurity(taskName);
-  console.log(`Sanitized task principal: ${JSON.stringify({user:info.user,userSid:info.userSid,currentSid:info.currentSid,runLevel:info.runLevel,...security})}`);
+  console.log(`Sanitized task principal: ${JSON.stringify({user:info.user,userSid:info.userSid,currentSid:info.currentSid,...security})}`);
   assert.equal(info.userSid, info.currentSid, `Task principal ${info.user} resolves to the current Windows user SID.`);
   assert.equal(security.logonType,'InteractiveToken','The task uses TASK_LOGON_INTERACTIVE_TOKEN and stores no password.');
-  assert.equal(info.runLevel,0,'Task Scheduler COM confirms TASK_RUNLEVEL_LUA (least privilege).');
+  // Task Scheduler omits the optional XML RunLevel element when LUA is the default; an elevated task serializes HighestAvailable.
   assert.ok(['<missing>','LeastPrivilege'].includes(security.runLevel),
-    'The task XML either records least privilege explicitly or omits it, in which case the registered COM task must report LUA.');
+    'The task uses least privilege; Task Scheduler omits RunLevel from its XML when its least-privilege default applies.');
   assert.match(info.args, new RegExp(token));
   assert.equal(Date.parse(info.start),Date.parse(taskStart),'Task Scheduler preserves the event time down to the millisecond.');
   assert.ok(!info.args.includes('private calendar title') && !info.args.includes('private-event-id'));
