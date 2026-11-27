@@ -149,7 +149,7 @@ test('manual capture cannot overlap auto-join or an explicit meeting join',async
   const manualCapture={state:()=>({phase:active?'capturing':'idle'}),isActive:()=>active,
     list:async()=>{},start:async()=>{starts++;active=true;},stop:async()=>{active=false;},dispose:async()=>{active=false;},clearCatalog(){}};
   const f=fixture({manualCapture});
-  const settings={ownerUserID:'owner-a',expectedOwnerUserID:'owner-a',autoJoin:true,participantConsent:true,systemAudioConsent:true,
+  const settings={ownerUserID:'owner-a',expectedOwnerUserID:'owner-a',autoJoin:true,participantConsent:true,systemAudioConsent:true,localTranscription:false,
     meetingReminders:false,selection:{useAll:true,ids:[]}};
   await f.service.action('saveSettings',settings);
   await assert.rejects(f.service.action('startWindowRecording',{expectedOwnerUserID:'owner-a',sourceID:'opaque',consentConfirmed:true}),/turn off automatic joining/i);
