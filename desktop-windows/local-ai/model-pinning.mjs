@@ -85,6 +85,15 @@ export function withPinnedModelFetch(fetchImpl,{cacheStorage=globalThis.caches,c
       try{
         const cache=await cacheStorage.open(cacheName),cached=await cache.match(pinned);
         if(cached)return cached;
+        const url=new URL(pinned.url),tokenizerPrefix=`${SUMMARY_TOKENIZER_PATH}`;
+        if(url.hostname==='huggingface.co'&&url.pathname.startsWith(tokenizerPrefix)){
+          const file=url.pathname.slice(tokenizerPrefix.length);
+          if(SUMMARY_MODEL_FILES.has(file)){
+            const summaryCacheURL=`https://huggingface.co${SUMMARY_MODEL_PATH}${file}`;
+            const summaryCached=await cache.match(summaryCacheURL);
+            if(summaryCached)return summaryCached;
+          }
+        }
       }catch{}
     }
     return fetchImpl(pinned,init);
