@@ -1,0 +1,189 @@
+name: Windows manual capture evidence (one-time)
+
+on:
+  push:
+    branches: [qa/pr78-manual-capture-evidence]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, arch: x64 }
+          - { runner: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      REEL_SOURCE_COMMIT: 0605d59089a3e518785cdb10373363140fd78d91
+      REEL_SOURCE_RUN_ID: 45953959227
+      REEL_ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Check out the one-time workflow branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download the unmodified, architecture-matched CI QA kit
+        uses: actions/download-artifact@v4
+        with:
+          name: manual-capture-qa-kit-${{ matrix.arch }}
+          repository: rocketshiphq/reel-open
+          run-id: ${{ env.REEL_SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/manual-capture-qa-kit
+      - name: Verify the CI artifact and check out its exact PR test-merge source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kit = Join-Path $env:RUNNER_TEMP 'manual-capture-qa-kit'
+          $manifest = Get-Content -Raw (Join-Path $kit 'manifest.json') | ConvertFrom-Json
+          if ($manifest.schemaVersion -ne 1 -or $manifest.sourceCommit -notmatch '^[0-9a-f]{40}$'
+            -or $manifest.architecture -ne $env:REEL_ARCH) { throw 'The downloaded QA kit does not match the expected PR test-merge architecture.' }
+          if ($manifest.packageConfiguration -notlike 'CI demo OAuth placeholder only*') { throw 'The QA kit is not marked as a CI demo package.' }
+          $zip = Join-Path $kit $manifest.package.file
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $manifest.package.sha256) { throw 'The unmodified demo ZIP hash does not match its CI manifest.' }
+          if ($manifest.sourceCommit -ne $env:REEL_SOURCE_COMMIT) { throw 'Configured source commit differs from the package artifact test-merge SHA.' }
+          git fetch --no-tags origin refs/pull/78/merge
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the PR78 test-merge ref recorded in the CI QA kit.' }
+          $fetchedMerge = (git rev-parse FETCH_HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $fetchedMerge -ne $manifest.sourceCommit) { throw 'The current PR78 merge ref does not equal the QA-kit test-merge SHA.' }
+          git checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check out the exact PR78 test-merge source.' }
+          "REEL_EVIDENCE_KIT=$kit" | Add-Content -LiteralPath $env:GITHUB_ENV
+      - name: Prepare an isolated extracted package from the verified demo ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kit = $env:REEL_EVIDENCE_KIT
+          $manifest = Get-Content -Raw (Join-Path $kit 'manifest.json') | ConvertFrom-Json
+          $zip = Join-Path $kit $manifest.package.file
+          $package = Join-Path $env:RUNNER_TEMP 'verified-demo-package'
+          Expand-Archive -LiteralPath $zip -DestinationPath $package
+          $app = Join-Path $package 'resources/app'
+          $configPath = Join-Path $app 'desktop-windows/config.json'
+          $config = Get-Content -Raw $configPath | ConvertFrom-Json
+          if ($config.googleDesktopClientSecret -ne 'demo-installed-client') { throw 'The CI package contains unexpected OAuth configuration; refusing to run it.' }
+          $probe = Join-Path $app 'desktop-windows/probe'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          Copy-Item -LiteralPath 'desktop-windows/probe/adapter-main.mjs' -Destination $probe
+          Copy-Item -LiteralPath (Join-Path $kit 'fixture.html') -Destination $probe
+          Copy-Item -LiteralPath 'desktop-windows/probe/adapter-verify.mjs' -Destination (Join-Path $env:RUNNER_TEMP 'adapter-verify.mjs')
+          $packageJsonPath = Join-Path $app 'package.json'
+          $packageJson = Get-Content -Raw $packageJsonPath | ConvertFrom-Json
+          $packageJson.main = 'desktop-windows/probe/adapter-main.mjs'
+          $utf8 = New-Object Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText($packageJsonPath, ($packageJson | ConvertTo-Json -Depth 8), $utf8)
+          "REEL_EVIDENCE_PACKAGE=$package" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "REEL_EVIDENCE_HELPER=$(Join-Path $app 'desktop-windows/native/ReelNativeJoin.exe')" | Add-Content -LiteralPath $env:GITHUB_ENV
+      - name: Add a copy-only microphone opt-in probe flag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Join-Path $env:REEL_EVIDENCE_PACKAGE 'resources/app'
+          $main = Join-Path $app 'desktop-windows/probe/adapter-main.mjs'
+          $text = [IO.File]::ReadAllText($main)
+          $old = 'const start = () => manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true });'
+          $new = 'const start = () => manualController.start({ ownerUserID, sourceID: pickerChoice.id, consentConfirmed: true, includeMicrophone: process.argv.includes('--test-microphone') });'
+          if ([regex]::Matches($text, [regex]::Escape($old)).Count -ne 1) { throw 'The exact manual picker probe patch point changed.' }
+          [IO.File]::WriteAllText($main, $text.Replace($old, $new), [Text.UTF8Encoding]::new($false))
+      - name: Install the media verifier
+        shell: pwsh
+        run: choco install ffmpeg --no-progress -y
+      - name: Install the pinned Microsoft-signed virtual audio endpoint on this runner only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $work = Join-Path $env:RUNNER_TEMP 'signed-audio-fixture'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $wdk = if ($env:REEL_ARCH -eq 'arm64') {
+            @{ id='microsoft.windows.wdk.arm64'; hash='e705b2a63eab891def8f98087666f93e8f21da8e3b5def81a624b83fef5bdae9'; tools='ARM64' }
+          } else {
+            @{ id='microsoft.windows.wdk.x64'; hash='c393d03dfb640b5c92f546b32f6770ef68cd3aaf691956e7d66d8e2c28a1b55e'; tools='x64' }
+          }
+          $version = '10.0.26100.6584'
+          $wdkFile = Join-Path $work 'wdk.nupkg'
+          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/$($wdk.id)/$version/$($wdk.id).$version.nupkg" -OutFile $wdkFile
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $wdkFile).Hash.ToLowerInvariant() -ne $wdk.hash) { throw 'Microsoft WDK package hash mismatch.' }
+          $wdkZip = Join-Path $work 'wdk.zip'; Move-Item -LiteralPath $wdkFile -Destination $wdkZip
+          $wdkRoot = Join-Path $work 'wdk'; Expand-Archive -LiteralPath $wdkZip -DestinationPath $wdkRoot
+          $devcon = Join-Path $wdkRoot ("c/tools/10.0.26100.0/{0}/devcon.exe" -f $wdk.tools)
+          $signature = Get-AuthenticodeSignature -LiteralPath $devcon
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') { throw 'Microsoft DevCon signature validation failed.' }
+          Write-Host ("Verified Microsoft DevCon signer: " + $signature.SignerCertificate.Subject)
+
+          $driverZip = Join-Path $work 'vbcable.zip'
+          Invoke-WebRequest -Uri 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip' -OutFile $driverZip
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $driverZip).Hash.ToLowerInvariant() -ne 'bc44e8974191a5a2427d6c979e2dab08dbb09925f3f435dfa2f0ba3e45b6eb90') { throw 'Official VB-CABLE package hash mismatch.' }
+          $driverRoot = Join-Path $work 'vbcable'; Expand-Archive -LiteralPath $driverZip -DestinationPath $driverRoot
+          $catalogSignature = Get-AuthenticodeSignature -LiteralPath (Join-Path $driverRoot 'vbaudio_cable64_win10.cat')
+          if ($catalogSignature.Status -ne 'Valid' -or $catalogSignature.SignerCertificate.Subject -notmatch 'Microsoft Windows Hardware Compatibility Publisher') { throw 'Windows did not validate the driver catalog signature.' }
+          Write-Host ("Verified driver catalog signer: " + $catalogSignature.SignerCertificate.Subject)
+          if (@(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like '*VB-Audio Virtual Cable*' }).Count) { throw 'VB-CABLE already exists on this runner.' }
+          $inf = Join-Path $driverRoot 'vbMmeCable64_win10.inf'
+          $installOutput = (& $devcon install $inf VBAudioVACWDM 2>&1 | Out-String)
+          $installExit = $LASTEXITCODE
+          Write-Host $installOutput
+          if ($installOutput -match '(?i)reboot|restart required' -or $installExit -ne 0) { throw "Driver install failed or requested reboot (DevCon exit $installExit)." }
+          Start-Service -Name AudioEndpointBuilder, Audiosrv -ErrorAction SilentlyContinue
+          $endpoints = @()
+          for ($i = 0; $i -lt 60 -and $endpoints.Count -lt 2; $i++) {
+            $endpoints = @(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' -and $_.FriendlyName -like '*VB-Audio Virtual Cable*' })
+            if ($endpoints.Count -lt 2) { Start-Sleep -Seconds 1 }
+          }
+          if ($endpoints.Count -lt 2) { throw "Expected active playback and capture endpoints; found $($endpoints.Count)." }
+          Write-Host ("Active signed virtual audio endpoints: " + (($endpoints | ForEach-Object FriendlyName) -join '; '))
+      - name: Confirm packaged WASAPI default endpoint
+        shell: pwsh
+        run: |
+          $env:REEL_AUDIO_PREFLIGHT_HELPER = $env:REEL_EVIDENCE_HELPER
+          @'
+          import { createHash } from 'node:crypto';
+          import { createNativeBridge } from './desktop-windows/src/native-bridge.mjs';
+          const bridge = createNativeBridge({ executable: process.env.REEL_AUDIO_PREFLIGHT_HELPER });
+          try {
+            const endpoint = await bridge.defaultRenderEndpoint();
+            if (!endpoint) throw Error('Windows did not expose an active default render endpoint.');
+            console.log(JSON.stringify({ defaultRenderEndpoint: true,
+              endpointFingerprint: createHash('sha256').update(endpoint).digest('hex').slice(0, 16) }));
+          } finally { await bridge.dispose(); }
+          '@ | node --input-type=module
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged WASAPI endpoint check failed.' }
+      - name: Record the production manual picker and verify MP4 and retained PCM
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'manual-capture-evidence'
+          $executable = Join-Path $env:REEL_EVIDENCE_PACKAGE 'Reel.exe'
+          $process = Start-Process -FilePath $executable -ArgumentList @('--manual-picker', "--out=$out") -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode) { throw "Packaged manual capture exited with $($process.ExitCode)." }
+          $verifyPath = Join-Path $env:RUNNER_TEMP "manual-capture-verification-$env:REEL_ARCH.json"
+          node $env:RUNNER_TEMP/adapter-verify.mjs --manual-picker "--out=$out" | Tee-Object -FilePath $verifyPath
+          if ($LASTEXITCODE) { throw 'Manual capture MP4/PCM verification failed.' }
+      - name: Exercise the explicit microphone opt-in through production getUserMedia
+        if: success()
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'manual-microphone-evidence'
+          $executable = Join-Path $env:REEL_EVIDENCE_PACKAGE 'Reel.exe'
+          $process = Start-Process -FilePath $executable -ArgumentList @('--manual-picker', '--test-microphone', "--out=$out") -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode) { throw "Explicit microphone opt-in capture exited with $($process.ExitCode)." }
+          $verifyPath = Join-Path $env:RUNNER_TEMP "manual-microphone-verification-$env:REEL_ARCH.json"
+          node $env:RUNNER_TEMP/adapter-verify.mjs --manual-picker "--out=$out" | Tee-Object -FilePath $verifyPath
+          if ($LASTEXITCODE) { throw 'Explicit microphone opt-in MP4/PCM verification failed.' }
+      - name: Upload only synthetic capture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-capture-evidence-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/manual-capture-evidence
+            ${{ runner.temp }}/manual-capture-verification-${{ matrix.arch }}.json
+            ${{ runner.temp }}/manual-microphone-evidence
+            ${{ runner.temp }}/manual-microphone-verification-${{ matrix.arch }}.json
+          if-no-files-found: warn
+          retention-days: 7
