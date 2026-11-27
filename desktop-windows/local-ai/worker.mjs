@@ -1,4 +1,4 @@
-import {env,pipeline} from './transformers.web.min.js';
+import {env,pipeline} from './transformers.bundle.mjs';
 import {normalizeWhisperLanguage} from '/whisper-languages.js';
 
 const MODEL='onnx-community/whisper-large-v3-turbo';

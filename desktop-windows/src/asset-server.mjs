@@ -42,7 +42,7 @@ export async function startAssetServer({root=fileURLToPath(new URL('../../',impo
   origin=`http://127.0.0.1:${server.address().port}`;
   const localFiles=new Map([
     ['/','desktop-windows/local-ai/index.html'],['/renderer.mjs','desktop-windows/local-ai/renderer.mjs'],['/preload.cjs','desktop-windows/local-ai/preload.cjs'],
-    ['/worker.mjs','desktop-windows/local-ai/worker.mjs'],['/transformers.web.min.js','desktop-windows/node_modules/@huggingface/transformers/dist/transformers.web.min.js'],
+    ['/worker.mjs','desktop-windows/local-ai/worker.mjs'],['/transformers.bundle.mjs','desktop-windows/local-ai/build/transformers.bundle.mjs'],
     ['/ort-wasm-simd-threaded.mjs','desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs'],
     ['/ort-wasm-simd-threaded.wasm','desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'],
     ['/whisper-languages.js','web/reel/whisper-languages.js'],

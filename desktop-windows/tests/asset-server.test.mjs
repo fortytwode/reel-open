@@ -24,7 +24,7 @@ test('serves only fixed app assets and rejects mutations, host spoofing and trav
   });
   assert.equal(status,403);
   assert.notEqual(server.localAIOrigin,server.origin);
-  for(const asset of ['/','/renderer.mjs','/worker.mjs','/transformers.web.min.js','/ort-wasm-simd-threaded.mjs','/ort-wasm-simd-threaded.wasm','/whisper-languages.js','/transformers.LICENSE']) {
+  for(const asset of ['/','/renderer.mjs','/worker.mjs','/transformers.bundle.mjs','/ort-wasm-simd-threaded.mjs','/ort-wasm-simd-threaded.wasm','/whisper-languages.js','/transformers.LICENSE']) {
     const result=await fetch(server.localAIOrigin+asset);
     assert.equal(result.status,200,asset);
     const policy=result.headers.get('content-security-policy');
@@ -68,7 +68,9 @@ test('portable allowlist contains every static dependency of the Windows main pr
   assert.match(packaging, /`core\.js`, `whisper-languages\.js`/);
   assert.match(build, /desktop-windows\/src\/trim-range\.mjs/);
   assert.match(build, /native\/ReelMediaTrim\.exe/);
-  assert.match(build,/node_modules\/@huggingface\/transformers\/dist\/transformers\.web\.min\.js/);
+  assert.match(build,/local-ai\/build\/transformers\.bundle\.mjs/);
+  assert.match(build,/build:local-ai/);
+  assert.doesNotMatch(build,/node_modules\/esbuild/);
   assert.match(build,/node_modules\/onnxruntime-web\/dist\/ort-wasm-simd-threaded\.wasm/);
   assert.match(localWorker,/onnx-community\/whisper-large-v3-turbo/);
   assert.match(localWorker,/360ebcde2559d60bb474678be3c1de9ef347d01a/);
@@ -82,11 +84,11 @@ test('portable allowlist contains every static dependency of the Windows main pr
 test('local inference assets are served from the supplied extracted package root',async t=>{
   const root=await mkdtemp(path.join(os.tmpdir(),'reel-package-root-'));
   t.after(()=>rm(root,{recursive:true,force:true}));
-  const runtime=path.join(root,'desktop-windows/node_modules/@huggingface/transformers/dist');
+  const runtime=path.join(root,'desktop-windows/local-ai/build');
   await mkdir(runtime,{recursive:true});
-  await writeFile(path.join(runtime,'transformers.web.min.js'),'packaged-transformers-runtime');
+  await writeFile(path.join(runtime,'transformers.bundle.mjs'),'packaged-transformers-runtime');
   const server=await startAssetServer({root});t.after(()=>server.close());
-  const response=await fetch(server.localAIOrigin+'/transformers.web.min.js');
+  const response=await fetch(server.localAIOrigin+'/transformers.bundle.mjs');
   assert.equal(response.status,200);
   assert.equal(await response.text(),'packaged-transformers-runtime');
 });
