@@ -90,6 +90,14 @@ function reportProgress(event){
   currentPhase=event.phase;
   onPhase(event.phase);
 }
+function logSummaryQuality(run,result){
+  const item={time:new Date().toISOString(),run,phase:'summary_quality',
+    expectedEngine:result?.engine==='Flan-T5-small q8',
+    inventorySubject:/inventory|dashboard/iu.test(result?.text??''),
+    distinctiveItem:/8421/iu.test(result?.text??''),
+    exportAction:/export|CSV|low-stock/iu.test(result?.text??'')};
+  const line=JSON.stringify(item);appendFileSync(logPath,line+'\n');process.stdout.write(line+'\n');
+}
 async function transcribeWithBounds(name,samples,totalTimeoutMs){
   currentRun=name;currentPhase='request_start';
   const controller=new AbortController(),started=Date.now();
@@ -220,6 +228,7 @@ async function runSmoke(){
       await bounded('summary_renderer_startup',()=>local.probeRenderer(),20_000);
       await bounded('summary_model_pin_probe',probeSummaryModelRequest,10_000);
       const first=await summarizeWithBounds('first_summary',sample,12*60_000);
+      logSummaryQuality('first_summary',first);
       assert.equal(first.engine,'Flan-T5-small q8');
       assert.match(first.text,/inventory|dashboard/iu,'Summary should identify the synthetic inventory walkthrough.');
       assert.match(first.text,/8421/iu,'Summary should preserve its distinctive item number.');
@@ -235,6 +244,7 @@ async function runSmoke(){
       assert.equal(offlineCacheEntries,cacheEntries,'Recreated Electron renderer must reuse the same persistent model cache.');
       log('offline_cache_snapshot_complete',undefined,undefined,undefined,undefined,undefined,undefined,offlineCacheEntries);
       const second=await summarizeWithBounds('offline_summary',sample,4*60_000);
+      logSummaryQuality('offline_summary',second);
       assert.equal(second.engine,'Flan-T5-small q8');
       assert.match(second.text,/inventory|dashboard/iu);assert.match(second.text,/8421/iu);assert.match(second.text,/export|CSV|low-stock/iu);
       log('offline_summary_complete');
