@@ -1,7 +1,7 @@
 import {app,BrowserWindow,clipboard,desktopCapturer,dialog,ipcMain,Menu,Notification,safeStorage,shell} from 'electron';
 import {execFile,spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {existsSync,mkdirSync,readFileSync} from 'node:fs';
+import {existsSync,mkdirSync,readdirSync,readFileSync} from 'node:fs';
 import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -17,6 +17,7 @@ import {createMeetingProcessor} from './src/meeting-processing.mjs';
 import {createLocalWhisper} from './src/local-whisper.mjs';
 import {createMeetingShare} from './src/meeting-share.mjs';
 import {createMeetingReminders,meetingReminderIDFromActivation} from './src/meeting-reminders.mjs';
+import {createEncryptedReminderStore,createWindowsReminderTaskManager} from './src/windows-reminder-tasks.mjs';
 import {startAssetServer} from './src/asset-server.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
@@ -25,7 +26,52 @@ try {
   org=organizationConfig(JSON.parse(readFileSync(path.join(root,'organization.json'),'utf8')));
 } catch { /* local setup remains available */ }
 
-let window,service,bridge,assets,localWhisper,poll,quitting=false,shutdown=null,queuedReminderMeetingID=null;
+const TOAST_APP_ID='RocketShipHQ.Reel.Companion';
+const TOAST_ACTIVATOR_CLSID='{A4E2C27A-6732-45DA-B357-C33516B7901B}';
+let window,service,bridge,assets,localWhisper,poll,reminderPoll,quitting=false,shutdown=null,queuedReminderMeetingID=null;
+let auth,store,reminders,reminderTasks,reminderTriggerOnly=false,pendingReminderTokens=[];
+function reminderTriggerFromArgs(args=[]) {
+  const found=args.filter(arg=>typeof arg==='string'&&arg.startsWith('--meeting-reminder-trigger='))
+    .map(arg=>arg.slice('--meeting-reminder-trigger='.length));
+  return found.length===1&&/^[a-f0-9]{32}$/.test(found[0])?found[0]:null;
+}
+function reminderOpenFromArgs(args=[]) {
+  const found=args.filter(arg=>typeof arg==='string'&&arg.startsWith('--open-reminder-id='))
+    .map(arg=>arg.slice('--open-reminder-id='.length));
+  if(found.length!==1||!found[0]||found[0].length>12288) return null;
+  try { const value=decodeURIComponent(found[0]);return value.length<=4096?value:null; } catch { return null; }
+}
+function hasReminderTriggerMarker() {
+  try { return readdirSync(path.join(stateRoot,'reminder-triggers')).some(name=>/^[a-f0-9]{32}[.]trigger$/.test(name)); }
+  catch { return false; }
+}
+function processReminderTrigger(token) {
+  if(!/^[a-f0-9]{32}$/.test(token)||!reminders||!reminderTasks) return false;
+  const owner=auth?.getProfile()?.userID??null;
+  let enabled=false;
+  try { if(owner&&store) enabled=store.getSettings(owner).meetingReminders===true; } catch { enabled=false; }
+  const shown=reminders.fire(token,{owner,reminders:enabled,at:new Date()});
+  reminderTasks.clearPending(token);
+  return shown;
+}
+function processPendingReminderTriggers() {
+  for(const token of [...pendingReminderTokens,...(reminderTasks?.pending()??[])]) processReminderTrigger(token);
+  pendingReminderTokens=[];
+}
+function ensureWindowsToastShortcut() {
+  if(process.platform!=='win32') return true;
+  if(process.windowsStore===true) return true;
+  if(!app.isPackaged) return false;
+  try {
+    const programs=path.join(app.getPath('appData'),'Microsoft','Windows','Start Menu','Programs');
+    mkdirSync(programs,{recursive:true});
+    const link=path.join(programs,'Reel Companion.lnk');
+    const written=shell.writeShortcutLink(link,'create',{target:process.execPath,cwd:path.dirname(process.execPath),args:[],
+      description:'Reel Companion',appUserModelId:TOAST_APP_ID,toastActivatorClsid:TOAST_ACTIVATOR_CLSID});
+    const shortcut=written&&shell.readShortcutLink(link);
+    return Boolean(shortcut&&shortcut.appUserModelId===TOAST_APP_ID&&shortcut.toastActivatorClsid===TOAST_ACTIVATOR_CLSID);
+  } catch { return false; }
+}
 function focusMeetingReminder(meetingID) {
   if(typeof meetingID!=='string' || !meetingID || meetingID.length>4096) return;
   if(!window || window.isDestroyed() || !assets || window.webContents.getURL()!==assets.origin+'/') {
@@ -35,6 +81,10 @@ function focusMeetingReminder(meetingID) {
   window.webContents.send('reel-desktop:meeting-reminder',meetingID);
 }
 app.setName('Reel');
+if(process.platform==='win32') {
+  if(process.windowsStore!==true) app.setAppUserModelId(TOAST_APP_ID);
+  app.setToastActivatorCLSID(TOAST_ACTIVATOR_CLSID);
+}
 // Chromium and Reel must share the deployment scope before the instance lock and app readiness.
 const organizationKey=org ? createHash('sha256').update(`${org.projectID}\n${org.allowedEmailDomain}`).digest('hex') : 'local';
 const stateRoot=path.join(app.getPath('userData'),'organizations',organizationKey);
@@ -46,17 +96,27 @@ app.commandLine.appendSwitch('autoplay-policy','no-user-gesture-required');
 if(!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance',(_event,commandLine)=>{
+    const reminderToken=reminderTriggerFromArgs(commandLine);
+    if(reminderToken) {
+      pendingReminderTokens.push(reminderToken);
+      processPendingReminderTriggers();
+      return;
+    }
+    if(hasReminderTriggerMarker()) { processPendingReminderTriggers(); return; }
+    const reminderID=reminderOpenFromArgs(commandLine);
+    if(reminderID) { focusMeetingReminder(reminderID); return; }
     const action=desktopLaunchAction(commandLine);
     if(action) { void openProductEntry(action); return; }
     window?.show();window?.focus();
   });
-  app.on('activate',()=>window?.show());
+  app.on('activate',()=>{if(hasReminderTriggerMarker()) processPendingReminderTriggers();else window?.show();});
   app.on('window-all-closed',()=>app.quit());
   app.on('before-quit',event=>{
     if(quitting) return;
     event.preventDefault();
     if(shutdown) return;
     clearInterval(poll);
+    clearInterval(reminderPoll);
     shutdown=(async()=>{
       try {
         await service?.dispose();localWhisper?.dispose();await bridge?.dispose();await assets?.close();
@@ -73,7 +133,9 @@ else {
   app.whenReady().then(async()=>{
     const action=desktopLaunchAction(process.argv);
     if(action && await openProductEntry(action)) { app.quit(); return; }
-    await run();
+    const triggerToken=reminderTriggerFromArgs(process.argv),openReminderID=reminderOpenFromArgs(process.argv);
+    if(openReminderID) queuedReminderMeetingID=openReminderID;
+    await run({triggerOnly:Boolean(triggerToken||hasReminderTriggerMarker()),triggerToken});
   }).catch(async()=>{
     await dialog.showMessageBox({type:'error',title:'Reel could not start',message:'Reel could not load its local desktop components. Reopen Reel or use the browser recorder.'});
     quitting=true;app.quit();
@@ -143,22 +205,16 @@ function runMediaTrim(executable,args) {
     resolve(stdout.trim());
   }));
 }
-async function run() {
+async function run({triggerOnly=false,triggerToken=null}={}) {
   if(process.platform!=='win32') throw Error('This app requires Windows.');
-  assets=await startAssetServer();
-  const {origin}=assets;
-  if(typeof Notification.handleActivation==='function') Notification.handleActivation(details=>{
-    const meetingID=meetingReminderIDFromActivation(details);
-    if(meetingID) focusMeetingReminder(meetingID);
-  });
+  const toastReady=ensureWindowsToastShortcut();
   const storageRoot=path.join(stateRoot,'recordings');
-  const store=createLocalRecordingStore({root:storageRoot});
+  store=createLocalRecordingStore({root:storageRoot});
   let credentials = {};
   try {
     credentials = JSON.parse(readFileSync(path.join(root, 'config.json'), 'utf8'));
   } catch { /* local setup remains available */ }
   const helper=path.join(root,'native','ReelNativeJoin.exe');
-  let auth=null;
   if(org && /^[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(org.googleDesktopClientId)
     && credentials.googleDesktopClientId === org.googleDesktopClientId
     && typeof credentials.googleDesktopClientSecret === 'string'
@@ -176,6 +232,37 @@ async function run() {
       }});
     auth.load();
   }
+  let persistentError=null, persistence=null;
+  try {
+    reminderTasks=createWindowsReminderTaskManager({stateRoot,scope:organizationKey,windowsStore:process.windowsStore===true,executable:process.execPath});
+    if(!toastReady) throw Error('Windows notification shortcut is unavailable.');
+    const encrypted=createEncryptedReminderStore({safeStorage,filePath:path.join(stateRoot,'meeting-reminders.encrypted')});
+    persistence={load:encrypted.load,save:encrypted.save,sync:reminderTasks.sync};
+  } catch {
+    persistentError='Windows could not securely schedule notifications. Keep Reel Companion open and retry calendar refresh.';
+    try { reminderTasks?.sync([]); } catch { /* Fire-time validation still rejects missing encrypted schedule records. */ }
+    persistence=null;
+  }
+  reminders=createMeetingReminders({Notification,activate:focusMeetingReminder,persistence,persistentError});
+  if(typeof Notification.handleActivation==='function') Notification.handleActivation(details=>{
+    const meetingID=meetingReminderIDFromActivation(details);
+    if(!meetingID) return;
+    if(reminderTriggerOnly) {
+      const args=process.argv.slice(1).filter(arg=>!arg.startsWith('--meeting-reminder-trigger=')&&!arg.startsWith('--open-reminder-id='));
+      app.relaunch({args:[...args,`--open-reminder-id=${encodeURIComponent(meetingID)}`]});app.quit();
+    } else focusMeetingReminder(meetingID);
+  });
+  if(triggerOnly) {
+    reminderTriggerOnly=true;
+    if(triggerToken) pendingReminderTokens.push(triggerToken);
+    processPendingReminderTriggers();
+    setTimeout(()=>app.quit(),1000);
+    return;
+  }
+  reminderTriggerOnly=false;
+  processPendingReminderTriggers();
+  assets=await startAssetServer();
+  const {origin}=assets;
   localWhisper=auth&&typeof ipcMain.on==='function' ? createLocalWhisper({BrowserWindow,ipcMain,origin:assets.localAIOrigin,ownerID:()=>auth?.getProfile()?.userID??null}) : null;
   const processor=auth ? createMeetingProcessor({auth,store,speechURL:org.speechServiceURL,deliveryURL:org.deliveryServiceURL,allowedEmailDomain:org.allowedEmailDomain,
     localTranscribe:localWhisper?.transcribe,modeForOwner:ownerUserID=>store.getSettings(ownerUserID)?.localTranscription?'local':'cloud'}) : null;
@@ -185,7 +272,6 @@ async function run() {
     onCompleted:({ownerUserID,recording})=>{ if (!shutdown && auth?.getProfile()?.userID===ownerUserID && store.getProcessing({ownerUserID,id:recording.id})?.phase==='pending') void processor.process({ownerUserID,id:recording.id}).catch(()=>{}); },
     onFailure:()=>{void service?.action('stopRecording').catch(()=>{});},
     onSourceEnded:()=>service?.action('stopRecording')});
-  const reminders=createMeetingReminders({Notification,activate:focusMeetingReminder});
   service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,reminderScheduler:reminders,discover:discoverGoogleMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
@@ -250,6 +336,7 @@ async function run() {
   await window.loadURL(origin+'/');window.show();
   if(queuedReminderMeetingID) focusMeetingReminder(queuedReminderMeetingID);
   poll=setInterval(()=>void service.pulse().catch(()=>{}),20_000);
+  reminderPoll=setInterval(processPendingReminderTriggers,500);
   void service.pulse().catch(()=>{});
   void processor?.resume().catch(()=>{});
 }

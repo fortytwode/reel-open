@@ -29,6 +29,55 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Parse reminder helper with Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $parserCommand = @'
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile('desktop-windows/src/windows-reminder-tasks.ps1', [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) {
+            foreach ($parseError in $parseErrors) { [Console]::Error.WriteLine($parseError.Message) }
+            exit 1
+          }
+          '@
+          & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command $parserCommand
+          if ($LASTEXITCODE -ne 0) { throw 'The reminder helper failed Windows PowerShell 5.1 parsing.' }
+          $helperPath = (Resolve-Path 'desktop-windows/src/windows-reminder-tasks.ps1').Path
+          $diagnosticsPath = [IO.Path]::Combine($env:RUNNER_TEMP, 'reminder-config-preflight.log')
+          function Invoke-ReminderConfigValidation([string]$configPath, [bool]$expectedSuccess) {
+            $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $helperPath + '"'),
+              '-ValidateLaunchConfig', '-LaunchConfigPath', ('"' + $configPath + '"'), '-Diagnostic')
+            $process = Start-Process -FilePath $windowsPowerShell -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+            if ($expectedSuccess -and $process.ExitCode -ne 0) { throw "Windows PowerShell 5.1 rejected reminder config $configPath." }
+            if (-not $expectedSuccess -and $process.ExitCode -eq 0) { throw "Windows PowerShell 5.1 accepted invalid reminder config $configPath." }
+          }
+          function Encode-LaunchValue([string]$value) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value)) }
+          $portableExe = Encode-LaunchValue 'C:\Program Files\Reel.exe'
+          $probeArgument = Encode-LaunchValue '--probe'
+          $diagnostics = Encode-LaunchValue $diagnosticsPath
+          $configs = @(
+            @{ name='portable-production'; text="version=2`nmode=portable`nexecutableB64=$portableExe`nargumentCount=0`n" },
+            @{ name='portable-diagnostic'; text="version=2`nmode=portable`nexecutableB64=$portableExe`nargumentCount=1`nargument.0=$probeArgument`nwaitForChildExit=true`ndiagnosticsFileB64=$diagnostics`n" },
+            @{ name='msix-production'; text="version=2`nmode=msix`n" },
+            @{ name='msix-diagnostic'; text="version=2`nmode=msix`ndiagnosticsFileB64=$diagnostics`n" }
+          )
+          foreach ($config in $configs) {
+            $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ($config.name + '.conf'))
+            [IO.File]::WriteAllText($configPath, $config.text, [Text.UTF8Encoding]::new($false))
+            Invoke-ReminderConfigValidation $configPath $true
+          }
+          $invalidConfigs = @(
+            @{ name='duplicate-key'; text="version=2`nmode=msix`nmode=portable`n" },
+            @{ name='unknown-key'; text="version=2`nmode=msix`ncommand=whoami`n" },
+            @{ name='invalid-base64'; text="version=2`nmode=portable`nexecutableB64=%%%`nargumentCount=0`n" }
+          )
+          foreach ($config in $invalidConfigs) {
+            $configPath = [IO.Path]::Combine($env:RUNNER_TEMP, ('invalid-' + $config.name + '.conf'))
+            [IO.File]::WriteAllText($configPath, $config.text, [Text.UTF8Encoding]::new($false))
+            Invoke-ReminderConfigValidation $configPath $false
+          }
       - name: Install pinned local Whisper browser runtime
         run: npm ci --ignore-scripts --prefix desktop-windows
       - run: npm --prefix desktop-windows test
@@ -62,6 +111,21 @@ jobs:
           $version = (Get-Content -Raw desktop-windows/package.json | ConvertFrom-Json).version
           ./desktop-windows/build-portable.ps1 -ElectronDist desktop-windows/probe/node_modules/electron/dist -ExpectedArchitecture $env:REEL_ARCH -GoogleDesktopClientId $org.googleDesktopClientId -GoogleDesktopCredentialsFile $credentials -Version "$version-ci" -OutputZip $zip
           Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP/demo-package"
+      - name: Snapshot runner and verify reminders before model inference
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $processes = foreach ($name in @('electron','reel','node','powershell','pwsh')) {
+            $procSet = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+            $workingSet = 0; $cpuSeconds = 0
+            foreach ($proc in $procSet) { $workingSet += $proc.WorkingSet64; if ($null -ne $proc.CPU) { $cpuSeconds += $proc.CPU } }
+            [pscustomobject]@{ name=$name; count=$procSet.Count; workingSetMB=[math]::Round($workingSet / 1MB); cpuSeconds=[math]::Round($cpuSeconds) }
+          }
+          $cpu = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue).PercentProcessorTime
+          $memory = [math]::Round($os.FreePhysicalMemory / 1KB)
+          Write-Host ("Sanitized runner resources before reminder smoke: " + (@{freePhysicalMemoryMB=$memory;cpuPercent=$cpu;processes=$processes} | ConvertTo-Json -Compress -Depth 3))
+          $env:REEL_REMINDER_SMOKE_ELECTRON = (Resolve-Path 'desktop-windows/probe/node_modules/electron/dist/electron.exe').Path
+          node desktop-windows/tests/windows-reminder-task.smoke.mjs portable
       - name: Preflight extracted local Whisper assets
         shell: pwsh
         run: |
@@ -184,6 +248,23 @@ jobs:
           path: ${{ runner.temp }}/whisper-smoke-${{ matrix.arch }}.log
           if-no-files-found: warn
           retention-days: 7
+      - name: Snapshot runner after packaged local Whisper inference
+        if: always()
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          $processes = foreach ($name in @('electron','reel','node','powershell','pwsh')) {
+            $procSet = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+            $workingSet = 0; $cpuSeconds = 0
+            foreach ($proc in $procSet) { $workingSet += $proc.WorkingSet64; if ($null -ne $proc.CPU) { $cpuSeconds += $proc.CPU } }
+            [pscustomobject]@{ name=$name; count=$procSet.Count; workingSetMB=[math]::Round($workingSet / 1MB); cpuSeconds=[math]::Round($cpuSeconds) }
+          }
+          $cpu = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue).PercentProcessorTime
+          $memory = [math]::Round($os.FreePhysicalMemory / 1KB)
+          Write-Host ("Sanitized runner resources after local Whisper: " + (@{freePhysicalMemoryMB=$memory;cpuPercent=$cpu;processes=$processes} | ConvertTo-Json -Compress -Depth 3))
+          $caches = @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'reel-whisper-cache-*' -ErrorAction SilentlyContinue)
+          Write-Host ("Sanitized Whisper cache directories remaining: $($caches.Count)")
+          foreach ($cache in $caches) { Remove-Item -LiteralPath $cache.FullName -Recurse -Force }
       - name: Launch the extracted app and verify first-run setup
         working-directory: firebase/tests
         shell: bash

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -65,7 +65,8 @@ async function startDesktop(base, org) {
   const { promise: quit, resolve: didQuit } = Promise.withResolvers();
   const app = Object.assign(new EventEmitter(), {
     getPath: name => paths[name], setPath(name, value) { assert.equal(existsSync(value), true); paths[name] = value; },
-    setName: noop, commandLine: { appendSwitch: noop }, requestSingleInstanceLock() { lockedPaths = { ...paths }; return true; },
+    setName: noop, setAppUserModelId: noop, setToastActivatorCLSID: noop,
+    commandLine: { appendSwitch: noop }, requestSingleInstanceLock() { lockedPaths = { ...paths }; return true; },
     whenReady: () => ({ then(callback) { launch = callback; return { catch: noop }; } }), quit: didQuit
   });
   const entry = new URL(`../main.mjs?organization-state-test=${launches++}`, import.meta.url);
@@ -75,7 +76,7 @@ async function startDesktop(base, org) {
       ipcMain: { handle: (name, handler) => handlers.set(name, handler) }, Menu: { buildFromTemplate: noop, setApplicationMenu: noop },
       safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
         decryptString(bytes) { decryptions.push(bytes); return bytes.toString(); } } },
-    'node:fs': { existsSync: file => path.basename(file) === 'ReelNativeJoin.exe' || existsSync(file), mkdirSync,
+    'node:fs': { existsSync: file => path.basename(file) === 'ReelNativeJoin.exe' || existsSync(file), mkdirSync, readdirSync,
       readFileSync(file, encoding) {
         if (path.basename(file) === 'organization.json' && org) return JSON.stringify(org);
         if (path.basename(file) === 'organization.json') throw Object.assign(Error('No packaged organization'), { code: 'ENOENT' });

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createMeetingReminders, meetingReminderIDFromActivation } from '../src/meeting-reminders.mjs';
+import { createEncryptedReminderStore } from '../src/windows-reminder-tasks.mjs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const start = Date.parse('2026-11-26T10:00:00Z');
 const meeting = (id = 'meeting-1', startAt = start) => ({ id, title: 'Planning',
@@ -80,4 +84,137 @@ test('toast activation arguments safely carry the meeting ID for cold launch foc
   assert.equal(meetingReminderIDFromActivation({type:'click',arguments:'meetingId=meeting%26%221'}), 'meeting&"1');
   assert.equal(meetingReminderIDFromActivation({type:'action',arguments:'meetingId=meeting-1'}), null);
   assert.equal(meetingReminderIDFromActivation({type:'click',arguments:'meetingId=a&meetingId=b'}), null);
+});
+
+test('persistent schedules store opaque task tokens and fire only for the opted-in owner', () => {
+  const f = fixture();
+  let records = [], plans = [];
+  const scheduler = createMeetingReminders({ Notification: class extends Object { constructor(options) { super(); this.options=options; } on() {} show() { f.shown.push(this); } },
+    now: () => new Date(start - 60_000), persistence: { load: () => records, save: value => { records=structuredClone(value); }, sync: value => plans.push(structuredClone(value)) } });
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting('private-event-id')]});
+  assert.equal(records.length,1);
+  assert.equal(records[0].meetingID,'private-event-id');
+  assert.match(records[0].token,/^[a-f0-9]{32}$/);
+  assert.deepEqual(plans.at(-1),[{token:records[0].token,start:new Date(start).toISOString(),end:new Date(start+30*60_000).toISOString()}],
+    'Task Scheduler receives only an opaque token and event time bounds, never the meeting ID or title.');
+  const token=records[0].token;
+  assert.equal(scheduler.fire(token,{owner:'owner-b',reminders:true,at:new Date(start)}),false,
+    'A task from a different signed-in account is discarded without a toast.');
+  assert.equal(records.length,0);
+  assert.equal(f.shown.length,0);
+  assert.equal(plans.at(-1).length,0,'Discarding a stale task also removes its OS registration.');
+});
+
+test('persistent reminders remain marked fired across refreshes and restarts', () => {
+  const f=fixture();let records=[],plan=[];
+  const persistence={load:()=>records,save:value=>{records=structuredClone(value);},sync:value=>{plan=structuredClone(value);}};
+  const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+  const first=createMeetingReminders({Notification,now:()=>new Date(start-60_000),persistence});
+  first.update({owner:'owner-a',reminders:true,meetings:[meeting()]});
+  const token=records[0].token;
+  assert.equal(first.fire(token,{owner:'owner-a',reminders:true,at:new Date(start)}),true);
+  assert.equal(records[0].fired,true);assert.deepEqual(plan,[]);assert.equal(f.shown.length,1);
+  first.update({owner:'owner-a',reminders:true,meetings:[meeting()],at:new Date(start+1_000)});
+  const restarted=createMeetingReminders({Notification,now:()=>new Date(start+2_000),persistence});
+  restarted.update({owner:'owner-a',reminders:true,meetings:[meeting()],at:new Date(start+2_000)});
+  assert.equal(restarted.fire(token,{owner:'owner-a',reminders:true,at:new Date(start+3_000)}),false);
+  assert.equal(f.shown.length,1,'One OS task cannot create a duplicate reminder after refresh or restart.');
+});
+
+test('persistent schedule cancellation revokes stale tasks on opt-out and end time', () => {
+  const f = fixture();
+  let records = [], plan = [];
+  const scheduler = createMeetingReminders({ Notification: class { constructor(options) { this.options=options; } on() {} show() { f.shown.push(this); } },
+    now: () => new Date(start - 60_000), persistence: { load: () => records, save: value => { records=structuredClone(value); }, sync: value => { plan=structuredClone(value); } } });
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting()]});
+  const token=records[0].token;
+  scheduler.update({owner:'owner-a',reminders:false,meetings:[meeting()]});
+  assert.equal(records.length,0);assert.deepEqual(plan,[]);
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(start)}),false,'A stale task after opt-out fails closed.');
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting()]});
+  const expired=records[0].token;
+  assert.equal(scheduler.fire(expired,{owner:'owner-a',reminders:true,at:new Date(start+30*60_000)}),false,'A delayed task after meeting end is discarded.');
+  assert.equal(f.shown.length,0);
+});
+
+test('a fractionally early Windows trigger is re-armed without losing the reminder', () => {
+  const f=fixture();let records=[],plan=[];
+  const fractionalStart=start+250;
+  const persistence={load:()=>records,save:value=>{records=structuredClone(value);},sync:value=>{plan=structuredClone(value);}};
+  const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+  const scheduler=createMeetingReminders({Notification,now:()=>new Date(fractionalStart-60_000),persistence});
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting('fractional',fractionalStart)]});
+  const token=records[0].token;
+  assert.equal(records[0].start,'2026-11-26T10:00:00.250Z');
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart-1)}),false);
+  assert.equal(records.length,1);
+  assert.deepEqual(plan,[{token,start:new Date(fractionalStart+4_999).toISOString(),retry:true,
+    end:new Date(fractionalStart+30*60_000).toISOString()}],
+    'An early task is replaced by an explicit retry bounded by its meeting end.');
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart)}),true);
+  assert.equal(f.shown.length,1);
+});
+
+test('refreshing an unchanged event ID and start updates title and shortened end time', () => {
+  const f=fixture();let records=[],plan=[];
+  const persistence={load:()=>records,save:value=>{records=structuredClone(value);},sync:value=>{plan=structuredClone(value);}};
+  const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+  const scheduler=createMeetingReminders({Notification,now:()=>new Date(start-60_000),persistence});
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting('same-event')]});
+  const token=records[0].token;
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[{...meeting('same-event'),title:'Updated title',end:new Date(start+10*60_000).toISOString()}]});
+  assert.equal(records[0].title,'Updated title');
+  assert.equal(records[0].end,new Date(start+10*60_000).toISOString());
+  assert.deepEqual(plan,[{token,start:new Date(start).toISOString(),end:new Date(start+10*60_000).toISOString()}]);
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(start+11*60_000)}),false,
+    'A shortened event cannot notify after its refreshed end.');
+  assert.equal(records.length,0);
+  assert.equal(f.shown.length,0);
+});
+
+test('a refreshed meeting title is used when its persistent reminder fires', () => {
+  const f=fixture();let records=[];
+  const persistence={load:()=>records,save:value=>{records=structuredClone(value);},sync:()=>{}};
+  const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+  const scheduler=createMeetingReminders({Notification,now:()=>new Date(start-60_000),persistence});
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[meeting('renamed-event')]});
+  const token=records[0].token;
+  scheduler.update({owner:'owner-a',reminders:true,meetings:[{...meeting('renamed-event'),title:'New title'}]});
+  assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(start)}),true);
+  assert.equal(f.shown[0].options.body,'New title');
+});
+
+test('an early-trigger retry survives a failed task sync and is retried from encrypted schedule state', () => {
+  const f=fixture(),root=mkdtempSync(path.join(os.tmpdir(),'reel-reminder-retry-'));
+  let plan=[],failSync=false;
+  try {
+    const filePath=path.join(root,'reminders.encrypted');
+    const safeStorage={isEncryptionAvailable:()=>true,encryptString:value=>Buffer.from(value).map(byte=>byte^0x5a),
+      decryptString:value=>Buffer.from(value).map(byte=>byte^0x5a).toString()};
+    const encrypted=createEncryptedReminderStore({safeStorage,filePath});
+    const persistence={load:encrypted.load,save:encrypted.save,sync:value=>{
+      if(failSync) throw Error('temporary Task Scheduler failure');
+      plan=structuredClone(value);
+    }};
+    const Notification=class { constructor(options){this.options=options;} on(){} show(){f.shown.push(this);} };
+    const fractionalStart=start+250,event=meeting('sync-retry',fractionalStart);
+    const scheduler=createMeetingReminders({Notification,now:()=>new Date(fractionalStart-60_000),persistence});
+    scheduler.update({owner:'owner-a',reminders:true,meetings:[event]});
+    const token=encrypted.load()[0].token,earlyAt=fractionalStart-1;
+    failSync=true;
+    assert.equal(scheduler.fire(token,{owner:'owner-a',reminders:true,at:new Date(earlyAt)}),false);
+    const persistedRetry=encrypted.load()[0].retryStart;
+    assert.equal(persistedRetry,new Date(fractionalStart+4_999).toISOString());
+    assert.equal(readFileSync(filePath,'utf8').includes('retryStart'),false,'The retry marker is encrypted at rest.');
+    assert.ok(scheduler.error);
+    failSync=false;
+    scheduler.dispose();
+    const restarted=createMeetingReminders({Notification,now:()=>new Date(earlyAt+1_000),persistence});
+    restarted.update({owner:'owner-a',reminders:true,meetings:[event],at:new Date(earlyAt+1_000)});
+    assert.deepEqual(plan,[{token,start:persistedRetry,retry:true,end:encrypted.load()[0].end}],
+      'A restarted scheduler reuses the saved retry boundary rather than reverting to the consumed event start.');
+    assert.equal(restarted.error,null);
+    assert.equal(restarted.fire(token,{owner:'owner-a',reminders:true,at:new Date(fractionalStart)}),true);
+    assert.equal(f.shown.length,1);
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });
