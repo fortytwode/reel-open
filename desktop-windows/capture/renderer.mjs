@@ -6,6 +6,8 @@ const MAX_PACKET = 16 * 1024 * 1024;
 const MAX_PENDING = 32 * 1024 * 1024;
 let stream = null, microphone = null, capture = null, failed = false, stopping = false, starting = false, sourceEnding = false, stopPromise;
 let sourceId, canRefreshAudio, refreshingAudio = false;
+let clickTimer = null, clickPending = null, selectedWindowHandle = null, clickSamplingPaused = false;
+let pauseAckPending = false, resumeAckPending = false;
 let pendingBytes = 0, audioPending = 0, audioFailed = false, audioOffset = 0, audioSum = 0, audioCount = 0;
 const audioWrites = new Set();
 let audioFailureNotice = Promise.resolve();
@@ -41,16 +43,35 @@ function audioBlock(value) {
 }
 const pending = new Set();
 function releaseTracks() { stream?.getTracks().forEach(track => track.stop()); microphone?.getTracks().forEach(track => track.stop()); }
+function stopClickSampling() { clearInterval(clickTimer); clickTimer = null; }
+function startClickSampling() {
+  if (!/^[1-9]\d{0,19}$/.test(selectedWindowHandle ?? '') || clickTimer || clickSamplingPaused) return;
+  let pending = false;
+  clickTimer = setInterval(async () => {
+    if (pending || failed || stopping || sourceEnding || capture?.phase !== 'recording') return;
+    pending = true;
+    const operation = api.samplePrimaryClick(); clickPending = operation;
+    try {
+      const point = await operation;
+      if (!failed && !stopping && capture?.phase === 'recording'
+        && Number.isFinite(point?.x) && Number.isFinite(point?.y)
+        && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1) {
+        capture.addClick({ x: point.x, y: point.y, time: (performance.timeOrigin + performance.now()) / 1000 });
+      }
+    } catch { stopClickSampling(); }
+    finally { if (clickPending === operation) clickPending = null; pending = false; }
+  }, 16);
+}
 function fail(reason, diagnosticName = null) {
   if (failed) return;
-  failed = true; releaseTracks();
+  failed = true; stopClickSampling(); releaseTracks();
   status.textContent = 'The meeting recording stopped.';
   if (capture) void capture.cancel().catch(() => {});
   void api.failed(reason, diagnosticName).catch(() => {});
 }
 function sourceEnded() {
   if (failed || stopping || sourceEnding) return;
-  sourceEnding = true;
+  sourceEnding = true; stopClickSampling();
   releaseTracks();
   void api.sourceEnded().catch(() => fail('source_ended'));
 }
@@ -102,11 +123,12 @@ async function refreshAudio(request, deadline) {
     if (!failed && !stopping && !sourceEnding) await api.audioRefreshed(request, installed).catch(() => {});
   }
 }
-async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled, microphone: includeMicrophone }) {
+async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled, microphone: includeMicrophone, selectedHwnd }) {
   if (starting || failed || stopping) return;
   starting = true;
   try {
     if (!/^window:\d+:[01]$/.test(selectedSource ?? '')) throw Error('Invalid owned source');
+    selectedWindowHandle = /^[1-9]\d{0,19}$/.test(selectedHwnd ?? '') ? selectedHwnd : null;
     sourceId = selectedSource;
     canRefreshAudio = refreshEnabled === true;
     const acquired = await acquireWindow(sourceId);
@@ -126,7 +148,17 @@ async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled
       settings: { quality: 'p720', fps: 15, audio: includeMicrophone ? 'micAndSystem' : 'systemOnly', bubbleSize: 'medium' },
       display: stream, camera: null, mic: microphone, composite: false,
       events: { onTick: () => {
-        if (capture.pauseConfirmed && !stopping) void api.pauseChanged(true).catch(() => {});
+        if (capture.pauseConfirmed && !stopping) {
+          clickSamplingPaused = true; stopClickSampling();
+          if (!pauseAckPending) {
+            pauseAckPending = true;
+            void (async () => { await clickPending?.catch(() => {}); await api.pauseChanged(true); })()
+              .catch(() => {}).finally(() => { pauseAckPending = false; });
+          }
+        } else if (resumeAckPending && !stopping) {
+          resumeAckPending = false;
+          void api.pauseChanged(false).then(() => { clickSamplingPaused = false; startClickSampling(); }).catch(() => {});
+        }
       }, onAudio: audioBlock, onInit: bytes => append('init', 0, 0, bytes),
         onSegment: (index, duration, bytes) => append('fragment', index, duration, bytes),
         onError: () => fail('encoder_failed'), onSourceEnded: sourceEnded },
@@ -136,16 +168,18 @@ async function start({ sourceId: selectedSource, canRefreshAudio: refreshEnabled
     if (!/^avc1\./.test(info.video ?? '') || info.audio !== 'mp4a.40.2') throw Error('H.264 and AAC required');
     await api.ready(info);
     if (failed || stopping) { releaseTracks(); return; }
-    capture.begin(); status.textContent = 'Recording the meeting locally. All computer sound is included.';
+    capture.begin(); startClickSampling(); status.textContent = 'Recording the meeting locally. All computer sound is included.';
   } catch (error) { fail('capture_failed', error?.name); }
 }
 function stop() {
   if (stopPromise) return stopPromise;
   stopping = true;
+  stopClickSampling();
   // Release devices before awaiting the encoder, IPC, or filesystem.
   releaseTracks();
   stopPromise = (async () => {
     try {
+      await clickPending?.catch(() => {});
       if (!capture || failed) throw Error('Recording did not start');
       const done = await capture.stop();
       while (pending.size) await Promise.all([...pending]);
@@ -163,18 +197,26 @@ function stop() {
   })();
   return stopPromise;
 }
-window.addEventListener('pagehide', () => { stopping = true; releaseTracks(); });
+window.addEventListener('pagehide', () => { stopping = true; stopClickSampling(); releaseTracks(); });
 api.onCommand(command => {
   if (command.type === 'start') void start(command);
   else if (command.type === 'refresh-audio') void refreshAudio(command.request, command.deadline);
   else if (command.type === 'stop') void stop();
   else if (!stopping && !failed && capture) {
     if (command.type === 'pause') {
-      if (capture.pauseConfirmed) void api.pauseChanged(true).catch(() => {});
+      clickSamplingPaused = true;
+      stopClickSampling();
+      if (capture.pauseConfirmed && !pauseAckPending) {
+        pauseAckPending = true;
+        void (async () => { await clickPending?.catch(() => {}); await api.pauseChanged(true); })()
+          .catch(() => {}).finally(() => { pauseAckPending = false; });
+      }
       else capture.pause();
     } else if (command.type === 'resume') {
       capture.resume({ dropScreenFrame: true });
-      void api.pauseChanged(false).catch(() => {});
+      resumeAckPending = true;
+    } else if (command.type === 'click-sampling') {
+      if (command.enabled) startClickSampling(); else stopClickSampling();
     }
   }
 });

@@ -719,6 +719,40 @@ export function drawSharedFrame(ctx, frame, width, height, region) {
   ctx.drawImage(frame, source.x, source.y, source.width, source.height, (width - dw) / 2, (height - dh) / 2, dw, dh);
 }
 
+export const CLICK_RIPPLE_DURATION = 0.5;
+
+/** Draw selected-window click rings over the same fitted frame rectangle as drawSharedFrame. */
+export function drawClickRings(ctx, clicks, now, width, height, frame) {
+  const sourceWidth = frame?.displayWidth || frame?.videoWidth;
+  const sourceHeight = frame?.displayHeight || frame?.videoHeight;
+  if (!(sourceWidth > 0 && sourceHeight > 0 && width > 0 && height > 0)) return 0;
+  const scale = Math.min(width / sourceWidth, height / sourceHeight);
+  const drawWidth = sourceWidth * scale, drawHeight = sourceHeight * scale;
+  const left = (width - drawWidth) / 2, top = (height - drawHeight) / 2;
+  let drawn = 0;
+  ctx.save();
+  for (const click of clicks ?? []) {
+    if (![click?.x, click?.y, click?.time].every(Number.isFinite) || click.x < 0 || click.x > 1 || click.y < 0 || click.y > 1) continue;
+    const age = now - click.time;
+    if (age < 0 || age >= CLICK_RIPPLE_DURATION) continue;
+    const progress = age / CLICK_RIPPLE_DURATION;
+    const eased = 1 - (1 - progress) * (1 - progress);
+    const radius = (10 + 20 * eased) * scale;
+    const alpha = 0.85 * (1 - progress);
+    const x = left + click.x * drawWidth, y = top + click.y * drawHeight;
+    ctx.globalAlpha = alpha * 0.25;
+    ctx.fillStyle = '#ffc21a';
+    ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = '#ff9f0a';
+    ctx.lineWidth = 3 * scale;
+    ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.stroke();
+    drawn++;
+  }
+  ctx.restore();
+  return drawn;
+}
+
 /** Marks are normalized to the encoded frame so they match both a small preview and the video. */
 export function drawAnnotations(ctx, strokes, width, height) {
   if (!strokes?.length) return;

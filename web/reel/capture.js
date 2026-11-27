@@ -116,7 +116,7 @@ export class CaptureSession {
       camera: this.camera ? readable(this.camera) : null,
       audio: !!audioTrack, audioSampleRate: 48000, audioChannels: 2, audioClockTime: audioTrack ? performance.now() / 1000 : null,
     };
-    this.worker = new Worker(new URL("./encoder-worker.js?v=20261126-audio-timestamps", import.meta.url), { type: "module" });
+    this.worker = new Worker(new URL("./encoder-worker.js?v=20261127-click-rings", import.meta.url), { type: "module" });
     this.worker.onmessage = (e) => this.onWorker(e.data);
     this.worker.onerror = (e) => this.onWorker({ type: "error", message: e.message || "Recorder worker failed" });
     const ready = new Promise((resolve, reject) => { this.readyWaiter = { resolve, reject }; });
@@ -215,6 +215,11 @@ export class CaptureSession {
     this.worker.postMessage({ type: "resume", dropScreenFrame, audioTime: performance.now() / 1000 });
   }
   setAnnotations(strokes) { this.worker?.postMessage({ type: "annotations", strokes }); }
+  addClick(click) {
+    if (this.phase !== "recording" || ![click?.x, click?.y, click?.time].every(Number.isFinite)
+      || click.x < 0 || click.x > 1 || click.y < 0 || click.y > 1) return;
+    this.worker?.postMessage({ type: "click", x: click.x, y: click.y, time: click.time });
+  }
   setComposite(on) { this.composite = on; this.worker && this.worker.postMessage({ type: "layout", composite: on }); }
 
   /** Finishes encoding; resolves {duration} after the last segment has been delivered. */

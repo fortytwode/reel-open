@@ -153,6 +153,7 @@ function renderManualWindowCapture(signedIn) {
   byId('refreshCaptureWindows').disabled=!signedIn || busy;
   select.disabled=!signedIn || busy || !choices.length;
   byId('captureWindowMicrophone').disabled=!signedIn || busy;
+  byId('captureWindowHighlightClicks').disabled=!signedIn || busy;
   byId('pauseWindowRecording').classList.toggle('hidden',capture.phase!=='capturing');
   byId('resumeWindowRecording').classList.toggle('hidden',capture.phase!=='paused');
   byId('captureWindowConsent').disabled=!signedIn || busy;
@@ -508,7 +509,8 @@ document.addEventListener('click', event=>{
   if(action==='listCaptureWindows') { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='startWindowRecording') {
     void perform(action,{expectedOwnerUserID:snapshot?.profile?.userID,sourceID:byId('captureWindowSelect').value,
-      consentConfirmed:byId('captureWindowConsent').checked,includeMicrophone:byId('captureWindowMicrophone').checked}); return;
+      consentConfirmed:byId('captureWindowConsent').checked,includeMicrophone:byId('captureWindowMicrophone').checked,
+      highlightClicks:byId('captureWindowHighlightClicks').checked}); return;
   }
   if(['stopWindowRecording','pauseWindowRecording','resumeWindowRecording'].includes(action)) { perform(action,{expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if (action === 'joinMeeting') {

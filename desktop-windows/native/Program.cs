@@ -13,7 +13,10 @@ namespace ReelNative
     {
         private static readonly object outputGate = new object();
         private static readonly object pendingGate = new object();
+        private static readonly object clickStateGate = new object();
         private static readonly Dictionary<string, CancellationTokenSource> pending = new Dictionary<string, CancellationTokenSource>();
+        private static readonly Dictionary<string, ClickSamplerState> clickButtonState = new Dictionary<string, ClickSamplerState>();
+        private static string clickWindow;
         private static readonly WindowsJoiner joiner = new WindowsJoiner();
         private static readonly JavaScriptSerializer json = new JavaScriptSerializer();
         private static readonly Regex IdShape = new Regex(@"\A[a-zA-Z0-9_-]{1,80}\z", RegexOptions.CultureInvariant);
@@ -124,6 +127,35 @@ namespace ReelNative
                     string endpointId = DefaultRenderEndpoint();
                     var response = Response(id, endpointId != null, endpointId == null ? "endpoint_unavailable" : "endpoint_available");
                     if (endpointId != null) response["endpointId"] = endpointId;
+                    Send(response);
+                });
+                return;
+            }
+
+            if (op == "samplePrimaryClick")
+            {
+                string rawHwnd = Field(message, "hwnd");
+                ulong numericHwnd;
+                if (!Keys(message, "v", "id", "op", "hwnd") || String.IsNullOrEmpty(rawHwnd) ||
+                    !UInt64.TryParse(rawHwnd, out numericHwnd) || numericHwnd == 0)
+                { Send(Response(id, false, "invalid_request")); return; }
+                Worker(() => {
+                    ClickRingPosition click;
+                    bool clicked;
+                    lock (clickStateGate)
+                    {
+                        if (!String.Equals(clickWindow, rawHwnd, StringComparison.Ordinal))
+                        {
+                            clickButtonState.Clear();
+                            clickWindow = rawHwnd;
+                        }
+                        ClickSamplerState state;
+                        clickButtonState.TryGetValue(rawHwnd, out state);
+                        clicked = ClickSampling.TrySample(new IntPtr(unchecked((long)numericHwnd)), ref state, out click);
+                        clickButtonState[rawHwnd] = state;
+                    }
+                    var response = Response(id, true, clicked ? "click_sample" : "no_click");
+                    if (clicked) { response["x"] = click.X; response["y"] = click.Y; }
                     Send(response);
                 });
                 return;

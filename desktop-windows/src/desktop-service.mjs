@@ -195,15 +195,17 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
         await manualCapture.list(requireOwner(payload?.expectedOwnerUserID));
       } else if (name==='startWindowRecording') {
         if (!payload || typeof payload!=='object' || Array.isArray(payload)
-          || Object.keys(payload).some(key=>!['expectedOwnerUserID','sourceID','consentConfirmed','includeMicrophone'].includes(key))
+          || Object.keys(payload).some(key=>!['expectedOwnerUserID','sourceID','consentConfirmed','includeMicrophone','highlightClicks'].includes(key))
           || typeof payload.sourceID!=='string' || typeof payload.consentConfirmed!=='boolean'
-          || (payload.includeMicrophone!==undefined && typeof payload.includeMicrophone!=='boolean'))
+          || (payload.includeMicrophone!==undefined && typeof payload.includeMicrophone!=='boolean')
+          || (payload.highlightClicks!==undefined && typeof payload.highlightClicks!=='boolean'))
           throw Error('Invalid window recording request.');
         const meetingPhase=coordinator?.getState()?.phase ?? 'idle';
         if (meetingStartPending || ['joining','capturing','saving','close_required','retry_wait'].includes(meetingPhase))
           throw Error('Finish the current meeting recording before starting a window recording.');
         await manualCapture.start({ownerUserID:requireOwner(payload.expectedOwnerUserID),sourceID:payload.sourceID,
-          consentConfirmed:payload.consentConfirmed,includeMicrophone:payload.includeMicrophone ?? false});
+          consentConfirmed:payload.consentConfirmed,includeMicrophone:payload.includeMicrophone ?? false,
+          highlightClicks:payload.highlightClicks ?? true});
       } else {
         if (Object.keys(payload ?? {}).some(key=>!['expectedOwnerUserID'].includes(key))) throw Error('Invalid window stop request.');
         const ownerID=requireOwner(payload?.expectedOwnerUserID ?? null);

@@ -271,6 +271,7 @@ async function run({triggerOnly=false,triggerToken=null}={}) {
   const meetingShare=auth && org ? createMeetingShare({auth,store,org,copy:value=>clipboard.writeText(value)}) : null;
   const recorder=createWindowsRecorder({BrowserWindow,desktopCapturer,ipcMain,store,origin,
     defaultRenderEndpoint: bridge?.defaultRenderEndpoint,
+    samplePrimaryClick: bridge?.samplePrimaryClick,
     onCompleted:({ownerUserID,recording})=>{ const processing=store.getProcessing({ownerUserID,id:recording.id});
       if (!shutdown && auth?.getProfile()?.userID===ownerUserID && processing?.meeting?.manual!==true && processing?.phase==='pending') void processor.process({ownerUserID,id:recording.id}).catch(()=>{}); },
     onFailure:()=>{void service?.action('stopRecording').catch(()=>{});},

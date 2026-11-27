@@ -26,12 +26,18 @@ test('picker exposes opaque window choices and captures only the revalidated exa
   const start=f.calls.find(call=>call[0]==='start')[1];
   assert.equal(start.hwnd,'101'); assert.equal(start.manual,true); assert.equal(start.ownerUserID,'owner-a');
   assert.equal(start.title,'Chrome — Product demo'); assert.equal(start.sourceName,'Chrome — Product demo'); assert.deepEqual(start.meeting,{manual:true});
-  assert.equal(start.systemAudio,true); assert.equal(start.microphone,false);
+  assert.equal(start.systemAudio,true); assert.equal(start.microphone,false); assert.equal(start.highlightClicks,true);
   assert.equal(Object.hasOwn(start,'pid'),false);
   assert.deepEqual(f.controller.state(),{phase:'capturing',ownerUserID:'owner-a',title:'Chrome — Product demo'});
   await f.controller.stop('owner-a');
   assert.deepEqual(f.calls.at(-1),['stop',{handle:1}]);
   assert.equal(f.controller.state().phase,'completed');
+});
+
+test('manual capture honors the user disabling click highlights',async()=>{
+  const f=fixture(), [choice]=await f.controller.list('owner-a');
+  await f.controller.start({ownerUserID:'owner-a',sourceID:choice.id,consentConfirmed:true,highlightClicks:false});
+  assert.equal(f.calls.find(call=>call[0]==='start')[1].highlightClicks,false);
 });
 
 test('stale choices, changed accounts, non-window sources, and vanished targets fail closed',async()=>{
