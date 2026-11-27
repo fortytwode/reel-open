@@ -22,6 +22,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Check out the reviewed summary product source
+        uses: actions/checkout@v4
+        with:
+          ref: codex/windows-local-generative-summary
+          path: summary-product-source
+          persist-credentials: false
       - name: Download the exact demo package from run 45957975472
         uses: actions/download-artifact@v4
         with:
@@ -35,6 +41,14 @@ jobs:
         env:
           REEL_ARCH: ${{ matrix.arch }}
         run: |
+          $productRoot = Join-Path $env:GITHUB_WORKSPACE 'summary-product-source/desktop-windows'
+          $pinning = Get-Content -LiteralPath (Join-Path $productRoot 'local-ai/model-pinning.mjs') -Raw
+          $notice = Join-Path $productRoot 'local-ai/T5-CNN-SUMMARY-MODEL-NOTICE'
+          if ($pinning -notmatch 'SUMMARY_MODEL_ID=.onnx-community/t5-cnn-25k-ONNX.' -or
+              $pinning -notmatch 'SUMMARY_MODEL_REVISION=.c8ac103cd6b1937ba0f6c5d4bcc9eb18d8e19c95.' -or
+              $pinning -notmatch 'SUMMARY_TOKENIZER_MODEL_ID=.google-t5/t5-small.' -or
+              $pinning -notmatch 'SUMMARY_TOKENIZER_REVISION=.df1b051c49625cf57a3d0d8d3863ed4d13564fe4.' -or
+              -not (Test-Path $notice)) { throw 'The pinned summarizer, tokenizer, or notice path is missing.' }
           $kit = Join-Path $env:RUNNER_TEMP 'summary-qa-kit'
           $manifest = Get-Content -LiteralPath (Join-Path $kit 'manifest.json') -Raw | ConvertFrom-Json
           if ($manifest.sourceCommit -ne '01b0632f159b9ee4b22243268e8121cea3a8f0f3' -or $manifest.architecture -ne $env:REEL_ARCH) {
@@ -63,7 +77,19 @@ jobs:
           $originalPackage = [IO.File]::ReadAllText($packageJson)
           $log = Join-Path $env:RUNNER_TEMP "summary-artifact-$env:REEL_ARCH.log"
           try {
-            # Overlay only the corrected QA entry point and helper into this temporary extracted copy.
+            # Overlay only the summary implementation and smoke source in this temporary extracted copy.
+            $sourceRoot = Join-Path $env:GITHUB_WORKSPACE 'summary-product-source/desktop-windows'
+            $relativeFiles = @(
+              'local-ai/model-pinning.mjs', 'local-ai/renderer.mjs', 'local-ai/worker.mjs',
+              'src/desktop-service.mjs', 'src/local-recordings.mjs', 'ui/setup.mjs'
+            )
+            foreach ($relative in $relativeFiles) {
+              $destination = Join-Path $appRoot ('desktop-windows/' + $relative)
+              Copy-Item -LiteralPath (Join-Path $sourceRoot $relative) -Destination $destination
+            }
+            $noticeDestination = Join-Path $appRoot 'desktop-windows/local-ai/T5-CNN-SUMMARY-MODEL-NOTICE'
+            Copy-Item -LiteralPath (Join-Path $sourceRoot 'local-ai/T5-CNN-SUMMARY-MODEL-NOTICE') -Destination $noticeDestination
+            Remove-Item -LiteralPath (Join-Path $appRoot 'desktop-windows/local-ai/FLAN-T5-MODEL-NOTICE') -Force -ErrorAction SilentlyContinue
             $smoke = Join-Path $appRoot 'desktop-windows/local-ai/smoke.mjs'
             $helper = Join-Path $appRoot 'desktop-windows/src/smoke-timeout.mjs'
             Copy-Item -LiteralPath 'desktop-windows/local-ai/smoke.mjs' -Destination $smoke
