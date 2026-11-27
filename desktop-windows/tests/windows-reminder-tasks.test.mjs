@@ -87,6 +87,13 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');
+  for(const phase of ['helper-config-loaded','trigger-marker-written','portable-start-process-called',
+    'portable-start-process-returned','portable-child-exited:']) {
+    assert.ok(taskHelper.includes(phase),`The task helper reports sanitized launch milestone ${phase}.`);
+  }
+  for(const phase of ['receiver-started','receiver-trigger-accepted','receiver-exited:0','portable-child-exited:0']) {
+    assert.ok(smoke.includes(phase),`The Windows smoke checks sanitized child milestone ${phase}.`);
+  }
   assert.match(taskHelper,/\[int\]\$exception\.HResult\)\.ToString\('X8'\)[\s\S]*Reminder task diagnostic: exception=.*hresult=.*line=/,
     'The Windows smoke can report negative HRESULTs safely with sanitized exception type and source line.');
   assert.match(smoke,/manager\.sync\(\[\]\)[\s\S]*taskCount\(\),0[\s\S]*Opt-out cleanup removes/,

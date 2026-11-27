@@ -30,6 +30,17 @@ function Quote-CommandLineArgument([string]$value) {
     return '"' + $escaped + '"'
 }
 
+function Write-TaskDiagnostic([string]$filePath, [string]$phase) {
+    if ([string]::IsNullOrEmpty($filePath)) { return }
+    try {
+        $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        $fullPath = [IO.Path]::GetFullPath($filePath)
+        if ($fullPath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            [IO.File]::AppendAllText($fullPath, $phase + [Environment]::NewLine, [Text.Encoding]::ASCII)
+        }
+    } catch { }
+}
+
 function ConvertTo-UtcDateTimeOffset($value) {
     if ($value -is [DateTimeOffset]) { return $value.ToUniversalTime() }
     if ($value -is [DateTime]) {
@@ -149,29 +160,42 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
 function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     if ($token -notmatch '^[a-f0-9]{32}$') { throw 'Invalid reminder token.' }
     $null = Get-TaskPrefix $scopeValue
+    $launchPath = Join-Path $PSScriptRoot 'reminder-launch.json'
+    if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) { return }
+    $launch = Get-Content -LiteralPath $launchPath -Raw | ConvertFrom-Json
+    $diagnosticsFile = [string]$launch.diagnosticsFile
+    Write-TaskDiagnostic $diagnosticsFile 'helper-config-loaded'
     $triggerDir = Join-Path $PSScriptRoot 'reminder-triggers'
     New-Item -ItemType Directory -Force -Path $triggerDir | Out-Null
     $marker = Join-Path $triggerDir ($token + '.trigger')
-    if (Test-Path -LiteralPath $marker) { return }
+    if (Test-Path -LiteralPath $marker) { Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-already-present'; return }
     $stream = [IO.File]::Open($marker, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $bytes = [Text.Encoding]::ASCII.GetBytes($token); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
     finally { $stream.Dispose() }
+    Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-written'
 
-    $launchPath = Join-Path $PSScriptRoot 'reminder-launch.json'
-    if (-not (Test-Path -LiteralPath $launchPath -PathType Leaf)) { Remove-Item -LiteralPath $marker -Force; return }
-    $launch = Get-Content -LiteralPath $launchPath -Raw | ConvertFrom-Json
     if ($launch.mode -eq 'msix') {
         $package = Get-AppxPackage -Name 'RocketShipHQ.Reel' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $package) { Remove-Item -LiteralPath $marker -Force; return }
+        if (-not $package) { Write-TaskDiagnostic $diagnosticsFile 'msix-package-not-found'; Remove-Item -LiteralPath $marker -Force; return }
         Start-Process -FilePath (Join-Path $env:WINDIR 'explorer.exe') -ArgumentList ('shell:AppsFolder\' + $package.PackageFamilyName + '!Companion') -WindowStyle Hidden
+        Write-TaskDiagnostic $diagnosticsFile 'msix-shell-launch-returned'
     } elseif ($launch.mode -eq 'portable' -and [IO.Path]::IsPathRooted([string]$launch.executable) -and (Test-Path -LiteralPath $launch.executable -PathType Leaf)) {
         $arguments = @()
         if ($launch.arguments -is [System.Array]) { $arguments = @($launch.arguments | ForEach-Object { [string]$_ }) }
-        if ($arguments.Count -gt 16 -or @($arguments | Where-Object { $_.Length -gt 2048 }).Count -gt 0) { Remove-Item -LiteralPath $marker -Force; return }
+        if ($arguments.Count -gt 16 -or @($arguments | Where-Object { $_.Length -gt 2048 }).Count -gt 0) { Write-TaskDiagnostic $diagnosticsFile 'portable-arguments-invalid'; Remove-Item -LiteralPath $marker -Force; return }
         $arguments += '--meeting-reminder-trigger=' + $token
         $argumentLine = (@($arguments | ForEach-Object { Quote-CommandLineArgument $_ }) -join ' ')
-        Start-Process -FilePath ([string]$launch.executable) -ArgumentList $argumentLine -WindowStyle Hidden
+        Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-called'
+        $child = Start-Process -FilePath ([string]$launch.executable) -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
+        Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-returned'
+        if ($launch.waitForChildExit -eq $true) {
+            $child.WaitForExit()
+            $child.Refresh()
+            Write-TaskDiagnostic $diagnosticsFile ('portable-child-exited:' + [int]$child.ExitCode)
+            if ($child.ExitCode -ne 0) { throw 'The reminder smoke child process failed.' }
+        }
     } else {
+        Write-TaskDiagnostic $diagnosticsFile 'launch-mode-invalid'
         Remove-Item -LiteralPath $marker -Force
     }
 }

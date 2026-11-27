@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createWindowsReminderTaskManager } from '../src/windows-reminder-tasks.mjs';
@@ -14,10 +14,17 @@ const stateRoot = mkdtempSync(path.join(os.tmpdir(), 'reel-reminder-task-'));
 const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const receiver = path.join(stateRoot, 'receiver.mjs');
 writeFileSync(receiver, `import { writeFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+const diagnostics = join(dirname(fileURLToPath(import.meta.url)), 'scheduler-milestones.log');
+appendFileSync(diagnostics, 'receiver-started\\n');
 const activation = process.argv.find(argument => /^--meeting-reminder-trigger=[a-f0-9]{32}$/.test(argument));
-if (activation) writeFileSync(join(dirname(fileURLToPath(import.meta.url)), 'delivered.txt'), activation);
+if (activation) {
+  writeFileSync(join(dirname(fileURLToPath(import.meta.url)), 'delivered.txt'), activation);
+  appendFileSync(diagnostics, 'receiver-trigger-accepted\\n');
+}
+appendFileSync(diagnostics, 'receiver-exited:0\\n');
 `);
 let lastSyncSummary = null;
 const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: process.execPath,
@@ -33,6 +40,11 @@ const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore
     console.log(`Windows reminder sync summary: ${JSON.stringify(lastSyncSummary)}`);
     return output;
   }});
+const diagnosticsFile=path.join(stateRoot,'scheduler-milestones.log');
+const launchConfig=JSON.parse(readFileSync(manager.launchPath,'utf8'));
+launchConfig.diagnosticsFile=diagnosticsFile;
+if(mode==='portable') launchConfig.waitForChildExit=true;
+writeFileSync(manager.launchPath,JSON.stringify(launchConfig));
 const syncCounts = () => { const {timing,...counts}=lastSyncSummary ?? {}; return counts; };
 const command = (phase,script,timeout=15_000) => {
   console.log(`Windows reminder smoke: ${phase} (Node ${process.arch}).`);
@@ -122,6 +134,9 @@ try {
   }
   completed=hasDeliveredTrigger();
   console.log(`Sanitized scheduler action status after trigger wait: ${JSON.stringify(finalStatus)}`);
+  let launchMilestones=[];
+  try { launchMilestones=readFileSync(diagnosticsFile,'utf8').trim().split(/\r?\n/).filter(Boolean); } catch { /* No helper milestone means the task did not reach config loading. */ }
+  console.log(`Sanitized reminder launch milestones: ${JSON.stringify(launchMilestones)}`);
   assert.equal(completed,true,'The registered task runs its trigger action.');
   assert.notEqual(finalStatus.state,4,'Task Scheduler reports that the action has left the Running state.');
   assert.notEqual(finalStatus.lastTaskResult,267009,'The Scheduler running status has been replaced by the completed action result.');
@@ -129,6 +144,14 @@ try {
   assert.equal(finalStatus.principalMatchesCurrent,true,'The registered trigger action principal is the current Windows user.');
   assert.equal(finalStatus.logonType,3,'The registered trigger action uses an interactive token.');
   assert.equal(finalStatus.sessionId,runtime.sessionId,'The task status probe is running in the same interactive Windows session as the smoke process.');
+  assert.ok(launchMilestones.includes('helper-config-loaded'),'The task helper read its launch configuration.');
+  assert.ok(launchMilestones.includes('trigger-marker-written'),'The task helper wrote its pending trigger marker.');
+  if(mode==='portable') {
+    for(const milestone of ['portable-start-process-called','portable-start-process-returned','receiver-started',
+      'receiver-trigger-accepted','receiver-exited:0','portable-child-exited:0']) {
+      assert.ok(launchMilestones.includes(milestone),`The portable trigger launch reached ${milestone}.`);
+    }
+  } else assert.ok(launchMilestones.includes('msix-shell-launch-returned'),'The MSIX shell activation was requested.');
   const retryEnd=new Date(Date.now()+60_000).toISOString();
   const alreadyDueRetry=new Date(Date.now()-10_000).toISOString();
   console.log(`Retry fixture UTC milliseconds: ${JSON.stringify({start:Date.parse(alreadyDueRetry),end:Date.parse(retryEnd),created:Date.now()})}`);
