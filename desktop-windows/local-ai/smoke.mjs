@@ -6,6 +6,7 @@ import path from 'node:path';
 import {app,BrowserWindow,ipcMain} from 'electron';
 import {startAssetServer} from '../src/asset-server.mjs';
 import {whisperSamples} from '../src/meeting-processing.mjs';
+import {localSummaryPrompt} from '../src/local-generative-summary.mjs';
 import {createLocalWhisper,localAIRequestAllowed} from '../src/local-whisper.mjs';
 import {MODEL_ID,MODEL_PATH,SUMMARY_MODEL_ID,SUMMARY_MODEL_PATH,SUMMARY_MODEL_REVISION,SUMMARY_TOKENIZER_PATH,withPinnedModelFetch} from './model-pinning.mjs';
 import {withSmokeTimeout} from '../src/smoke-timeout.mjs';
