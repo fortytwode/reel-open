@@ -48,6 +48,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const root=fileURLToPath(new URL('..',import.meta.url));
   const build=readFileSync(path.join(root,'build-portable.ps1'),'utf8');
   const msix=readFileSync(path.join(root,'build-msix.ps1'),'utf8');
+  const smoke=readFileSync(path.join(root,'tests','windows-reminder-task.smoke.mjs'),'utf8');
   const allowlist=build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/)?.[1] ?? '';
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.ps1/);
@@ -64,6 +65,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'PowerShell preserves UTC DateTime kind instead of stringifying JSON timestamps in the runner timezone.');
   assert.match(taskHelper,/ConvertTo-UtcDateTimeOffset \$item\.start[\s\S]*ConvertTo-UtcDateTimeOffset \$item\.end/,
     'Both regular and retry plans parse their required UTC end bound directly.');
+  assert.match(smoke,/GetTask\('\$\{taskName\}'\)/,
+    'The trigger run uses the exact validated task name instead of a COM-serialized name field.');
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');

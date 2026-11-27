@@ -110,7 +110,7 @@ try {
   assert.ok(Date.parse(retriedSecurity.start)>Date.now()+10_000,'A retry already due when PowerShell processes it is moved safely into the future.');
   assert.ok(Date.parse(retriedSecurity.start)<Date.parse(retryEnd),'A retry is never moved beyond the meeting end.');
   command('run registered task through Task Scheduler COM',
-    `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${info.name}'); $null=$t.Run($null)`);
+    `$s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $t=$s.GetFolder([string][char]92).GetTask('${taskName}'); $null=$t.Run($null)`);
   const deadline = Date.now()+15_000;
   while (Date.now()<deadline) {
     if (mode==='portable') {
