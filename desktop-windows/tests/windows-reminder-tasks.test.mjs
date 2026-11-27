@@ -21,6 +21,7 @@ test('task registration input contains only opaque tokens and UTC event bounds',
     assert.equal(command[0],'powershell.exe');
     assert.equal(JSON.parse(readFileSync(manager.launchPath,'utf8')).executable,executable);
     assert.deepEqual(plan,[{token,start,end}]);
+    assert.throws(()=>manager.sync([{token,start}]),TypeError,'Every scheduled meeting must provide an end bound.');
     assert.equal(JSON.stringify(plan).includes('private calendar title'),false);
     assert.equal(command[1].includes('-ExecutionPolicy'),true);
     assert.equal(command[2].windowsHide,true);
@@ -61,6 +62,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Task Scheduler receives whole-second boundaries after they are safely rounded upward.');
   assert.match(taskHelper,/ConvertTo-UtcDateTimeOffset\(\$value\)[\s\S]*\$value -is \[DateTime\][\s\S]*\$date\.Kind[\s\S]*ToUniversalTime/,
     'PowerShell preserves UTC DateTime kind instead of stringifying JSON timestamps in the runner timezone.');
+  assert.match(taskHelper,/ConvertTo-UtcDateTimeOffset \$item\.start[\s\S]*ConvertTo-UtcDateTimeOffset \$item\.end/,
+    'Both regular and retry plans parse their required UTC end bound directly.');
   assert.match(taskHelper,/\.Principal\.LogonType\s*=\s*3/);
   assert.match(taskHelper,/\.Principal\.RunLevel\s*=\s*0/,
     'Tasks must use the current interactive token at the least-privileged run level.');

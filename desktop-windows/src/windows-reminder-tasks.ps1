@@ -52,21 +52,16 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
     $wanted = @{}
     foreach ($item in $plan) {
         if ($item.token -notmatch '^[a-f0-9]{32}$') { throw 'Invalid reminder task entry.' }
-        try { $wanted[$item.token] = ConvertTo-UtcDateTimeOffset $item.start }
-        catch { throw 'Invalid reminder task entry.' }
+        try {
+            $start = ConvertTo-UtcDateTimeOffset $item.start
+            $end = ConvertTo-UtcDateTimeOffset $item.end
+        } catch { throw 'Invalid reminder task entry.' }
+        if ($end -le $start) { throw 'Invalid reminder task entry.' }
+        $wanted[$item.token] = $start
         $isRetry = $item.PSObject.Properties.Name -contains 'retry' -and $item.retry -eq $true
         if ($isRetry) {
-            try { $end = ConvertTo-UtcDateTimeOffset $item.end }
-            catch { throw 'Invalid reminder retry entry.' }
-            if ($end -le $wanted[$item.token]) { $null = $wanted.Remove($item.token); continue }
             $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$end; retry=$true }
         } else {
-            $end = $null
-            if ($item.PSObject.Properties.Name -contains 'end') {
-                try { $end = ConvertTo-UtcDateTimeOffset $item.end }
-                catch { throw 'Invalid reminder end time.' }
-                if ($end -le $wanted[$item.token]) { throw 'Invalid reminder end time.' }
-            }
             $wanted[$item.token] = [pscustomobject]@{ start=$wanted[$item.token]; end=$end; retry=$false }
         }
     }

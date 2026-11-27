@@ -35,13 +35,12 @@ export function createWindowsReminderTaskManager({ stateRoot, scope, windowsStor
 
   function sync(records) {
     if (!Array.isArray(records) || records.length > 32 || records.some(record => !TOKEN.test(record?.token)
-      || !Number.isFinite(Date.parse(record.start)) || (record.retry !== undefined && typeof record.retry !== 'boolean')
-      || (record.end !== undefined && (!Number.isFinite(Date.parse(record.end)) || Date.parse(record.end) <= Date.parse(record.start)))
-      || (record.retry === true && record.end === undefined)))
+      || !Number.isFinite(Date.parse(record.start)) || !Number.isFinite(Date.parse(record.end))
+      || Date.parse(record.end) <= Date.parse(record.start) || (record.retry !== undefined && typeof record.retry !== 'boolean')))
       throw TypeError('Invalid Windows reminder task plan');
     const planPath = path.join(stateRoot, `reminder-task-plan-${randomUUID()}.json`);
     atomicWrite(planPath, Buffer.from(JSON.stringify(records.map(({ token, start, retry, end }) => retry === true
-      ? { token, start, retry: true, end } : end === undefined ? { token, start } : { token, start, end }))));
+      ? { token, start, retry: true, end } : { token, start, end }))));
     try {
       exec('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath,
         '-Sync', '-PlanPath', planPath, '-Scope', scope], { windowsHide: true, timeout: 30_000, stdio: 'pipe' });

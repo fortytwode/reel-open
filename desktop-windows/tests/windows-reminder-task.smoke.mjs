@@ -18,6 +18,11 @@ let lastSyncSummary = null;
 const manager = createWindowsReminderTaskManager({stateRoot, scope, windowsStore: mode === 'msix', executable: powershell,
   launchArguments: mode === 'portable' ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', receiver] : [],
   exec:(file,args,options)=>{
+    const planPath=args[args.indexOf('-PlanPath')+1];
+    const plan=JSON.parse(readFileSync(planPath,'utf8'));
+    assert.ok(plan.every(item=>Number.isFinite(Date.parse(item.start))&&Number.isFinite(Date.parse(item.end))
+      &&Date.parse(item.end)>Date.parse(item.start)),'Task manager serialized UTC start/end for every reminder.');
+    console.log(`Task plan UTC bounds (ms): ${JSON.stringify(plan.map(item=>({start:Date.parse(item.start),end:Date.parse(item.end)})))}`);
     const output=execFileSync(file,[...args,'-Diagnostic'],options);
     lastSyncSummary=JSON.parse(output.toString('utf8').trim());
     console.log(`Windows reminder sync summary: ${JSON.stringify(lastSyncSummary)}`);
@@ -60,12 +65,15 @@ try {
   const taskName='ReelReminder_'+scope+'_'+sidHash+'_'+token;
   const taskStart=new Date(Date.now()+5*60_000).toISOString();
   const taskEnd=new Date(Date.parse(taskStart)+30*60_000).toISOString();
+  assert.ok(Date.parse(taskEnd)>Date.now(),'The task fixture meeting end is in the future.');
   const taskBoundary=Math.ceil(Date.parse(taskStart)/1000)*1000;
   console.log('Windows reminder smoke: register current-user task.');
   manager.sync([{token,start:taskStart,end:taskEnd}]);
   console.log('Windows reminder smoke: Task Scheduler registration returned.');
   assert.deepEqual(syncCounts(),{registered:1,rearmed:0,skippedAtEnd:0,skippedPast:0},
     'The helper reports that its eligible task was registered.');
+  assert.equal(lastSyncSummary.timing?.[0]?.planEndUtcMs,Date.parse(taskEnd),
+    'PowerShell preserved the task fixture end instant exactly.');
   let info = taskQuery(taskName);
   const security=taskSecurity(taskName);
   console.log(`Sanitized task principal: ${JSON.stringify({user:info.user,userSid:info.userSid,currentSid:info.currentSid,...security})}`);
@@ -86,6 +94,7 @@ try {
     'The helper reports that the due retry was re-armed and registered.');
   const retryTiming=lastSyncSummary.timing?.[0];
   assert.equal(retryTiming?.decision,'registered');
+  assert.equal(retryTiming.planEndUtcMs,Date.parse(retryEnd),'PowerShell preserved the retry end instant exactly.');
   assert.ok(retryTiming.planEndUtcMs-retryTiming.syncNowUtcMs>50_000,
     'The UTC event end survives PowerShell JSON parsing as a future bound.');
   assert.ok(retryTiming.candidateUtcMs>retryTiming.syncNowUtcMs+14_000
