@@ -1,0 +1,109 @@
+name: Windows audio endpoint preflight (temporary)
+
+on:
+  push:
+    branches: [qa/pr78-windows-audio-preflight]
+
+permissions:
+  contents: read
+
+jobs:
+  endpoint:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the pinned Microsoft-signed VB-CABLE driver for this disposable check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $work = Join-Path $env:RUNNER_TEMP 'audio-preflight'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+          $wdkPath = Join-Path $work 'wdk.nupkg'
+          Invoke-WebRequest -Uri 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.wdk.x64/10.0.26100.6584/microsoft.windows.wdk.x64.10.0.26100.6584.nupkg' -OutFile $wdkPath
+          $wdkHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $wdkPath).Hash.ToLowerInvariant()
+          if ($wdkHash -ne 'c393d03dfb640b5c92f546b32f6770ef68cd3aaf691956e7d66d8e2c28a1b55e') { throw 'Microsoft WDK package hash mismatch.' }
+          $wdkArchive = Join-Path $work 'wdk.zip'
+          Move-Item -LiteralPath $wdkPath -Destination $wdkArchive
+          $wdkRoot = Join-Path $work 'wdk'
+          Expand-Archive -LiteralPath $wdkArchive -DestinationPath $wdkRoot
+          $devcon = Join-Path $wdkRoot 'c/tools/10.0.26100.0/x64/devcon.exe'
+          $devconSignature = Get-AuthenticodeSignature -LiteralPath $devcon
+          if ($devconSignature.Status -ne 'Valid' -or $devconSignature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') {
+            throw 'Microsoft DevCon signature validation failed.'
+          }
+          Write-Host ("Verified Microsoft DevCon signer: " + $devconSignature.SignerCertificate.Subject)
+
+          $driverZip = Join-Path $work 'vbcable.zip'
+          Invoke-WebRequest -Uri 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip' -OutFile $driverZip
+          $driverHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $driverZip).Hash.ToLowerInvariant()
+          if ($driverHash -ne 'bc44e8974191a5a2427d6c979e2dab08dbb09925f3f435dfa2f0ba3e45b6eb90') { throw 'Official VB-CABLE package hash mismatch.' }
+          $driverRoot = Join-Path $work 'vbcable'
+          Expand-Archive -LiteralPath $driverZip -DestinationPath $driverRoot
+          $catalog = Join-Path $driverRoot 'vbaudio_cable64_win10.cat'
+          $catalogSignature = Get-AuthenticodeSignature -LiteralPath $catalog
+          if ($catalogSignature.Status -ne 'Valid' -or $catalogSignature.SignerCertificate.Subject -notmatch 'Microsoft Windows Hardware Compatibility Publisher') {
+            throw 'Windows did not validate the VB-CABLE driver catalog signature.'
+          }
+          Write-Host ("Verified driver catalog signer: " + $catalogSignature.SignerCertificate.Subject)
+
+          $before = @(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -like '*VB-Audio Virtual Cable*' })
+          if ($before.Count) { throw 'VB-CABLE was already installed; the preflight requires a clean runner.' }
+
+          $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
+          $wpf = Join-Path $framework 'WPF'
+          $nativeHelper = Join-Path $work 'ReelNativeJoin.exe'
+          & (Join-Path $framework 'csc.exe') /nologo /target:exe "/out:$nativeHelper" "/r:$(Join-Path $wpf 'UIAutomationClient.dll')" "/r:$(Join-Path $wpf 'UIAutomationTypes.dll')" "/r:$(Join-Path $wpf 'WindowsBase.dll')" "/r:$(Join-Path $framework 'System.Web.Extensions.dll')" desktop-windows/native/Core.cs desktop-windows/native/WinJoin.cs desktop-windows/native/Program.cs
+          if ($LASTEXITCODE -ne 0) { throw 'The existing production WASAPI endpoint helper did not compile.' }
+          $env:REEL_AUDIO_PREFLIGHT_HELPER = $nativeHelper
+          @'
+          import { createNativeBridge } from './desktop-windows/src/native-bridge.mjs';
+          const bridge = createNativeBridge({ executable: process.env.REEL_AUDIO_PREFLIGHT_HELPER });
+          try {
+            const endpoint = await bridge.defaultRenderEndpoint();
+            if (endpoint) throw Error('A render endpoint existed before installing the signed fixture driver.');
+            console.log(JSON.stringify({ phase: 'before-install', defaultRenderEndpoint: false }));
+          } finally { await bridge.dispose(); }
+          '@ | node --input-type=module
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify the runner began without a default render endpoint.' }
+
+          $inf = Join-Path $driverRoot 'vbMmeCable64_win10.inf'
+          $installOutput = (& $devcon install $inf VBAudioVACWDM 2>&1 | Out-String)
+          $installExit = $LASTEXITCODE
+          Write-Host $installOutput
+          if ($installOutput -match '(?i)reboot|restart required') { throw 'Driver installation requested a reboot; this preflight will not continue.' }
+          if ($installExit -ne 0) { throw "Official driver installation failed or requested restart (DevCon exit $installExit)." }
+
+          Start-Service -Name AudioEndpointBuilder, Audiosrv -ErrorAction SilentlyContinue
+          $audioEndpoints = @()
+          for ($i = 0; $i -lt 60 -and $audioEndpoints.Count -eq 0; $i++) {
+            $audioEndpoints = @(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction SilentlyContinue |
+              Where-Object { $_.Status -eq 'OK' -and $_.FriendlyName -like '*VB-Audio Virtual Cable*' })
+            if ($audioEndpoints.Count -eq 0) { Start-Sleep -Seconds 1 }
+          }
+          $renderEndpoint = @($audioEndpoints | Where-Object { $_.FriendlyName -match 'Speakers|Output' })
+          if ($renderEndpoint.Count -ne 1) { throw "Expected one active VB-CABLE render endpoint; found $($renderEndpoint.Count)." }
+          Write-Host ("Active signed virtual render device: " + $renderEndpoint[0].FriendlyName)
+
+          @'
+          import { createHash } from 'node:crypto';
+          import { createNativeBridge } from './desktop-windows/src/native-bridge.mjs';
+          const bridge = createNativeBridge({ executable: process.env.REEL_AUDIO_PREFLIGHT_HELPER });
+          try {
+            const deadline = Date.now() + 60_000;
+            let endpoint = null;
+            while (!endpoint && Date.now() < deadline) {
+              endpoint = await bridge.defaultRenderEndpoint();
+              if (!endpoint) await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            if (!endpoint) throw Error('WASAPI did not expose the installed virtual render endpoint as the active default.');
+            console.log(JSON.stringify({ phase: 'after-install', defaultRenderEndpoint: true,
+              endpointFingerprint: createHash('sha256').update(endpoint).digest('hex').slice(0, 16) }));
+          } finally { await bridge.dispose(); }
+          '@ | node --input-type=module
+          if ($LASTEXITCODE -ne 0) { throw 'Windows WASAPI did not return an active default render endpoint.' }

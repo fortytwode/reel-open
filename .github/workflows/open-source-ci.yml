@@ -2,6 +2,7 @@ name: Reel checks
 
 on:
   push:
+    branches-ignore: [qa/pr78-windows-audio-preflight]
   pull_request:
   workflow_dispatch:
 
