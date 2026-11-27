@@ -5,15 +5,20 @@ export const MODEL_FILES=new Set(['added_tokens.json','config.json','generation_
   'onnx/decoder_model_merged_quantized.onnx','onnx/encoder_model_quantized.onnx','preprocessor_config.json',
   'quantize_config.json','special_tokens_map.json','tokenizer.json','tokenizer_config.json','vocab.json']);
 
-export const SUMMARY_MODEL_ID='Xenova/flan-t5-small';
-export const SUMMARY_MODEL_REVISION='311454e83bc784267fd7eef5940ee854144abbec';
+export const SUMMARY_MODEL_ID='onnx-community/t5-cnn-25k-ONNX';
+export const SUMMARY_MODEL_REVISION='c8ac103cd6b1937ba0f6c5d4bcc9eb18d8e19c95';
 export const SUMMARY_MODEL_PATH=`/${SUMMARY_MODEL_ID}/resolve/${SUMMARY_MODEL_REVISION}/`;
 export const SUMMARY_MODEL_FILES=new Set(['config.json','generation_config.json','onnx/decoder_model_merged_quantized.onnx',
-  'onnx/encoder_model_quantized.onnx','quantize_config.json','special_tokens_map.json','spiece.model','tokenizer.json','tokenizer_config.json']);
+  'onnx/encoder_model_quantized.onnx','spiece.model','tokenizer.json','tokenizer_config.json']);
+export const SUMMARY_TOKENIZER_MODEL_ID='google-t5/t5-small';
+export const SUMMARY_TOKENIZER_REVISION='df1b051c49625cf57a3d0d8d3863ed4d13564fe4';
+export const SUMMARY_TOKENIZER_PATH=`/${SUMMARY_TOKENIZER_MODEL_ID}/resolve/${SUMMARY_TOKENIZER_REVISION}/`;
+export const SUMMARY_TOKENIZER_FILES=new Set(['spiece.model','tokenizer.json','tokenizer_config.json']);
 
 export const PINNED_MODELS=Object.freeze([
   Object.freeze({id:MODEL_ID,revision:MODEL_REVISION,path:MODEL_PATH,files:MODEL_FILES}),
   Object.freeze({id:SUMMARY_MODEL_ID,revision:SUMMARY_MODEL_REVISION,path:SUMMARY_MODEL_PATH,files:SUMMARY_MODEL_FILES}),
+  Object.freeze({id:SUMMARY_TOKENIZER_MODEL_ID,revision:SUMMARY_TOKENIZER_REVISION,path:SUMMARY_TOKENIZER_PATH,files:SUMMARY_TOKENIZER_FILES}),
 ]);
 
 export function modelForRequestPath(pathname){
@@ -50,9 +55,8 @@ export function modelForCachePath(url){
 export const MODEL_CDN_PATHS=new Set([
   '/xet-bridge-us/66fbc1d373c445b0a3a6acfe/8a2747c40e92b6856b7aaccfff90d0342d9fbd4aa095c7d1dc637da59662cdce',
   '/xet-bridge-us/66fbc1d373c445b0a3a6acfe/2e276de9ccae304a023b1022703be08500c0eb96b7b999e725eebd0af1572f6c',
-  '/xet-bridge-us/645181169d916c596e3490a6/e7463c1c6b7c46ae0de79b004f3d7318bf4307ef0bef4de3be2e38ae80fab160',
-  '/xet-bridge-us/645181169d916c596e3490a6/25d2f732f698950e8807e07a20bafe057fb7dd69a291e36c81455ca861998d9b',
-  '/xet-bridge-us/645181169d916c596e3490a6/366214183dbf2b2c76e4158b6fd6886de2de269d756c5b9857375c9ca9021608',
+  '/xet-bridge-us/6aad31d90f859544e744ef1d/fa8a8c26eeb7e447f7cb065a019723dc082760099351540b7812bad7633fbc6f',
+  '/xet-bridge-us/6aad31d90f859544e744ef1d/79da1e37ca464b964c942b66507b1387f904f32533b90a332260ca8201af9c88',
 ]);
 
 /** Pin only Transformers.js's known unpinned metadata/config probes. */
@@ -64,8 +68,12 @@ export function pinModelRequest(input,init){
   try{request=isRequest?new Request(input,init):new Request(input,init);}catch{return input;}
   const url=new URL(request.url),match=modelForRequestPath(url.pathname);
   if(url.protocol!=='https:'||url.hostname!=='huggingface.co'||url.port!==''||url.username||url.password||url.hash
-    ||url.search||!match?.isMain||!match.model.files.has(match.file))return input;
-  url.pathname=`${match.model.path}${match.file}`;
+    ||url.search||!match||!match.model.files.has(match.file))return input;
+  const summaryTokenizerAlias=match.model.id===SUMMARY_MODEL_ID&&SUMMARY_TOKENIZER_FILES.has(match.file);
+  if(!match.isMain&&!summaryTokenizerAlias)return input;
+  const model=summaryTokenizerAlias
+    ?{path:SUMMARY_TOKENIZER_PATH}:match.model;
+  url.pathname=`${model.path}${match.file}`;
   return new Request(url,request);
 }
 

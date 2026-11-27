@@ -215,6 +215,10 @@ test('renderer metadata exposes bounded extractive summary only for its local re
     transcriptComplete:true,text:'Private full transcript never crosses the metadata projection.',summaryEngine:'flan-t5-small-local',
     suggestedTitle:'Walkthrough',summary:'The walkthrough filters the inventory by warehouse and exports a restocking report.',chapters:[]}});
   assert.equal(store.list('owner')[0].processing.localSummary.source,'on-device-ai');
+  await store.saveProcessing({ownerUserID:'owner',id:recording.id,processing:{phase:'completed',transcriptionMode:'local',localOnly:true,
+    transcriptComplete:true,text:'Private full transcript never crosses the metadata projection.',summaryEngine:'t5-cnn-25k-local',
+    suggestedTitle:'Walkthrough',summary:'The walkthrough filters the inventory by warehouse and exports a restocking report.',chapters:[]}});
+  assert.equal(store.list('owner')[0].processing.localSummary.source,'on-device-ai');
   await assert.rejects(store.saveProcessing({ownerUserID:'other',id:recording.id,processing:{localOnly:true,summaryEngine:'extractive-local',summary:'private'}}),/Recording no longer exists/u);
 });
 

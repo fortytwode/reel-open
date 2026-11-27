@@ -22,7 +22,7 @@ function newWorker(requestID){
     const task=active;active=null;progress.hidden=true;
     if(task.type==='summarize'){
       status.textContent='AI summary created on this computer.';
-      api.complete({requestID:task.requestID,ok:true,result:{text:data.text,engine:'Flan-T5-small q8'}});
+      api.complete({requestID:task.requestID,ok:true,result:{text:data.text,engine:'T5-CNN-25K q8'}});
     }else{
       status.textContent='Transcript saved on this computer.';
       api.complete({requestID:task.requestID,ok:true,result:{text:data.text,chunks:data.chunks,language:data.language,engine:'Whisper large-v3-turbo q8'}});

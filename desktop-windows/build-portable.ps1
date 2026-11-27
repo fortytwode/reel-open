@@ -89,7 +89,7 @@ $productFiles = @(
     'desktop-windows/src/native-bridge.mjs', 'desktop-windows/src/recorder.mjs', 'desktop-windows/src/manual-window-capture.mjs', 'desktop-windows/src/capture-window-preview.mjs',
     'desktop-windows/src/trim-range.mjs',
     'desktop-windows/ui/index.html', 'desktop-windows/ui/setup.css', 'desktop-windows/ui/setup.mjs',
-    'desktop-windows/local-ai/index.html', 'desktop-windows/local-ai/preload.cjs', 'desktop-windows/local-ai/renderer.mjs', 'desktop-windows/local-ai/worker.mjs', 'desktop-windows/local-ai/model-pinning.mjs', 'desktop-windows/local-ai/ONNX-WASM-LICENSE', 'desktop-windows/local-ai/TRANSFORMERS-LICENSE', 'desktop-windows/local-ai/FLAN-T5-MODEL-NOTICE',
+    'desktop-windows/local-ai/index.html', 'desktop-windows/local-ai/preload.cjs', 'desktop-windows/local-ai/renderer.mjs', 'desktop-windows/local-ai/worker.mjs', 'desktop-windows/local-ai/model-pinning.mjs', 'desktop-windows/local-ai/ONNX-WASM-LICENSE', 'desktop-windows/local-ai/TRANSFORMERS-LICENSE', 'desktop-windows/local-ai/T5-CNN-SUMMARY-MODEL-NOTICE',
     'desktop-windows/local-ai/build/transformers.bundle.mjs',
     'desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs', 'desktop-windows/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm',
     'desktop-windows/capture/index.html', 'desktop-windows/capture/preload.cjs', 'desktop-windows/capture/renderer.mjs',

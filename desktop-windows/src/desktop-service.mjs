@@ -370,7 +370,7 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
           if(typeof localSummarize==='function'){
             try{
               const result=await localSummarize({ownerUserID,id:payload.id,text:localSummaryPrompt(processing.segments)});
-              if(result?.engine==='Flan-T5-small q8')generated=cleanGeneratedSummary(result.text);
+              if(result?.engine==='T5-CNN-25K q8')generated=cleanGeneratedSummary(result.text);
             }catch{}
           }
           requireOwner(ownerUserID);
@@ -379,7 +379,7 @@ export function createDesktopService({auth,org,store,discover,discoverOutlook,cr
             throw Error('The saved transcript changed. Refresh your recordings.');
           await store.saveProcessing({ownerUserID,id:payload.id,processing:{...latest,phase:'completed',error:null,
             summary:generated??fallback.summary,suggestedTitle:fallback.suggestedTitle,chapters:fallback.chapters,
-            summaryEngine:generated?'flan-t5-small-local':(fallback.summary||fallback.suggestedTitle||fallback.chapters.length?'extractive-local':null)}});
+            summaryEngine:generated?'t5-cnn-25k-local':(fallback.summary||fallback.suggestedTitle||fallback.chapters.length?'extractive-local':null)}});
           requireOwner(ownerUserID);
         }finally{activeLocalSummaries.delete(summaryKey);}
       } else if(name==='playRecording') {
