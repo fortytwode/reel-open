@@ -82,7 +82,7 @@ function consentControls(settings, dashboard) {
   system.append(sbox,stext); wrap.append(system);
   const local=node('label','setting');const localBox=node('input');localBox.type='checkbox';localBox.dataset.setting='localTranscription';localBox.checked=settings.localTranscription;
   const localText=node('span');localText.append(node('strong','','Transcribe meetings locally with Whisper'));
-  localText.append(node('small','','Opt in to on-device transcription. First use downloads about 1.1 GB; then it works offline while the model remains cached. Reel does not send meeting audio or transcript to transcription or summary services. Local mode does not create AI summaries or deliver notes, and never falls back to cloud transcription.'));
+  localText.append(node('small','','Opt in to on-device transcription. First use downloads about 1.1 GB; then it works offline while the model remains cached. Reel creates deterministic extractive notes (a title suggestion, summary and chapters when the transcript supports them) on this computer, not with an AI model. It leaves the meeting title unchanged, sends no audio or transcript to cloud transcription or summary services, never falls back to cloud transcription, and does not deliver notes.'));
   local.append(localBox,localText);wrap.append(local);
   if (dashboard) {
     const divider=node('div','divider'); wrap.append(divider);
@@ -206,8 +206,25 @@ function renderRecordings() {
         const transcript=node('button','','Copy transcript');
         transcript.type='button'; transcript.dataset.action='copyTranscript'; transcript.dataset.recordingId=recording.id; left.append(transcript);
       }
-      const labels={pending:'Waiting to process',transcribing:recording.processing.transcriptionMode==='local'?'Transcribing locally':'Transcribing',summarizing:'Creating notes',delivering:'Delivering notes',completed:recording.processing.localOnly?'Transcript saved on this computer. No cloud summary or delivery.':'Notes delivered',failed:'Processing failed'};
+      const labels={pending:'Waiting to process',transcribing:recording.processing.transcriptionMode==='local'?'Transcribing locally':'Transcribing',summarizing:'Creating notes',delivering:'Delivering notes',completed:recording.processing.localOnly?(recording.processing.localSummary?'Transcript and local extractive notes saved on this computer. No cloud summary or delivery.':'Transcript saved on this computer. No cloud summary or delivery.'):'Notes delivered',failed:'Processing failed'};
       left.append(node('div','recording-meta', recording.processing.noSpeech ? 'No speech detected' : (labels[recording.processing.phase] ?? 'Processing')));
+      const localSummary=recording.processing.localOnly?recording.processing.localSummary:null;
+      if(localSummary) {
+        const details=node('details','local-extractive-summary');
+        details.append(node('summary','','Local extractive notes (not AI-generated)'));
+        if(localSummary.suggestedTitle) details.append(node('div','recording-meta',`Suggested title (not applied): ${localSummary.suggestedTitle}`));
+        if(localSummary.summary) details.append(node('p','recording-summary',localSummary.summary));
+        if(localSummary.chapters?.length) {
+          const chapterList=node('ol','recording-chapters');
+          for(const chapter of localSummary.chapters) {
+            const start=Number.isFinite(chapter.start)?Math.max(0,chapter.start):0;
+            const timestamp=`${Math.floor(start/60)}:${String(Math.floor(start%60)).padStart(2,'0')}`;
+            chapterList.append(node('li','',`${timestamp} ${chapter.title}`));
+          }
+          details.append(chapterList);
+        }
+        left.append(details);
+      }
       if(recording.processing.error) left.append(node('div','recording-meta',recording.processing.error));
       if(recording.processing.phase==='failed') { const button=node('button','','Retry notes'); button.type='button'; button.addEventListener('click',()=>void perform('retryProcessing',{id:recording.id,expectedOwnerUserID:snapshot.profile.userID})); left.append(button); }
       const sharing=recording.shareStatus;

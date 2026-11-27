@@ -36,8 +36,9 @@ async function fixture(t, io) {
   t.after(() => rm(root, { recursive: true, force: true }));
   return { root, store: createLocalRecordingStore({ root, io }) };
 }
-async function recorded(store, ownerUserID = 'owner') {
-  const writer = await store.begin({ ownerUserID, title: 'Weekly meeting', createdAt: '2026-11-06T12:00:00Z' });
+async function recorded(store, ownerUserID = 'owner', meeting = null) {
+  const writer = await store.begin({ ownerUserID, title: 'Weekly meeting', createdAt: '2026-11-06T12:00:00Z', meeting });
+  if (meeting) await writer.appendAudio(new Uint8Array([0, 0]));
   await writer.appendInit(encoded.init);
   await Promise.all(encoded.segments.map((bytes, i) => writer.appendFragment({ index: i + 1, duration: 4, bytes })));
   return writer;
@@ -174,6 +175,25 @@ test('local playback resolves only an owned recording including older rows witho
   assert.equal(store.getRecordingPath({ ownerUserID: 'owner', id: recording.id }), recording.path);
   assert.equal(store.getRecordingPath({ ownerUserID: 'other', id: recording.id }), null);
   assert.throws(() => store.getRecordingPath({ ownerUserID: 'owner', id: '../escape' }));
+});
+
+test('renderer metadata exposes bounded extractive summary only for its local recording owner', async t => {
+  const { store } = await fixture(t);
+  const writer = await recorded(store, 'owner', { ownerUserID: 'owner' });
+  const recording = await writer.finish({ durationSeconds: 200 });
+  const chapters=Array.from({length:10},(_,index)=>({start:index*21,title:`Chapter ${index}`}));
+  await store.saveProcessing({ownerUserID:'owner',id:recording.id,processing:{phase:'completed',transcriptionMode:'local',localOnly:true,
+    transcriptComplete:true,text:'Private full transcript never crosses the metadata projection.',summaryEngine:'extractive-local',
+    suggestedTitle:'  A suggested local title  ',summary:`<img src=x onerror=alert(1)> ${'plain text '.repeat(100)}`,chapters}});
+  const ownerView=store.list('owner')[0].processing;
+  assert.equal(ownerView.localOnly,true);
+  assert.equal(ownerView.localSummary.suggestedTitle,'A suggested local title');
+  assert.equal(ownerView.localSummary.summary.length,700);
+  assert.equal(ownerView.localSummary.chapters.length,8);
+  assert.equal(ownerView.localSummary.chapters[0].start,0);
+  assert.equal(Object.hasOwn(ownerView,'text'),false,'Raw transcript text is never included in the renderer metadata.');
+  assert.deepEqual(store.list('other'),[],'Owner scoped listing does not expose another user’s local summary.');
+  await assert.rejects(store.saveProcessing({ownerUserID:'other',id:recording.id,processing:{localOnly:true,summaryEngine:'extractive-local',summary:'private'}}),/Recording no longer exists/u);
 });
 
 test('settings and durable completion deduplication remain bound to each owner', async t => {
