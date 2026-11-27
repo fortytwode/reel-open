@@ -19,9 +19,13 @@ assert.equal(process.platform,'win32');
 assert.equal(process.arch,expectedArch);
 writeFileSync(logPath,'');
 let currentRun='startup',currentPhase='bootstrap',onPhase=()=>{};
-function log(phase,progress){
+const safeRequestClasses=new Set(['method_options','method_other','non_https_request','hub_model_file',
+  'hub_model_file_query','hub_model_other_path','hub_model_cache_path','hub_other_path','pinned_cdn_blob',
+  'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied']);
+function log(phase,progress,requestClass){
   const item={time:new Date().toISOString(),run:currentRun,phase};
   if(Number.isFinite(progress))item.progress=Math.round(Math.max(0,Math.min(1,progress))*100)/100;
+  if(safeRequestClasses.has(requestClass))item.requestClass=requestClass;
   const line=JSON.stringify(item);
   appendFileSync(logPath,line+'\n');
   process.stdout.write(line+'\n');
@@ -59,10 +63,10 @@ function reportProgress(event){
   if(Number.isFinite(event.progress)){
     const bucket=Math.floor(Math.max(0,Math.min(1,event.progress))*20);
     if(!loggedPhases.has(key)||bucket>(lastProgressBucket.get(key)??-1)){
-      log(event.phase,event.progress);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
+      log(event.phase,event.progress,event.requestClass);loggedPhases.add(key);lastProgressBucket.set(key,bucket);
     }
   }else if(!loggedPhases.has(key)){
-    log(event.phase);loggedPhases.add(key);
+    log(event.phase,undefined,event.requestClass);loggedPhases.add(key);
   }
   if(!phaseLimits[event.phase])return;
   if(event.phase===currentPhase)return;

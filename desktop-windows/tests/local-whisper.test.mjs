@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {fileURLToPath} from 'node:url';
 import {startAssetServer} from '../src/asset-server.mjs';
-import {createLocalWhisper,localAIRequestAllowed} from '../src/local-whisper.mjs';
+import {createLocalWhisper,localAIRequestAllowed,localAIRequestClass} from '../src/local-whisper.mjs';
 
 class FakeWebContents extends EventEmitter {
   constructor(){super();this.url='';this.messages=[];this.session={setPermissionRequestHandler(){},setPermissionCheckHandler(){},setDevicePermissionHandler(){},webRequest:{onBeforeRequest(_filter,handler){this.before=handler;},onHeadersReceived(_filter,handler){this.headers=handler;}}};this.mainFrame={get url(){return this.owner.url;},owner:this};}
@@ -46,6 +46,25 @@ test('local inference network access is restricted to the pinned model and GET r
   assert.equal(localAIRequestAllowed(`https://us.aws.cdn.hf.co/xet-bridge-us/66fbc1d373c445b0a3a6acfe/arbitrary?${signedQuery}`,'GET',origin),false);
   assert.equal(localAIRequestAllowed(`https://cdn-lfs-us-1.hf.co${encoderBlob}?${signedQuery}`,'GET',origin),false);
   assert.equal(localAIRequestAllowed('https://example.com/collect','GET',origin),false);
+  assert.equal(localAIRequestClass('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json','GET',origin),'hub_model_file');
+  assert.equal(localAIRequestClass('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json?download=true','GET',origin),'hub_model_file_query');
+  assert.equal(localAIRequestClass('https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/private.wav','GET',origin),'hub_model_other_path');
+  assert.equal(localAIRequestClass('https://example.com/collect','OPTIONS',origin),'method_options');
+  assert.equal(localAIRequestClass('https://example.com/collect','GET',origin),'other_remote_host');
+});
+
+test('network denial smoke diagnostics expose only a fixed request category',async()=>{
+  const diagnostics=[];const f=setup({onDiagnostic:value=>diagnostics.push(value)});
+  const operation=f.bridge.transcribe({ownerUserID:'owner-a',id:'a'.repeat(32),samples});
+  await new Promise(resolve=>setImmediate(resolve));
+  let result;
+  const blockedURL='https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/config.json?private-meeting-data=secret';
+  FakeWindow.last.webContents.session.webRequest.before({url:blockedURL,method:'GET'},value=>{result=value;});
+  assert.deepEqual(result,{cancel:true});
+  assert.ok(diagnostics.some(value=>value.phase==='model_network_blocked'&&value.requestClass==='hub_model_file_query'));
+  assert.doesNotMatch(JSON.stringify(diagnostics),/private-meeting-data|secret/);
+  f.bridge.dispose();
+  await assert.rejects(operation,{name:'AbortError'});
 });
 
 test('CDN access requires the exact signed URL received from an allowed Hub redirect',async()=>{

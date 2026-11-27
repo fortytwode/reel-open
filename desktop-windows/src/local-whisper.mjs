@@ -16,6 +16,9 @@ const MODEL_CDN_PATHS=new Set([
 ]);
 const MODEL_CDN_QUERY_KEYS=['Expires','Hash-Algorithm','Key-Pair-Id','Policy','Signature','X-Xet-Cas-Uid',
   'response-content-disposition','user_id','xip'].sort();
+const SAFE_REMOTE_REQUEST_CLASSES=new Set(['method_options','method_other','non_https_request','hub_model_file',
+  'hub_model_file_query','hub_model_other_path','hub_model_cache_path','hub_other_path','pinned_cdn_blob',
+  'cdn_other_path','other_remote_host','invalid_request_url','remote_consent_denied']);
 const SAFE_PROGRESS_PHASES=new Set(['worker_message_sent','worker_started','model_loading','model_downloading',
   'model_ready','inference','inference_complete','worker_failed','worker_dispatch_failed','renderer_task_received',
   'worker_creation_started','worker_created','worker_creation_failed','worker_error']);
@@ -64,6 +67,26 @@ export function localAIRequestAllowed(requestURL,method,localOrigin,allowedHubRe
   }catch{return false;}
 }
 
+/** Fixed categories for smoke diagnostics; never logs a URL, filename, query value or request header. */
+export function localAIRequestClass(requestURL,method,localOrigin){
+  if(method!=='GET')return method==='OPTIONS'?'method_options':'method_other';
+  try{
+    const url=new URL(requestURL),origin=new URL(localOrigin);
+    if(url.origin===origin.origin)return 'other_remote_host';
+    if(url.protocol!=='https:'||url.port!=='')return 'non_https_request';
+    if(url.hostname==='huggingface.co'){
+      if(url.pathname.startsWith(MODEL_PATH)){
+        if(!isModelFileURLPath(url.pathname))return 'hub_model_other_path';
+        return url.search?'hub_model_file_query':'hub_model_file';
+      }
+      if(url.pathname.startsWith(`/api/resolve-cache/models/${MODEL_ID}/`))return 'hub_model_cache_path';
+      return 'hub_other_path';
+    }
+    if(MODEL_CDN_HOSTS.has(url.hostname))return MODEL_CDN_PATHS.has(url.pathname)?'pinned_cdn_blob':'cdn_other_path';
+    return 'other_remote_host';
+  }catch{return 'invalid_request_url';}
+}
+
 /** Isolated renderer for local inference. It has no auth preload or access to meeting services. */
 export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRemoteModelRequest=()=>true,onDiagnostic=()=>{}}={}){
   check(typeof BrowserWindow==='function'&&ipcMain&&typeof origin==='string'&&typeof ownerID==='function'
@@ -74,8 +97,9 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
   let window=null,loading=null,active=null,disposed=false,rendererStartup=null;
   const pendingProbes=new Map();
   const pageURL=origin+'/';
-  const diagnostic=(phase,progress)=>{
-    try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{})});}catch{}
+  const diagnostic=(phase,progress,requestClass)=>{
+    try{onDiagnostic({phase,...(Number.isFinite(progress)?{progress:Math.max(0,Math.min(1,progress))}:{}),
+      ...(SAFE_REMOTE_REQUEST_CLASSES.has(requestClass)?{requestClass}:{})});}catch{}
   };
   function currentWindow(event){return window&&!window.isDestroyed()&&event.sender===window.webContents&&event.senderFrame===window.webContents.mainFrame&&event.senderFrame?.url===pageURL;}
   function rejectRendererStartup(contents,phase,message){
@@ -160,15 +184,16 @@ export function createLocalWhisper({BrowserWindow,ipcMain,origin,ownerID,allowRe
       callback({cancel:false});
     });
     session.webRequest.onBeforeRequest({urls:['<all_urls>']},(details,callback)=>{
-      let allowed=false;
-      let remote=false;
+      let allowed=false,remote=false,consentAllowed=true;
       try{
         remote=new URL(details.url).origin!==parsedOrigin.origin;
         allowed=localAIRequestAllowed(details.url,details.method,origin,allowedHubRedirects);
         if(allowed&&remote){
-          allowed=allowRemoteModelRequest()===true;
+          consentAllowed=allowRemoteModelRequest()===true;
+          allowed=consentAllowed;
         }
-        if(remote)diagnostic(allowed?'model_network_allowed':'model_network_blocked');
+        if(remote)diagnostic(allowed?'model_network_allowed':'model_network_blocked',undefined,
+          allowed?undefined:(consentAllowed?localAIRequestClass(details.url,details.method,origin):'remote_consent_denied'));
       }catch{}
       callback({cancel:!allowed});
     });
