@@ -87,9 +87,8 @@ jobs:
               Where-Object { $_.Status -eq 'OK' -and $_.FriendlyName -like '*VB-Audio Virtual Cable*' })
             if ($audioEndpoints.Count -eq 0) { Start-Sleep -Seconds 1 }
           }
-          $renderEndpoint = @($audioEndpoints | Where-Object { $_.InstanceId -like '*{0.0.0.*' })
-          if ($renderEndpoint.Count -ne 1) { throw "Expected one active VB-CABLE render endpoint; found $($renderEndpoint.Count)." }
-          Write-Host ("Active signed virtual render device: " + $renderEndpoint[0].FriendlyName)
+          if ($audioEndpoints.Count -lt 2) { throw "Expected active VB-CABLE playback and capture endpoints; found $($audioEndpoints.Count)." }
+          Write-Host ("Active signed virtual audio endpoints: " + (($audioEndpoints | ForEach-Object FriendlyName) -join '; '))
 
           @'
           import { createHash } from 'node:crypto';
