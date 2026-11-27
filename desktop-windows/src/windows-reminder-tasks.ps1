@@ -46,7 +46,15 @@ function Sync-ReminderTasks([string]$planPath, [string]$scopeValue) {
         throw 'Reminder task plan is unavailable.'
     }
     $planJson = Get-Content -LiteralPath $planPath -Raw
-    $plan = @(ConvertFrom-Json -InputObject $planJson)
+    if ($planJson.Trim() -match '^\[\s*\]$') {
+        # Windows PowerShell 5.1 emits no pipeline object for JSON [], and @($null)
+        # otherwise becomes a one-item null array that fails on $item.token below.
+        $plan = @()
+    } else {
+        $parsedPlan = ConvertFrom-Json -InputObject $planJson
+        if ($null -eq $parsedPlan) { throw 'Invalid reminder task plan.' }
+        $plan = @($parsedPlan)
+    }
     if ($plan.Count -gt 32) { throw 'Invalid reminder task plan.' }
     $prefix = Get-TaskPrefix $scopeValue
     $wanted = @{}

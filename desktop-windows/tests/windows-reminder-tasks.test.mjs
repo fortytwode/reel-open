@@ -28,7 +28,6 @@ test('task registration input contains only opaque tokens and UTC event bounds',
     assert.equal(command[2].timeout,30_000);
   } finally { rmSync(root,{recursive:true,force:true}); }
 });
-
 test('encrypted schedule storage never writes meeting details as plaintext', () => {
   const root=temp(), file=path.join(root,'schedule.encrypted');
   try {
@@ -53,6 +52,9 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.ps1/);
   const taskHelper=readFileSync(path.join(root,'src','windows-reminder-tasks.ps1'),'utf8');
+  assert.ok(taskHelper.includes(String.raw`$planJson.Trim() -match '^\[\s*\]$'`)
+    && taskHelper.includes('$plan = @()') && taskHelper.includes('$null -eq $parsedPlan'),
+    'An empty JSON array means cancel all tasks, while JSON null remains an invalid plan.');
   assert.match(taskHelper,/ticksWithinSecond[\s\S]*AddTicks\(/,
     'Fractional meeting starts are rounded upward before Task Scheduler registration.');
   assert.match(taskHelper,/\$null -ne \$entry\.end -and \$start -ge \$entry\.end/,
@@ -88,4 +90,3 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.match(msix,/<com:Class Id="\$toastActivatorClsid" \/>/,
     'The MSIX manifest uses schema-valid unbraced GUID values for Electron toast activation.');
 });
-
