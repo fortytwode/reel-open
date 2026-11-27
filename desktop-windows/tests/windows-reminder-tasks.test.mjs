@@ -94,6 +94,13 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'The launch parser requires an object and rejects fields outside the portable/MSIX schema.');
   assert.doesNotMatch(deliveryFunction,/ConvertFrom-Json/,
     'Scheduled delivery does not invoke the slow PowerShell JSON cmdlet on the ARM cold path.');
+  assert.match(deliveryFunction,/launch-parser-assembly-load-before[\s\S]*Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*launch-parser-assembly-load-after[\s\S]*launch-parser-create-before[\s\S]*launch-parser-create-after[\s\S]*launch-json-deserialize-before[\s\S]*launch-json-deserialize-after[\s\S]*launch-config-schema-check-before[\s\S]*launch-config-schema-check-after/,
+    'The scheduled smoke can distinguish parser assembly load, serializer construction, JSON parse and schema validation.');
+  assert.ok(deliveryFunction.includes("'launch-json-deserialize-error:'")
+    && deliveryFunction.includes('$exception.GetType().FullName')
+    && deliveryFunction.includes('$exception.HResult')
+    && deliveryFunction.includes('ScriptLineNumber'),
+    'Parser errors retain only safe exception type, HRESULT and source line for diagnostics.');
   assert.doesNotMatch(deliveryFunction,/\b(?:Join-Path|Test-Path|Get-Content|New-Item|Remove-Item)\b/,
     'Scheduled delivery does not invoke filesystem provider cmdlets on its cold PowerShell path.');
   assert.match(taskHelper,/\$launch\.Contains\('diagnosticsFile'\)/,
@@ -117,6 +124,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
     'Windows PowerShell 5.1 parses the helper before installs, packaging and model inference.');
   assert.match(workflow,/\[System\.Management\.Automation\.Language\.Parser\]::ParseFile\([\s\S]*\$parseErrors\.Count/,
     'The early PowerShell preflight uses the PowerShell AST parser and fails on syntax errors.');
+  assert.match(workflow,/Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*DeserializeObject[\s\S]*\$portable[\s\S]*\$msix/,
+    'The early Windows PowerShell 5.1 preflight verifies the parser assembly and both production launch JSON shapes.');
   assert.ok(workflow.includes('Snapshot runner after packaged local Whisper inference')
     && workflow.includes('Sanitized Whisper cache directories remaining')
     && workflow.includes('Remove-Item -LiteralPath $cache.FullName -Recurse -Force'),
@@ -139,6 +148,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
   }
   assert.match(taskHelper,/\[int\]\$exception\.HResult\)\.ToString\('X8'\)[\s\S]*Reminder task diagnostic: exception=.*hresult=.*line=/,
     'The Windows smoke can report negative HRESULTs safely with sanitized exception type and source line.');
+  assert.match(taskHelper,/\$Diagnostic -or -not \[string\]::IsNullOrEmpty\(\$DiagnosticPath\)[\s\S]*Write-TaskDiagnostic \$DiagnosticPath \('helper-exception:'/,
+    'Scheduled trigger failures write sanitized exception diagnostics even when the optional sync diagnostic switch is absent.');
   assert.match(smoke,/manager\.sync\(\[\]\)[\s\S]*taskCount\(\),0[\s\S]*Opt-out cleanup removes/,
     'The Windows scheduler smoke exercises empty-plan deletion and verifies no task remains.');
   assert.match(msix,/<desktop:ToastNotificationActivation ToastActivatorCLSID="\$toastActivatorClsid" \/>/);

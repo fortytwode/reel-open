@@ -41,6 +41,15 @@ jobs:
             foreach ($parseError in $parseErrors) { [Console]::Error.WriteLine($parseError.Message) }
             exit 1
           }
+          Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+          $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
+          $serializer.MaxJsonLength = 65536
+          $serializer.RecursionLimit = 8
+          $portable = $serializer.DeserializeObject('{"mode":"portable","executable":"C:\\Program Files\\Reel.exe","arguments":["--probe"]}')
+          $msix = $serializer.DeserializeObject('{"mode":"msix"}')
+          if ($portable -isnot [System.Collections.IDictionary] -or $portable['arguments'] -isnot [System.Array] -or $msix -isnot [System.Collections.IDictionary]) {
+            throw 'Windows PowerShell 5.1 JSON parser smoke returned an unexpected object shape.'
+          }
           '@
           & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command $parserCommand
           if ($LASTEXITCODE -ne 0) { throw 'The reminder helper failed Windows PowerShell 5.1 parsing.' }

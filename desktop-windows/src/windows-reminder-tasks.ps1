@@ -200,12 +200,24 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     $launchJson = [IO.File]::ReadAllText($launchPath)
     Write-TaskDiagnostic $DiagnosticPath ('launch-config-read-after:' + $launchJson.Length)
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-before'
+    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-assembly-load-before'
     Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-assembly-load-after'
+    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-create-before'
     $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
+    Write-TaskDiagnostic $DiagnosticPath 'launch-parser-create-after'
     $serializer.MaxJsonLength = 65536
     $serializer.RecursionLimit = 8
+    Write-TaskDiagnostic $DiagnosticPath 'launch-json-deserialize-before'
     try { $launch = $serializer.DeserializeObject($launchJson) }
-    catch { throw 'Invalid reminder launch configuration.' }
+    catch {
+        $exception = $_.Exception
+        $hresult = '0x' + ([int]$exception.HResult).ToString('X8')
+        Write-TaskDiagnostic $DiagnosticPath ('launch-json-deserialize-error:' + $exception.GetType().FullName + ':' + $hresult + ':line=' + [int]$_.InvocationInfo.ScriptLineNumber)
+        throw 'Invalid reminder launch configuration.'
+    }
+    Write-TaskDiagnostic $DiagnosticPath 'launch-json-deserialize-after'
+    Write-TaskDiagnostic $DiagnosticPath 'launch-config-schema-check-before'
     if ($launch -isnot [System.Collections.IDictionary] -or -not $launch.Contains('mode')) {
         throw 'Invalid reminder launch configuration.'
     }
@@ -232,6 +244,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     if ($launch.Contains('diagnosticsFile') -and $launch['diagnosticsFile'] -isnot [string]) {
         throw 'Invalid reminder launch configuration.'
     }
+    Write-TaskDiagnostic $DiagnosticPath 'launch-config-schema-check-after'
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-after'
     $diagnosticsFile = ''
     if ($launch.Contains('diagnosticsFile')) {
@@ -288,9 +301,10 @@ try {
     if ($Sync) { Sync-ReminderTasks $PlanPath $Scope $Diagnostic }
     else { Deliver-ReminderTrigger $Token $Scope }
 } catch {
-    if ($Diagnostic) {
+    if ($Diagnostic -or -not [string]::IsNullOrEmpty($DiagnosticPath)) {
         $exception = $_.Exception
         $hresult = '0x' + ([int]$exception.HResult).ToString('X8')
+        Write-TaskDiagnostic $DiagnosticPath ('helper-exception:' + $exception.GetType().FullName + ':' + $hresult + ':line=' + [int]$_.InvocationInfo.ScriptLineNumber)
         [Console]::Error.WriteLine(('Reminder task diagnostic: exception={0}; hresult={1}; line={2}' -f
             $exception.GetType().FullName, $hresult, $_.InvocationInfo.ScriptLineNumber))
     }
