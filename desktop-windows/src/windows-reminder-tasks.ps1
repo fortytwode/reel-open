@@ -254,6 +254,7 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-before'
     $launch = Read-ReminderLaunchConfiguration $launchJson $DiagnosticPath
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-after'
+    $launchMode = $launch['mode']
     $diagnosticsFile = ''
     if ($launch.ContainsKey('diagnosticsFile')) {
         $diagnosticCandidate = [IO.Path]::GetFullPath([string]$launch['diagnosticsFile'])

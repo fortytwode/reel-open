@@ -51,6 +51,7 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const build=readFileSync(path.join(root,'build-portable.ps1'),'utf8');
   const msix=readFileSync(path.join(root,'build-msix.ps1'),'utf8');
   const workflow=readFileSync(path.join(root,'..','.github','workflows','windows-package.yml'),'utf8');
+  const msixUpdate=readFileSync(path.join(root,'test-msix-update.ps1'),'utf8');
   const smoke=readFileSync(path.join(root,'tests','windows-reminder-task.smoke.mjs'),'utf8');
   const allowlist=build.match(/\$productFiles\s*=\s*@\(([\s\S]*?)\n\)/)?.[1] ?? '';
   assert.match(allowlist,/desktop-windows\/src\/windows-reminder-tasks\.mjs/);
@@ -89,6 +90,8 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const launchParserFunction=taskHelper.match(/function Read-ReminderLaunchConfiguration[\s\S]*?(?=\n}\n\nfunction ConvertTo-UtcDateTimeOffset)/)?.[0] ?? '';
   assert.match(deliveryFunction,/\[IO\.Path\]::Combine\(\$PSScriptRoot, 'reminder-launch\.json'\)[\s\S]*\[IO\.File\]::Exists\(\$launchPath\)[\s\S]*\[IO\.File\]::ReadAllText\(\$launchPath\)[\s\S]*launch-config-parse-after/,
     'The trigger path uses .NET path/file APIs and separately marks config existence, read and JSON parse.');
+  assert.match(deliveryFunction,/\$launch = Read-ReminderLaunchConfiguration \$launchJson \$DiagnosticPath[\s\S]*\$launchMode = \$launch\['mode'\][\s\S]*if \(\$launchMode -eq 'msix'\)[\s\S]*elseif \(\$launchMode -eq 'portable'/,
+    'Delivery binds the validated mode in the caller scope before dispatching to the portable or MSIX launch path.');
   assert.match(launchParserFunction,/System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*MaxJsonLength = 65536[\s\S]*RecursionLimit = 8[\s\S]*DeserializeObject\(\$json\)/,
     'Cold-path JSON parsing uses the bounded .NET Framework parser available to Windows PowerShell 5.1.');
   assert.match(launchParserFunction,/\$launch -isnot \[System\.Collections\.Generic\.Dictionary\[string,object\]\][\s\S]*ContainsKey\('mode'\)[\s\S]*\$allowedKeys[\s\S]*-notin \$allowedKeys[\s\S]*diagnosticsFile/,
@@ -127,6 +130,10 @@ test('persistent reminder files are included in the portable runtime allowlist',
   assert.ok(workflow.indexOf('Parse reminder helper with Windows PowerShell 5.1')
     < workflow.indexOf('Install pinned local Whisper browser runtime'),
     'Windows PowerShell 5.1 parses the helper before installs, packaging and model inference.');
+  assert.match(workflow,/windows-reminder-task\.smoke\.mjs portable/,
+    'The Windows package workflow exercises actual portable scheduled-task delivery.');
+  assert.match(msixUpdate,/windows-reminder-task\.smoke\.mjs'\) 'msix'/,
+    'The installed MSIX update test exercises actual scheduled-task delivery through its MSIX launch path.');
   assert.match(workflow,/\[System\.Management\.Automation\.Language\.Parser\]::ParseFile\([\s\S]*\$parseErrors\.Count/,
     'The early PowerShell preflight uses the PowerShell AST parser and fails on syntax errors.');
   assert.match(workflow,/Add-Type -AssemblyName System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*DeserializeObject[\s\S]*\$portable[\s\S]*\$msix/,
