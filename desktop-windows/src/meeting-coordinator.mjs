@@ -81,7 +81,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
       || typeof settings.participantConsent !== 'boolean' || typeof settings.systemAudioConsent !== 'boolean'
       || typeof selection?.useAll !== 'boolean' || !Array.isArray(selection.ids)
       || selection.ids.some(id => typeof id !== 'string')) return null;
-    return JSON.stringify({ ownerUserID: settings.ownerUserID, autoJoin: settings.autoJoin,
+    return JSON.stringify({ ownerUserID: settings.ownerUserID, calendarSource:settings.calendarSource, autoJoin: settings.autoJoin,
       participantConsent: settings.participantConsent, systemAudioConsent: settings.systemAudioConsent,
       selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)].sort() } });
   }
@@ -90,7 +90,7 @@ export function createMeetingCoordinator({ auth, calendar, native, recorder, get
     try { profile = auth.getProfile(); settings = getSettings(); } catch { return null; }
     const key = settingsKey(settings);
     if (!profile?.userID || !profile.email || !key || settings.ownerUserID !== profile.userID) return null;
-    if (!pasted && (profile.calendarConnected !== true || !settings.participantConsent || !settings.systemAudioConsent))
+    if (!pasted && ((profile.calendarConnected !== true && settings.calendarSource !== 'outlook') || !settings.participantConsent || !settings.systemAudioConsent))
       return null;
     return { ownerUserID: profile.userID, email: profile.email.toLowerCase(), settings, key };
   }

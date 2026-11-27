@@ -66,7 +66,7 @@ export function createCompanionStartup({ app, shell, windowsStore, executable, o
 /** Main-process composition. Only state()/action() are exposed by the restricted UI preload.
  * All tokens, join URLs, native ownership and output paths remain in this process.
  */
-export function createDesktopService({auth,org,store,discover,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
+export function createDesktopService({auth,org,store,discover,discoverOutlook,createCoordinator,openExternal,openProduct,openRecordings,openRecording,revealRecording,copyText,exportTrimmedCopy,startup,processor,shareMeeting,reminderScheduler,onState=()=>{},fetch:fetcher=globalThis.fetch} = {}) {
   const configured = Boolean(auth && createCoordinator);
   let owner = auth?.getProfile()?.userID ?? null, ownerEmail=auth?.getProfile()?.email ?? null, generation=0, cache=null, calendarController=null;
   let pulsePromise=null, closed=false, closing=false, error=null, settingsCache=null, settingsRevision=0;
@@ -82,6 +82,8 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     if (settingsCache?.ownerUserID !== id) settingsCache=store.getSettings(id);
     return settingsCache;
   };
+  function usingOutlook() { return settings().calendarSource==='outlook' && Boolean(discoverOutlook); }
+  function calendarAvailable(profile) { return Boolean(profile?.userID && (usingOutlook() || profile.calendarConnected)); }
   function state() {
     const profile=auth?.getProfile() ?? null, status=coordinator?.getState() ?? {phase:'idle'};
     // Do not surface a previous owner's meeting state while cancellation is saving.
@@ -89,7 +91,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     const phase = currentStatus ? status.phase : 'idle';
     const messageKey = currentStatus && status.reason === 'microphone_unavailable' ? status.reason : phase;
     const currentCalendar=calendarOwner===profile?.userID;
-    return {configured,profile,settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
+    return {configured,profile,outlookAvailable:Boolean(discoverOutlook),calendarAvailable:calendarAvailable(profile),settings:structuredClone(settings()),startup:startup?.state() ?? null,calendars:structuredClone(currentCalendar?calendars:[]),
       meetingReminderError:reminderScheduler?.error ?? null,
       meetings:structuredClone(currentCalendar?meetings:[]),recordings:profile ? store.list(profile.userID).map(recording=>({
         ...recording,sharing:activeShares.has(`${profile.userID}:${recording.id}`),localOperation:activeRecordingOperations.get(`${profile.userID}:${recording.id}`)?.label ?? null})) : [],
@@ -103,13 +105,13 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   }
   async function calendarDiscover(args) {
     if (args.signal?.aborted) throw Error('Calendar refresh cancelled.');
-    const profile=auth.getProfile(), key=selectionKey(args.selection), version=generation;
+    const profile=auth.getProfile(), key=(usingOutlook()?'outlook:':'google:')+selectionKey(args.selection), version=generation;
     let result;
     if (cache?.ownerUserID === profile?.userID && cache.ownerEmail === profile?.email
       && cache.key === key && Date.now()-cache.at < 10_000) result=cache.result;
     else {
       try {
-        result = profile?.calendarConnected ? await discover(args) : null;
+        result = usingOutlook() ? await discoverOutlook(args) : profile?.calendarConnected ? await discover(args) : null;
       } catch (error) {
         if (!args.pastedLink) throw error;
       }
@@ -121,7 +123,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       if (hasCalendarResult) cache={ownerUserID:result.ownerUserID,ownerEmail:profile.email,key,at:Date.now(),result};
     }
     // Google discovery can be cached briefly; cloud ownership must be fresh before each coordinator refresh/join.
-    const routed=await routeGoogleMeetings({auth,snapshot:result,routingURL:org && org.meetingServiceURL + '/calendar/desktop',fetch:fetcher,signal:args.signal,now:args.now,pastedLink:args.pastedLink});
+    const routed=await routeGoogleMeetings({auth,snapshot:result,localCalendar:usingOutlook(),routingURL:org && org.meetingServiceURL + '/calendar/desktop',fetch:fetcher,signal:args.signal,now:args.now,pastedLink:args.pastedLink});
     if (args.signal?.aborted || version !== generation || profile?.userID !== auth.getProfile()?.userID
       || profile?.email !== auth.getProfile()?.email) throw Error('The calendar account changed.');
     routingUnavailable=routed.routingUnavailable;
@@ -134,7 +136,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   const unsubscribeProcessing=processor?.onStateChange(emit);
   const unsubscribeAuth=auth?.onStateChange(() => {
     const next=auth.getProfile()?.userID ?? null;
-    if (owner !== next || ownerEmail !== auth.getProfile()?.email || !auth.getProfile()?.calendarConnected) {
+    if (owner !== next || ownerEmail !== auth.getProfile()?.email || !calendarAvailable(auth.getProfile())) {
       owner=next;ownerEmail=auth.getProfile()?.email ?? null;invalidate();
     }
     // The coordinator independently invalidates on the same auth notification.
@@ -151,7 +153,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
     }
     const operation=(async()=>{
       const profile=auth.getProfile(), version=generation;
-      if (!profile?.calendarConnected) { reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]}); await coordinator.refresh(); await coordinator.tick(); emit(); return; }
+      if (!calendarAvailable(profile)) { reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]}); await coordinator.refresh(); await coordinator.tick(); emit(); return; }
       const controller=new AbortController(); calendarController=controller;
       try {
         const result=await calendarDiscover({auth,selection:settings().selection,now:new Date(),signal:controller.signal});
@@ -165,7 +167,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if (closed || closing || version!==generation) return;
         cache=null;calendars=[];meetings=[];
         reminderScheduler?.update({owner:profile?.userID,reminders:false,meetings:[]});
-        error='Could not refresh your calendar. Reconnect Google Calendar or try again.';
+        error=usingOutlook()?'Open classic Outlook with the same work account, then refresh.':'Could not refresh your calendar. Reconnect Google Calendar or try again.';
         await coordinator.cancel();emit();
       } finally { if(calendarController===controller) calendarController=null; }
     })();
@@ -206,7 +208,23 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           return store.saveSettings({...value,ownerUserID:id,expectedOwnerUserID:id,autoJoin:false,meetingReminders:false});
         });
         settingsTail=write;write.catch(()=>{});await write;
-      } else if(name==='saveSettings') {
+      } else if(name==='saveSettings' || name==='setCalendarSource') {
+        const switching=name==='setCalendarSource';
+        let source=settings().calendarSource ?? 'google';
+        if (switching) {
+          requireOwner(payload?.expectedOwnerUserID ?? null);
+          if (!discoverOutlook || !['google','outlook'].includes(payload.source)) throw Error('Unknown calendar source.');
+          source=payload.source;
+          if (source===(settings().calendarSource ?? 'google')) return state();
+          if (['joining','capturing','saving','close_required'].includes(coordinator.getState().phase))
+            throw Error('Finish the current recording before changing calendars.');
+          const current=settings();
+          payload={...defaults(current.ownerUserID),expectedOwnerUserID:current.ownerUserID,localTranscription:current.localTranscription};
+          generation++; calendarOwner=null; calendars=[]; meetings=[];
+        } else if ((payload?.calendarSource ?? 'google') !== source) throw Error('Your calendar source changed. Refresh setup.');
+        if (payload && Object.hasOwn(payload,'calendarSource')) {
+          payload={...payload}; delete payload.calendarSource;
+        }
         if (!payload || typeof payload!=='object' || Array.isArray(payload) || Object.keys(payload).some(key=>!keys.includes(key)))
           throw Error('Invalid recording settings.');
         const id=requireOwner(payload.expectedOwnerUserID), version=generation;
@@ -216,10 +234,10 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
           || typeof payload.selection?.useAll!=='boolean' || !Array.isArray(payload.selection.ids)
           || payload.selection.ids.length>250 || payload.selection.ids.some(value=>typeof value!=='string'||!value||value.length>1024))
           throw Error('Invalid recording settings.');
-        const next={ownerUserID:id,autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
+        const next={ownerUserID:id,...(source==='outlook'?{calendarSource:source}:{}),autoJoin:payload.autoJoin && payload.participantConsent && payload.systemAudioConsent,
           participantConsent:payload.participantConsent,systemAudioConsent:payload.systemAudioConsent,meetingReminders:payload.meetingReminders,localTranscription:payload.localTranscription,
           selection:{useAll:payload.selection.useAll,ids:[...new Set(payload.selection.ids)]}};
-        if(next.autoJoin && !auth.getProfile().calendarConnected) throw Error('Connect Google Calendar first.');
+        if(next.autoJoin && !calendarAvailable(auth.getProfile())) throw Error('Connect Google Calendar first.');
         const revision=++settingsRevision, changed=JSON.stringify(settings())!==JSON.stringify(next);
         let cancellation=Promise.resolve();
         if(changed) {

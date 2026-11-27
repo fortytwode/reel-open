@@ -83,7 +83,7 @@ $productFiles = @(
     'desktop-windows/organization.json', 'web/reel/organization.js',
     'desktop-windows/main.mjs', 'desktop-windows/preload.cjs',
     'desktop-windows/src/auth.mjs', 'desktop-windows/src/asset-server.mjs',
-    'desktop-windows/src/desktop-service.mjs', 'desktop-windows/src/google-calendar.mjs', 'desktop-windows/src/meeting-reminders.mjs',
+    'desktop-windows/src/desktop-service.mjs', 'desktop-windows/src/google-calendar.mjs', 'desktop-windows/src/outlook-calendar.mjs', 'desktop-windows/src/meeting-reminders.mjs',
     'desktop-windows/src/windows-reminder-tasks.mjs', 'desktop-windows/src/windows-reminder-tasks.ps1',
     'desktop-windows/src/local-recordings.mjs', 'desktop-windows/src/local-whisper.mjs', 'desktop-windows/src/local-extractive-summary.mjs', 'desktop-windows/src/meeting-coordinator.mjs', 'desktop-windows/src/meeting-processing.mjs', 'desktop-windows/src/meeting-share.mjs',
     'desktop-windows/src/native-bridge.mjs', 'desktop-windows/src/recorder.mjs',
@@ -103,7 +103,7 @@ try {
     & npm run build:local-ai --prefix desktop-windows
     if ($LASTEXITCODE -ne 0) { throw 'Bundling the pinned local AI worker runtime failed.' }
 } finally { Pop-Location }
-$nativeInputs = @('Core.cs', 'WinJoin.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs',
+$nativeInputs = @('Core.cs', 'WinJoin.cs', 'OutlookCalendar.cs', 'Program.cs', 'PolicyTests.cs', 'FixturePolicyTests.cs', 'ProcessIsolationTests.cs',
     'MediaTrim.cs', 'MediaTrimProgram.cs', 'MediaTrimTests.cs', 'build.cmd', 'build-media-trim.ps1')
 $sourceHashes = [ordered]@{}
 foreach ($relative in $productFiles) {

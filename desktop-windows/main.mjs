@@ -7,6 +7,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {organizationConfig} from '../web/reel/organization.js';
 import {createWindowsAuth} from './src/auth.mjs';
+import {discoverOutlookMeetings} from './src/outlook-calendar.mjs';
 import {discoverGoogleMeetings} from './src/google-calendar.mjs';
 import {createMeetingCoordinator} from './src/meeting-coordinator.mjs';
 import {createNativeBridge} from './src/native-bridge.mjs';
@@ -272,7 +273,7 @@ async function run({triggerOnly=false,triggerToken=null}={}) {
     onCompleted:({ownerUserID,recording})=>{ if (!shutdown && auth?.getProfile()?.userID===ownerUserID && store.getProcessing({ownerUserID,id:recording.id})?.phase==='pending') void processor.process({ownerUserID,id:recording.id}).catch(()=>{}); },
     onFailure:()=>{void service?.action('stopRecording').catch(()=>{});},
     onSourceEnded:()=>service?.action('stopRecording')});
-  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,reminderScheduler:reminders,discover:discoverGoogleMeetings,
+  service=createDesktopService({auth,org,store,processor,shareMeeting:meetingShare,reminderScheduler:reminders,discover:discoverGoogleMeetings,discoverOutlook:discoverOutlookMeetings,
     createCoordinator:auth ? options=>createMeetingCoordinator({...options,native:bridge,recorder}) : null,
     openExternal:value=>shell.openExternal(value),openProduct:openProductEntry,
     openRecording:async file=>{ const error=await shell.openPath(file); if(error) throw Error('Could not open the recording.'); },
