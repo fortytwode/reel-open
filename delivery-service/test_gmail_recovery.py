@@ -6,8 +6,9 @@ from email.parser import BytesParser
 import hashlib
 import types
 import unittest
+from unittest.mock import Mock, patch
 
-from app import DeliveryError
+from app import create_app, DeliveryError
 from providers import CanonicalProviders
 import test_orchestration as orchestration
 
@@ -115,6 +116,61 @@ class GmailReconciliationTests(unittest.TestCase):
         result=self.post()
         self.assertEqual(result.status_code,200,result.json)
         self.assertEqual((self.gmail.creates,self.gmail.sends),(1,1))
+    def test_peer_recap_uses_dedicated_sender_and_exact_recipients(self):
+        self.event['attendees'] = [{'email': 'peer@rocketshiphq.com'}]
+        self.adapter._configured_recap_sender = 'recaps@rocketshiphq.com'
+        self.providers.recap_sender = self.adapter.recap_sender
+        slack = Mock()
+        slack.resolve_dm.side_effect = {
+            'owner@rocketshiphq.com': 'DOWNER', 'peer@rocketshiphq.com': 'DPEER',
+        }.__getitem__
+        slack.post_dm.return_value = '1000.001'
+        self.client = create_app(
+            lambda token: self.claims, lambda email: orchestration.Service([self.event]),
+            store=self.store, calendar_store=self.calendar_store, providers=self.providers,
+            clock=lambda: self.now, slack=slack).test_client()
+        with patch.dict('os.environ', {'NOTION_DELIVERY_OWNERS': 'admin@rocketshiphq.com'}):
+            result = self.post()
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['route'], 'reel')
+        self.assertEqual(result.json['slack'], {'sent': 2})
+        self.assertEqual(self.providers.creates, 0)
+        self.assertEqual([call.args[0] for call in slack.post_dm.call_args_list], ['DOWNER', 'DPEER'])
+        sent, = self.gmail.records.values()
+        headers = {header['name']: header['value'] for header in sent['payload']['headers']}
+        self.assertEqual(headers['From'], self.adapter.recap_sender)
+        self.assertEqual(headers['To'], 'owner@rocketshiphq.com, peer@rocketshiphq.com')
+        self.assertTrue(all(f'from:{self.adapter.recap_sender} ' in query for query in self.gmail.queries))
+        state, = [state for key, (state, _) in self.store.items.items() if key.startswith('occurrence/')]
+        self.assertEqual(state['email_sender'], self.adapter.recap_sender)
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual(self.gmail.sends, 1)
+        self.assertEqual(slack.post_dm.call_count, 2)
+
+    def test_switch_holds_old_mailbox_draft_after_lost_create(self):
+        self.gmail.fail_create = True
+        self.assertEqual(self.post().status_code, 503)
+        queries_before_switch = self.gmail.queries[:]
+        self.adapter._configured_recap_sender = 'recaps@rocketshiphq.com'
+        self.providers.recap_sender = self.adapter.recap_sender
+        self.providers.legacy_recap_sender = self.adapter.legacy_recap_sender
+        self.now += 61
+        result = self.post()
+        self.assertEqual(result.status_code, 503, result.json)
+        self.assertEqual(self.gmail.queries, queries_before_switch)
+        self.assertEqual((self.gmail.creates, self.gmail.sends), (1, 0))
+
+    def test_rollback_does_not_repeat_a_send_from_the_dedicated_mailbox(self):
+        self.adapter._configured_recap_sender = 'recaps@rocketshiphq.com'
+        self.providers.recap_sender = self.adapter.recap_sender
+        self.gmail.fail_send = True
+        self.assertEqual(self.post().status_code, 503)
+        self.adapter._configured_recap_sender = ''
+        self.providers.recap_sender = self.adapter.recap_sender
+        self.now += 61
+        self.assertEqual(self.post().status_code, 503)
+        self.assertEqual((self.gmail.creates, self.gmail.sends), (1, 1))
+
     def test_paginated_candidates_require_exact_marker(self):
         self.gmail.records={'wrong':self.marker_record('other-key'),'right':self.marker_record('wanted')}
         found=self.adapter.find_email('wanted',since=1000)

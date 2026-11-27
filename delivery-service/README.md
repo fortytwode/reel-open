@@ -21,11 +21,13 @@ The image installs dependencies from the hash-locked `delivery-service/requireme
 | `REEL_DELIVERY_PROVIDER` | `standalone` (the default). |
 | `REEL_NOTION_DATA_SOURCE_ID` | Notion data source UUID. Create a private data source with a title property and a `Meeting ID` rich-text property. Share it with the authorized integration. |
 | `NOTION_TOKEN` | Secret token for that integration, with permission to read and insert content in the data source. |
-| `REEL_RECAP_SENDER` | An email address in `REEL_ORGANIZATION_DOMAIN`. |
+| `REEL_RECAP_SENDER` | A Gmail mailbox in `REEL_ORGANIZATION_DOMAIN`. Required for standalone delivery. Canonical delivery delegates Gmail to this mailbox when set and otherwise uses its legacy calendar sender. |
 | `GOOGLE_CALENDAR_CREDENTIALS` | Path to the secret-mounted Workspace domain-wide delegated service-account JSON. Enable the Calendar and Gmail APIs and grant `calendar.readonly`, `gmail.compose` and `gmail.readonly` scopes. The service reads the verified caller's calendar and sends as the recap sender. |
 | `DELIVERY_RECEIPTS_BUCKET` | Private GCS bucket. Grant the runtime identity read, create and replacement access to its `delivery/` objects. |
 | `CALENDAR_SELECTION_BUCKET`, `CALENDAR_SELECTION_PREFIX` | Use the meeting service’s `RECEIPT_BUCKET` and `RECEIPT_PREFIX`. Grant the delivery identity `storage.objects.get` on objects under `<prefix>/calendar/`. It uses the signed-in owner’s saved Google calendar choices to list meetings and verify recap recipients. |
 | `REEL_SLACK_BOT_TOKEN` | Optional Slack bot token, injected as a runtime secret. Leave unset to disable Slack delivery. |
+
+Before switching senders, reconcile unfinished Gmail drafts and uncertain sends in the old mailbox. Confirmed delivery receipts remain valid. Delivery holds unresolved attempts from a different mailbox so they cannot send twice.
 
 Keep the Cloud Run request timeout at 600 seconds and concurrency at 1. The image runs a synchronous one-thread Gunicorn worker with a 600-second timeout. Occurrence claims last 660 seconds. Provider calls use a bounded transport timeout and an active claim check.
 

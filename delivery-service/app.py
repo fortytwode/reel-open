@@ -1582,6 +1582,13 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
         with providers.context(fence):
             state = fence()
             email_ledger = ('email_started_at', 'email', 'email_create_uncertain', 'email_retry_after')
+            sender = getattr(providers, 'recap_sender', None)
+            if sender and (state.get('email') or {}).get('state') != 'sent':
+                previous_sender = state.get('email_sender')
+                if previous_sender is None and any(field in state for field in email_ledger):
+                    previous_sender = providers.legacy_recap_sender
+                if previous_sender is not None and previous_sender != sender:
+                    raise ProviderPending('Unresolved recap belongs to a different Gmail mailbox')
             if (retry_slack and slack is not None and 'slack_retry_eligible' not in state
                     and not any(field in state for field in email_ledger)):
                 state = save(slack_retry_eligible=True)
@@ -1732,11 +1739,16 @@ def deliver(payload, owner, store, providers, calendar_factory, clock, deadline=
                     state = save(followup_actions=tasks)
             email = state.get('email') or {}
             if email.get('state') != 'sent':
+                email_updates = {}
+                if sender and 'email_sender' not in state:
+                    email_updates['email_sender'] = sender
                 if 'email_started_at' not in state:
                     # A fixed lower bound survives arbitrarily late recovery.
                     # Older unresolved receipts lack it, so scan all dates.
-                    first_attempt = 0 if email or state.get('email_create_uncertain') or state.get('email_retry_after') else clock()
-                    state = save(email_started_at=first_attempt)
+                    email_updates['email_started_at'] = (0 if email or state.get('email_create_uncertain')
+                                                        or state.get('email_retry_after') else clock())
+                if email_updates:
+                    state = save(**email_updates)
                 existing = providers.find_email(meeting_id, since=state['email_started_at'])
                 fence()
                 if existing and existing.get('state') == 'sent':

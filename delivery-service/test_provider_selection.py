@@ -1,7 +1,7 @@
 import os
 import sys
 import types
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -41,3 +41,21 @@ def test_unknown_provider_configuration_never_silently_selects_an_adapter():
     with patch.dict(os.environ, {'REEL_DELIVERY_PROVIDER': 'misspelled'}, clear=True):
         with pytest.raises(ProviderPending, match='provider'):
             configured_providers()
+
+
+def test_canonical_delegates_gmail_to_recap_sender_only():
+    adapter = types.ModuleType('distribution')
+    adapter.CALENDAR_EMAIL = 'admin@acme.example'
+    credentials = Mock()
+    transport = Mock()
+    transport.credentials = credentials
+    service = types.SimpleNamespace(_http=transport)
+    adapter.get_gmail_service = Mock(return_value=service)
+    with patch.dict(os.environ, {**CONFIG, 'REEL_DELIVERY_PROVIDER': 'canonical'}, clear=True), \
+            patch.dict(sys.modules, {'distribution': adapter}), \
+            patch('providers.install_bounded_transports'), patch('providers.GmailHttp') as gmail_transport:
+        provider = configured_providers()
+        assert provider._gmail() is service
+        credentials.with_subject.assert_called_once_with(CONFIG['REEL_RECAP_SENDER'])
+        gmail_transport.assert_called_once_with(credentials.with_subject.return_value)
+        assert adapter.CALENDAR_EMAIL == 'admin@acme.example'

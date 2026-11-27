@@ -283,7 +283,18 @@ class CanonicalProviders:
         import distribution
         self.canonical = distribution
         self.gmail = None
+        self._configured_recap_sender = os.getenv('REEL_RECAP_SENDER', '').strip().lower()
+        if self._configured_recap_sender and not is_internal_email(self._configured_recap_sender):
+            raise ProviderPending('REEL_RECAP_SENDER must be an internal email address')
         install_bounded_transports()
+
+    @property
+    def legacy_recap_sender(self):
+        return self.canonical.CALENDAR_EMAIL.strip().lower()
+
+    @property
+    def recap_sender(self):
+        return getattr(self, '_configured_recap_sender', '') or self.legacy_recap_sender
 
     @contextmanager
     def context(self, guard):
@@ -422,7 +433,10 @@ class CanonicalProviders:
     def _gmail(self):
         if self.gmail is None:
             service = self.canonical.get_gmail_service()
-            service._http = GmailHttp(service._http.credentials)
+            credentials = service._http.credentials
+            if self.recap_sender != self.legacy_recap_sender:
+                credentials = credentials.with_subject(self.recap_sender)
+            service._http = GmailHttp(credentials)
             self.gmail = service
         return self.gmail
 
@@ -437,7 +451,7 @@ class CanonicalProviders:
         The request's transport fences bound the scan; incomplete scans raise.
         """
         service = self._gmail()
-        query = f'in:anywhere from:{self.canonical.CALENDAR_EMAIL} subject:"Meeting recap"'
+        query = f'in:anywhere from:{self.recap_sender} subject:"Meeting recap"'
         if since:
             query += f' after:{max(0, int(since) - 120)}'
         matches = {}
@@ -496,7 +510,7 @@ class CanonicalProviders:
         if message.get(DELIVERY_MARKER_HEADER) is not None:
             del message[DELIVERY_MARKER_HEADER]
         message[DELIVERY_MARKER_HEADER] = key
-        message['From'] = self.canonical.CALENDAR_EMAIL
+        message['From'] = self.recap_sender
         try:
             result = self._gmail().users().drafts().create(userId='me', body={'message':{'raw':base64.urlsafe_b64encode(message.as_bytes()).decode()}}).execute()
         except Exception as exc:
