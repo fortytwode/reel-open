@@ -204,10 +204,10 @@ export class CaptureSession {
 
   get pauseConfirmed() { return this.phase === "paused" && this.pauseID === this.confirmedPauseID; }
   begin() { this.phase = "recording"; this.worker.postMessage({ type: "begin", audioTime: performance.now() / 1000 }); }
-  pause() {
+  pause({ freezeScreenFrame = false } = {}) {
     if (this.phase !== "recording") return;
     this.phase = "paused";
-    this.worker.postMessage({ type: "pause", pauseID: ++this.pauseID, audioTime: performance.now() / 1000 });
+    this.worker.postMessage({ type: "pause", pauseID: ++this.pauseID, freezeScreenFrame, audioTime: performance.now() / 1000 });
   }
   resume({ dropScreenFrame = false } = {}) {
     if (this.phase !== "paused") return;

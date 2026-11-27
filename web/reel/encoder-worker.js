@@ -34,6 +34,7 @@ async function handleMessage(m) {
     else if (m.type === "begin") begin(m);
     else if (m.type === "pause") {
       closeAudioInterval(m.audioTime);
+      S.freezeScreenFrame = m.freezeScreenFrame === true;
       S.clock.pause(now());
       postTick(m.pauseID);
     }
@@ -153,6 +154,12 @@ async function readFrames(stream, which) {
     let r;
     try { r = await reader.read(); } catch { break; }
     if (r.done) break;
+    // A static Windows source may emit nothing after resume. Keep its last
+    // visible frame, and release any images received during the pause.
+    if (which === "screen" && S.freezeScreenFrame && S.clock.isPaused) {
+      r.value.close();
+      continue;
+    }
     const old = S.latest[which];
     S.latest[which] = r.value;
     if (old) old.close();

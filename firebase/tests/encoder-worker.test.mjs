@@ -81,6 +81,55 @@ test("a video encoder with no startup output drains its queued frames once witho
   }
 });
 
+test("resuming a static Windows window retains its pre-pause picture until a fresh frame arrives", async t => {
+  const replacements = new Map(), painted = [];
+  function replace(name, value) {
+    replacements.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  t.after(() => {
+    for (const [name, descriptor] of replacements) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];
+    }
+  });
+  let time = 0, tick, source;
+  const screen = new ReadableStream({ start(controller) { source = controller; } });
+  const frame = label => ({ label, displayWidth: 640, displayHeight: 360, close() { this.closed = true; } });
+  replace("self", { postMessage() {} });
+  replace("OffscreenCanvas", class {
+    getContext() { return { save() {}, restore() {}, fillRect() { painted.push("black"); }, drawImage(image) { painted.push(image.label); } }; }
+    async convertToBlob() {}
+  });
+  replace("VideoFrame", class { close() {} });
+  replace("VideoEncoder", class {
+    static async isConfigSupported() { return { supported: true }; }
+    configure() { this.state = "configured"; this.encodeQueueSize = 0; }
+    encode() {}
+    close() {}
+  });
+  t.mock.method(globalThis, "setInterval", fn => { tick = fn; return 1; });
+  t.mock.method(globalThis, "clearInterval", () => {});
+  t.mock.method(performance, "now", () => time);
+  await import("../../web/reel/encoder-worker.js?static-window-resume");
+  const command = (type, fields = {}) => self.onmessage({ data: { type, ...fields } });
+  const nextFrame = async value => { source.enqueue(value); await new Promise(resolve => setImmediate(resolve)); };
+  await command("start", { width: 640, height: 360, fps: 15, bitrate: 500000, audio: false, screen });
+  await nextFrame(frame("before pause"));
+  await command("begin");
+  await command("pause", { freezeScreenFrame: true, pauseID: 1 });
+  const privateFrame = frame("during pause");
+  await nextFrame(privateFrame);
+  assert.equal(privateFrame.closed, true);
+  await command("resume");
+  time = 250; tick();
+  assert.equal(painted.at(-1), "before pause");
+  await nextFrame(frame("after resume"));
+  time = 500; tick();
+  assert.equal(painted.at(-1), "after resume");
+  assert.equal(painted.includes("during pause"), false);
+  await command("cancel");
+});
+
 test("stopping a paused recording never draws new frames to fill a backlog", async () => {
   const messages = [];
   let time = 0, frames = 0;

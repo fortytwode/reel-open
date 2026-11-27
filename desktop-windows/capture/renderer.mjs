@@ -95,7 +95,7 @@ function watchAudioTrack(track) {
 function acquireWindow(id) {
   const mandatory = { chromeMediaSource: 'desktop', chromeMediaSourceId: id };
   return navigator.mediaDevices.getUserMedia({
-    video: { mandatory: { ...mandatory, maxWidth: 960, maxHeight: 600, maxFrameRate: 15 } }, audio: { mandatory },
+    video: { mandatory: { ...mandatory, maxWidth: 960, maxHeight: 600, minFrameRate: 1, maxFrameRate: 15 } }, audio: { mandatory },
   });
 }
 async function refreshAudio(request, deadline) {
@@ -211,9 +211,9 @@ api.onCommand(command => {
         void (async () => { await clickPending?.catch(() => {}); await api.pauseChanged(true); })()
           .catch(() => {}).finally(() => { pauseAckPending = false; });
       }
-      else capture.pause();
+      else capture.pause({ freezeScreenFrame: true });
     } else if (command.type === 'resume') {
-      capture.resume({ dropScreenFrame: true });
+      capture.resume();
       resumeAckPending = true;
     } else if (command.type === 'click-sampling') {
       if (command.enabled) startClickSampling(); else stopClickSampling();
