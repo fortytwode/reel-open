@@ -110,6 +110,20 @@ test('local playback and transcript copy are restricted to the active recording 
   await assert.rejects(f.service.action('copyTranscript', { id, expectedOwnerUserID: 'owner-b' }));
 });
 
+test('transcript viewer returns only completed text for the active owner and opaque recording ID', async () => {
+  const f=fixture(), id='b'.repeat(32);
+  f.recordings.push({id,title:'A meeting'});
+  f.store.getProcessing=request=>request.ownerUserID==='owner-a'&&request.id===id
+    ? {transcriptComplete:true,text:'Transcript body'}:null;
+  assert.deepEqual(await f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a'}),
+    {title:'A meeting',text:'Transcript body'});
+  await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-b'}),/account changed/i);
+  await assert.rejects(f.service.action('getTranscript',{id:'../escape',expectedOwnerUserID:'owner-a'}),/transcript is unavailable/i);
+  await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a',path:'/tmp/private.txt'}),/transcript is unavailable/i);
+  f.store.getProcessing=()=>({transcriptComplete:false,text:'Partial'});
+  await assert.rejects(f.service.action('getTranscript',{id,expectedOwnerUserID:'owner-a'}),/transcript is unavailable/i);
+});
+
 test('trim export resolves only owner-bound local files and validates a non-destructive range', async () => {
   const exports=[];
   const f=fixture({exportTrimmedCopy:async value=>exports.push(value)}), id='b'.repeat(32);

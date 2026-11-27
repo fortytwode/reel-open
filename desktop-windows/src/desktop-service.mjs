@@ -180,6 +180,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
   }
   async function action(name,payload) {
     if (closed || closing) throw Error('Reel is shutting down.');
+    let transcriptResponse = null;
     if (name==='openLibrary') {
       if (!org) throw Error('The organization has not configured its web URLs.');
       await openExternal(org.notesBaseURL);
@@ -289,6 +290,16 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
         if (processing?.transcriptComplete !== true || !processing.text?.trim()) throw Error('Transcript is unavailable.');
         requireOwner(ownerUserID);
         copyText(processing.text);
+      } else if(name==='getTranscript') {
+        const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
+        if (!payload || typeof payload!=='object' || Array.isArray(payload)
+          || Object.keys(payload).some(key=>!['id','expectedOwnerUserID'].includes(key))
+          || !/^[0-9a-f]{32}$/.test(payload.id ?? '')) throw Error('Transcript is unavailable.');
+        const recording=store.list(ownerUserID).find(item=>item.id===payload.id);
+        const processing=store.getProcessing({ownerUserID,id:payload.id});
+        if (!recording || processing?.transcriptComplete !== true || !processing.text?.trim()) throw Error('Transcript is unavailable.');
+        requireOwner(ownerUserID);
+        transcriptResponse={title:recording.title,text:processing.text};
       } else if(name==='exportTrimmedCopy') {
         const ownerUserID=requireOwner(payload?.expectedOwnerUserID ?? null);
         if (!/^[0-9a-f]{32}$/.test(payload?.id ?? '') || typeof exportTrimmedCopy !== 'function') throw Error('Recording export is unavailable.');
@@ -349,7 +360,7 @@ export function createDesktopService({auth,org,store,discover,createCoordinator,
       else if(name==='refresh') { cache=null;await pulse(); }
       else throw Error('Unknown Reel action.');
     }
-    return state();
+    return transcriptResponse ?? state();
   }
   function dispose() {
     if(closed) return Promise.resolve();
