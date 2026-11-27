@@ -58,7 +58,8 @@ jobs:
           $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
           $wpf = Join-Path $framework 'WPF'
           $nativeHelper = Join-Path $work 'ReelNativeJoin.exe'
-          & (Join-Path $framework 'csc.exe') /nologo /target:exe "/out:$nativeHelper" "/r:$(Join-Path $wpf 'UIAutomationClient.dll')" "/r:$(Join-Path $wpf 'UIAutomationTypes.dll')" "/r:$(Join-Path $wpf 'WindowsBase.dll')" "/r:$(Join-Path $framework 'System.Web.Extensions.dll')" desktop-windows/native/Core.cs desktop-windows/native/WinJoin.cs desktop-windows/native/Program.cs
+          $nativeSource = Join-Path (Get-Location).Path 'desktop-windows/native'
+          & (Join-Path $framework 'csc.exe') /nologo /target:exe "/out:$nativeHelper" "/r:$(Join-Path $wpf 'UIAutomationClient.dll')" "/r:$(Join-Path $wpf 'UIAutomationTypes.dll')" "/r:$(Join-Path $wpf 'WindowsBase.dll')" "/r:$(Join-Path $framework 'System.Web.Extensions.dll')" (Join-Path $nativeSource 'Core.cs') (Join-Path $nativeSource 'WinJoin.cs') (Join-Path $nativeSource 'Program.cs')
           if ($LASTEXITCODE -ne 0) { throw 'The existing production WASAPI endpoint helper did not compile.' }
           $env:REEL_AUDIO_PREFLIGHT_HELPER = $nativeHelper
           @'
