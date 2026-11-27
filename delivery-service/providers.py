@@ -6,6 +6,8 @@ from contextvars import ContextVar
 from datetime import datetime
 from urllib.parse import urlsplit
 
+import requests
+
 from reel_organization import is_internal_email
 
 if __package__:
@@ -278,12 +280,65 @@ def gmail_pages(method, field, **kwargs):
         seen.add(cursor)
 
 
+class ResendRecaps:
+    def __init__(self, sender, api_key):
+        if not is_internal_email(sender) or not api_key:
+            raise ProviderPending('Resend requires an internal sender and a sending key')
+        self.sender = sender
+
+        self._headers = {'Authorization': 'Bearer ' + api_key}
+
+    def send(self, meeting_id, recipients, message):
+        parts = {part.get_content_subtype(): part.get_payload(decode=True).decode(part.get_content_charset())
+                 for part in message.get_payload()}
+        payload = {
+            'from': f'Reel Notetaker <{self.sender}>',
+            'to': recipients,
+            'subject': message['Subject'],
+            'text': parts['plain'],
+            'html': parts['html'],
+        }
+        _check()
+        try:
+            response = requests.post(
+                'https://api.resend.com/emails',
+                headers={**self._headers, 'Idempotency-Key': f'reel/recap/{meeting_id}'},
+                json=payload, timeout=20, allow_redirects=False,
+            )
+            if not 200 <= response.status_code < 300:
+                raise ProviderPending(f'Resend could not confirm the recap (HTTP {response.status_code})')
+            result = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise ProviderPending('Resend recap was not confirmed') from exc
+        _check()
+        message_id = result.get('id') if isinstance(result, dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            raise ProviderPending('Resend recap has no provider message ID')
+        return {'state': 'sent', 'provider_message_id': message_id}
+
+
 class CanonicalProviders:
     def __init__(self):
         import distribution
         self.canonical = distribution
         self.gmail = None
+        sender = os.getenv('REEL_RECAP_SENDER', '').strip().lower()
+        transport = os.getenv('REEL_RECAP_TRANSPORT', 'gmail').strip().lower()
+        if transport not in ('gmail', 'resend'):
+            raise ProviderPending('Unknown recap email transport')
+        if sender and not is_internal_email(sender):
+            raise ProviderPending('REEL_RECAP_SENDER must be an internal email address')
+        self.resend_recaps = ResendRecaps(sender, os.getenv('REEL_RESEND_API_KEY', '').strip()) if transport == 'resend' else None
+        self._configured_recap_sender = sender if transport == 'gmail' else ''
         install_bounded_transports()
+
+    @property
+    def legacy_recap_sender(self):
+        return self.canonical.CALENDAR_EMAIL.strip().lower()
+
+    @property
+    def recap_sender(self):
+        return getattr(self, '_configured_recap_sender', '') or self.legacy_recap_sender
 
     @contextmanager
     def context(self, guard):
@@ -422,7 +477,10 @@ class CanonicalProviders:
     def _gmail(self):
         if self.gmail is None:
             service = self.canonical.get_gmail_service()
-            service._http = GmailHttp(service._http.credentials)
+            credentials = service._http.credentials
+            if self.recap_sender != self.legacy_recap_sender:
+                credentials = credentials.with_subject(self.recap_sender)
+            service._http = GmailHttp(credentials)
             self.gmail = service
         return self.gmail
 
@@ -437,7 +495,7 @@ class CanonicalProviders:
         The request's transport fences bound the scan; incomplete scans raise.
         """
         service = self._gmail()
-        query = f'in:anywhere from:{self.canonical.CALENDAR_EMAIL} subject:"Meeting recap"'
+        query = f'in:anywhere from:{self.recap_sender} subject:"Meeting recap"'
         if since:
             query += f' after:{max(0, int(since) - 120)}'
         matches = {}
@@ -496,7 +554,7 @@ class CanonicalProviders:
         if message.get(DELIVERY_MARKER_HEADER) is not None:
             del message[DELIVERY_MARKER_HEADER]
         message[DELIVERY_MARKER_HEADER] = key
-        message['From'] = self.canonical.CALENDAR_EMAIL
+        message['From'] = self.recap_sender
         try:
             result = self._gmail().users().drafts().create(userId='me', body={'message':{'raw':base64.urlsafe_b64encode(message.as_bytes()).decode()}}).execute()
         except Exception as exc:
