@@ -28,20 +28,42 @@ Reel Companion's startup task is off after installation. In Companion's Meeting 
 ## Portable test ZIP
 
 `build-portable.ps1` creates an **unsigned portable test ZIP**, using the existing
-production native build and no packaging dependencies. It does not sign,
+production native build and a pinned browser inference runtime. It does not sign,
 publish, create OAuth credentials or certify a release.
 
 Run on Windows with PowerShell 5.1 or later, the .NET Framework compiler/UI
 Automation assemblies used by `native/build.cmd`, and an extracted **official
 Electron 45.2.3 Windows distribution**. Use a clean, dedicated extraction from
 Electron's release archive; verify its published checksum before building.
+From the repository root, install the pinned local transcription runtime and
+bundle dependencies:
+`npm ci --ignore-scripts --prefix desktop-windows`. The builder bundles the
+pinned Transformers.js and ONNX WebAssembly runtime into a browser-resolvable
+worker module; it does not embed the esbuild compiler or the Whisper model. Users who
+opt in to local transcription download the pinned model on first use; it remains
+in the Companion's separate model-cache profile for offline retries.
+The isolated inference window allows Hub requests only for known files at the
+pinned revision, then CDN redirects only for the two exact quantized ONNX blob
+paths and their fixed signed-query key set. Transformers.js v4.3.2's progress
+metadata probe defaults to `main`; the worker rewrites only that model's exact
+known file paths to the pinned commit before issuing the request. Hugging Face issues expiring opaque
+CDN signatures that Reel cannot independently validate. Instead, it records the
+exact signed URL returned by an HTTPS redirect from the pinned Hub request and
+permits only that URL; modified signatures or extra query parameters are
+rejected. This boundary relies on the trusted Hub's HTTPS response and the
+pinned inference runtime remaining uncompromised.
+The builder runs `npm run build:local-ai --prefix desktop-windows` to produce
+the worker bundle before copying the allowlisted runtime. The bundle contains
+no unresolved Node-style imports; the architecture CI smoke opens a real
+Chromium module worker and requires its ready message before model download.
+
 Also install the Windows 10 SDK (with `Windows.winmd`) and the .NET Framework
 4.5 targeting pack; the build compiles and tests the local trim helper against
 Windows' built-in Media Foundation editing APIs. No media executable is bundled.
 The builder checks the executable's runtime version and PE architecture; those
 checks do not establish the supplied distribution's provenance. The machine
-must be able to execute that distribution's architecture. No npm install is
-required for packaging.
+must be able to execute that distribution's architecture. Install dependencies
+before packaging; no additional download occurs during the build.
 
 From the repository root, render your deployment settings and build the ZIP.
 

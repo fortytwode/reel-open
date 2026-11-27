@@ -34,6 +34,8 @@ jobs:
       - name: Install pinned Electron runtime
         shell: pwsh
         run: |
+          npm ci --ignore-scripts --prefix desktop-windows
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm ci --prefix desktop-windows/probe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node desktop-windows/probe/node_modules/electron/install.js

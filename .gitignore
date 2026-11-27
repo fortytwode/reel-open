@@ -18,6 +18,7 @@ firestore-debug.log
 
 # Local test dependencies and Python caches
 **/node_modules
+**/local-ai/build/
 **/.venv/
 **/__pycache__/
 **/.pytest_cache/

@@ -8,12 +8,15 @@ const MAX_PENDING = 32 * 1024 * 1024;
 const text = (value, max = 4096) => typeof value === 'string' && value.length > 0 && value.length <= max;
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const defaults = ownerUserID => ({ ownerUserID, autoJoin: false, participantConsent: false,
-  systemAudioConsent: false, meetingReminders: false, selection: { useAll: true, ids: [] } });
+  systemAudioConsent: false, meetingReminders: false, localTranscription: false, selection: { useAll: true, ids: [] } });
 const metadata = recording => ({ id: recording.id, title: recording.title, createdAt: recording.createdAt,
   durationSeconds: recording.durationSeconds, ...(recording.share ? { shareStatus: structuredClone(recording.share.upload), shareIncludesTranscript: recording.share.includeTranscript === true } : {}),
   ...(recording.share?.access ? { shareAccess: { passwordProtected: Boolean(recording.share.access.key), expiresAt: recording.share.access.expiresAt ?? null,
     updatePending: Boolean(recording.share.accessUpdate) } } : {}),
-  ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true, transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()), error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
+  ...(recording.processing ? { processing: { phase: recording.processing.phase, noSpeech: recording.processing.noSpeech === true,
+    transcriptReady: recording.processing.transcriptComplete === true && Boolean(recording.processing.text?.trim()),
+    transcriptionMode: recording.processing.transcriptionMode === 'local' ? 'local' : 'cloud', localOnly: recording.processing.localOnly === true,
+    error: recording.processing.error ?? null, receipt: recording.processing.receipt ? { url: recording.processing.receipt.url } : null } } : {}) });
 
 // Only the boxes and sample tables produced by Reel's pinned fragmented muxer are accepted.
 // This detects damaged/out-of-order appends; playback still requires the real media probe.
@@ -392,13 +395,13 @@ export function createLocalRecordingStore({ root, io: overrides } = {}) {
     });
   }
   function getSettings(ownerUserID) { return structuredClone(owner(ownerUserID).state.settings); }
-  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, selection } = {}) {
+  async function saveSettings({ ownerUserID, expectedOwnerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription, selection } = {}) {
     check(ownerUserID === expectedOwnerUserID && text(ownerUserID, 1024), 'The settings owner changed');
-    check([autoJoin, participantConsent, systemAudioConsent, meetingReminders].every(flag => typeof flag === 'boolean')
+    check([autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription].every(flag => typeof flag === 'boolean')
       && typeof selection?.useAll === 'boolean' && Array.isArray(selection.ids) && selection.ids.length <= 250
       && selection.ids.every(id => text(id, 1024)), 'Invalid recording settings');
     check(!autoJoin || (participantConsent && systemAudioConsent), 'Automatic recording requires both permissions');
-    const settings = { ownerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders,
+    const settings = { ownerUserID, autoJoin, participantConsent, systemAudioConsent, meetingReminders, localTranscription,
       selection: { useAll: selection.useAll, ids: [...new Set(selection.ids)] } };
     const state = await mutate(owner(ownerUserID), state => { state.settings = settings; return state; });
     return structuredClone(state.settings);
