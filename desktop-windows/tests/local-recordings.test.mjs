@@ -66,6 +66,20 @@ test('streams exact fragments to an owner-generated path and persists metadata w
   assert.deepEqual(createLocalRecordingStore({ root }).list('../../owner'), store.list('../../owner'));
 });
 
+test('saved manual window clips keep audio for explicit transcript and share actions', async t => {
+  const { store } = await fixture(t);
+  const writer=await recorded(store,'owner',{manual:true});
+  const saved=await writer.finish({durationSeconds:9});
+  const listed=store.list('owner')[0];
+  assert.equal(listed.id,saved.id);
+  assert.equal(listed.manualRecording,true);
+  assert.equal(listed.processing.transcriptReady,false);
+  assert.equal(store.getProcessing({ownerUserID:'owner',id:saved.id}).meeting.manual,true);
+  const audio=store.getAudioInfo({ownerUserID:'owner',id:saved.id});
+  assert.equal(audio.frameCount,1);
+  assert.equal((await store.getShareRecord({ownerUserID:'owner',id:saved.id})).meeting,true);
+});
+
 test('rejects fragments before init, duplicated init, missing final media and oversized packets', async t => {
   const { store } = await fixture(t);
   for (const operation of [

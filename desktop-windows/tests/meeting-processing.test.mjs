@@ -90,6 +90,22 @@ test('persists transcript, summary, verified receipt and authoritative calendar 
   await f.processor.process({ ownerUserID, id }); assert.equal(f.calls.length, 3);
 });
 
+test('manual recordings are transcribed only on request and stop before summary or delivery', async t => {
+  const f=await fixture(t);
+  f.set({phase:'pending',title:'Saved window',createdAt:'2026-11-10T09:00:00Z',meeting:{manual:true}});
+  assert.deepEqual(await f.processor.resume(),[]);
+  assert.equal(f.calls.length,0,'Pending manual captures are never processed automatically.');
+  const result=await f.processor.process({ownerUserID,id});
+  assert.equal(result.phase,'completed');
+  assert.equal(result.transcriptOnly,true);
+  assert.equal(result.text,'Full transcript.');
+  assert.equal(result.summary,undefined);
+  assert.equal(result.receipt,undefined);
+  assert.equal(f.calls.length,1);
+  assert.match(f.calls[0].url,/\/transcription$/);
+  assert.equal(f.tokenCount(),1);
+});
+
 test('local mode transcribes locally, saves timestamps, and makes no service requests or cloud fallback', async t=>{
   let observed;
   const f=await fixture(t,{mode:'local',fetcher:async()=>{throw Error('Cloud request is forbidden in local mode.');},

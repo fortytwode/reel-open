@@ -9,6 +9,7 @@ let renderGeneration = 0;
 let currentOwner = null;
 let pendingSignIn = null;
 let pendingJoin = false;
+let pendingManualTranscription = null;
 let microphoneMeetingId = null;
 let pendingReminderMeetingID = null;
 let actionError = null;
@@ -145,6 +146,9 @@ function renderManualWindowCapture(signedIn) {
   const placeholder=node('option','','Choose an open window'); placeholder.value=''; select.append(placeholder);
   for(const source of choices) { const option=node('option','',source.title); option.value=source.id; select.append(option); }
   if(choices.some(source=>source.id===previous)) select.value=previous;
+  const preview=byId('captureWindowPreview'), selected=choices.find(source=>source.id===select.value);
+  if(signedIn && selected?.preview) { preview.src=selected.preview; preview.classList.remove('hidden'); }
+  else { preview.src=''; preview.classList.add('hidden'); }
   const busy=['starting','capturing','paused','saving'].includes(capture.phase);
   byId('refreshCaptureWindows').disabled=!signedIn || busy;
   select.disabled=!signedIn || busy || !choices.length;
@@ -228,6 +232,11 @@ function renderRecordings() {
         .finally(()=>{ trim.disabled=false; });
     });
     trimControls.append(node('div','recording-meta','Exports a separate MP4. The original stays unchanged.'),startLabel,endLabel,trim); left.append(trimControls);
+    if(recording.manualRecording && recording.processing?.transcriptReady !== true) {
+      const transcribe=node('button','',recording.processing?.phase==='failed'?'Retry transcription':'Transcribe recording…');
+      transcribe.type='button'; transcribe.dataset.action='transcribeManualRecording'; transcribe.dataset.recordingId=recording.id; left.append(transcribe);
+      left.append(node('div','recording-meta','Transcription starts only when you choose it. Reel will not create or deliver meeting notes.'));
+    }
     if(recording.processing) {
       if(recording.processing.transcriptReady) {
         const openTranscript=node('button','','Open transcript');
@@ -235,7 +244,9 @@ function renderRecordings() {
         const transcript=node('button','','Copy transcript');
         transcript.type='button'; transcript.dataset.action='copyTranscript'; transcript.dataset.recordingId=recording.id; left.append(transcript);
       }
-      const labels={pending:'Waiting to process',transcribing:recording.processing.transcriptionMode==='local'?'Transcribing locally':'Transcribing',summarizing:'Creating notes',delivering:'Delivering notes',completed:recording.processing.localOnly?(recording.processing.localSummary?'Transcript and local extractive notes saved on this computer. No cloud summary or delivery.':'Transcript saved on this computer. No cloud summary or delivery.'):'Notes delivered',failed:'Processing failed'};
+      const labels=recording.manualRecording
+        ? {pending:'Saved on this computer. Transcribe when ready.',transcribing:recording.processing.transcriptionMode==='local'?'Transcribing locally':'Transcribing',completed:recording.processing.noSpeech?'No speech detected':'Transcript saved. No recap or email was created.',failed:'Transcription failed'}
+        : {pending:'Waiting to process',transcribing:recording.processing.transcriptionMode==='local'?'Transcribing locally':'Transcribing',summarizing:'Creating notes',delivering:'Delivering notes',completed:recording.processing.localOnly?(recording.processing.localSummary?'Transcript and local extractive notes saved on this computer. No cloud summary or delivery.':'Transcript saved on this computer. No cloud summary or delivery.'):'Notes delivered',failed:'Processing failed'};
       left.append(node('div','recording-meta', recording.processing.noSpeech ? 'No speech detected' : (labels[recording.processing.phase] ?? 'Processing')));
       const localSummary=recording.processing.localOnly?recording.processing.localSummary:null;
       if(localSummary) {
@@ -255,7 +266,7 @@ function renderRecordings() {
         left.append(details);
       }
       if(recording.processing.error) left.append(node('div','recording-meta',recording.processing.error));
-      if(recording.processing.phase==='failed') { const button=node('button','','Retry notes'); button.type='button'; button.addEventListener('click',()=>void perform('retryProcessing',{id:recording.id,expectedOwnerUserID:snapshot.profile.userID})); left.append(button); }
+      if(recording.processing.phase==='failed' && !recording.manualRecording) { const button=node('button','','Retry notes'); button.type='button'; button.addEventListener('click',()=>void perform('retryProcessing',{id:recording.id,expectedOwnerUserID:snapshot.profile.userID})); left.append(button); }
       const sharing=recording.shareStatus;
       const accessUpdatePending=recording.shareAccess?.updatePending===true;
       const shareButton=node('button','',recording.sharing?'Sharing…':accessUpdatePending?'Link update pending':sharing==='uploaded'?'Copy share link':sharing?.failed||sharing==='uploading'?(recording.shareIncludesTranscript?'Retry sharing video and transcript':'Retry sharing'):'Share recording');
@@ -461,6 +472,28 @@ document.addEventListener('click', event=>{
   const action=target.dataset.action;
   if(action==='finishSetup') { const settings=collectSettings(); if(settings.participantConsent&&settings.systemAudioConsent) perform('saveSettings',{...settings,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
   if(action==='playRecording'||action==='revealRecording'||action==='copyTranscript') { perform(action,{id:target.dataset.recordingId,expectedOwnerUserID:snapshot?.profile?.userID}); return; }
+  if(action==='transcribeManualRecording') {
+    const recording=(snapshot.recordings??[]).find(item=>item.id===target.dataset.recordingId);
+    if(!recording?.manualRecording) return;
+    pendingManualTranscription={id:recording.id,ownerUserID:snapshot?.profile?.userID};
+    const savedMode=recording.processing?.transcriptionMode;
+    byId('manualTranscriptionLocal').checked=savedMode?savedMode==='local':snapshot.settings?.localTranscription===true;
+    byId('manualTranscriptionCloud').checked=!byId('manualTranscriptionLocal').checked;
+    byId('manualTranscriptionLocal').disabled=savedMode==='cloud';
+    byId('manualTranscriptionCloud').disabled=savedMode==='local';
+    byId('manualTranscriptionDialog').showModal();
+    byId('manualTranscriptionLocal').focus(); return;
+  }
+  if(action==='cancelManualTranscription') { pendingManualTranscription=null; byId('manualTranscriptionDialog').close(); return; }
+  if(action==='confirmManualTranscription') {
+    const request=pendingManualTranscription;
+    const recording=(snapshot?.recordings??[]).find(item=>item.id===request?.id);
+    const ownerUserID=snapshot?.profile?.userID;
+    const transcriptionMode=byId('manualTranscriptionLocal').checked?'local':'cloud';
+    pendingManualTranscription=null; byId('manualTranscriptionDialog').close();
+    if(!recording?.manualRecording || !ownerUserID || request.ownerUserID!==ownerUserID) { showError('The account changed. Refresh your recordings.'); return; }
+    void perform('transcribeManualRecording',{id:request.id,transcriptionConfirmed:true,transcriptionMode,expectedOwnerUserID:ownerUserID}); return;
+  }
   if(action==='openTranscript') { void openTranscript(target.dataset.recordingId,snapshot?.profile?.userID); return; }
   if(action==='closeTranscript') { byId('transcriptDialog').close(); return; }
   if(action==='setCompanionStartup') { perform(action,{enabled:target.dataset.enabled==='true'}); return; }

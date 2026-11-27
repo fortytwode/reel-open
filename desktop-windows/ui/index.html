@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:;">
   <title>Reel setup</title>
   <link rel="stylesheet" href="./setup.css">
   <script type="module" src="./setup.mjs"></script>
@@ -63,6 +63,7 @@
       <div class="manual-window-controls">
         <label for="captureWindowSelect">Window</label>
         <select id="captureWindowSelect"><option value="">Refresh windows to choose</option></select>
+        <img id="captureWindowPreview" class="capture-window-preview hidden" alt="Preview of the selected window">
         <button id="refreshCaptureWindows" class="outline" type="button" data-action="listCaptureWindows">Refresh windows</button>
       </div>
       <label class="setting"><input id="captureWindowConsent" type="checkbox"> <span>I have permission to record content shown in this window.</span></label>
@@ -76,6 +77,13 @@
       <section id="recordingsCard" class="card recordings-card hidden"><div class="card-heading"><div><p class="eyebrow">RECENT</p><h2>Latest recordings</h2></div><button class="text-button" type="button" data-action="openRecordings">Open recordings folder ↗</button></div><p class="share-disclosure">Anyone with the link can watch the shared video. Choose “Share video and transcript” to include the finished transcript. The attendee list and meeting notes stay private.</p><div id="recordingsList" class="recording-list"></div></section>
       <div id="accountRow" class="account-row hidden"><span id="accountLabel"></span><button class="text-button" type="button" data-action="signOut">Sign out</button><button class="text-button" id="disconnectCalendarButton" type="button" data-action="disconnectCalendar">Disconnect calendar</button></div>
   </main>
+  <dialog id="manualTranscriptionDialog" class="transcript-dialog" aria-labelledby="manualTranscriptionTitle">
+    <h2 id="manualTranscriptionTitle">Transcribe saved recording</h2>
+    <p class="meeting-meta">Choose where transcription runs. Reel will not create or deliver meeting notes. You can separately choose whether to share the transcript.</p>
+    <label class="setting"><input id="manualTranscriptionLocal" name="manualTranscriptionMode" type="radio" value="local"> <span>On this computer. Audio stays on this device.</span></label>
+    <label class="setting"><input id="manualTranscriptionCloud" name="manualTranscriptionMode" type="radio" value="cloud"> <span>Cloud service. Audio is sent to your configured transcription service.</span></label>
+    <div class="transcript-heading"><button id="manualTranscriptionCancel" class="outline" type="button" data-action="cancelManualTranscription">Cancel</button><button id="manualTranscriptionConfirm" class="primary" type="button" data-action="confirmManualTranscription">Transcribe</button></div>
+  </dialog>
   <dialog id="transcriptDialog" class="transcript-dialog" aria-labelledby="transcriptTitle">
     <div class="transcript-heading"><h2 id="transcriptTitle">Transcript</h2><button id="transcriptClose" class="outline" type="button" data-action="closeTranscript">Close transcript</button></div>
     <pre id="transcriptContent" class="transcript-content"></pre>

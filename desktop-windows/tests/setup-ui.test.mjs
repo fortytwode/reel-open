@@ -14,6 +14,7 @@ test('the dashboard can retry a saved recording through the restricted preload',
   vm.runInNewContext(preload, { require: () => electron });
   const recording = { id: 'saved-meeting', expectedOwnerUserID: 'owner-a' };
   await api.action('retryProcessing', recording);
+  await api.action('transcribeManualRecording', recording);
   await api.action('shareRecording', recording);
   await api.action('updateMeetingShareAccess', recording);
   await api.action('playRecording', recording);
@@ -27,7 +28,7 @@ test('the dashboard can retry a saved recording through the restricted preload',
   await api.action('startWindowRecording', recording);
   await api.action('stopWindowRecording', recording);
   await assert.rejects(api.action('unknown', recording), /Unknown Reel action/);
-  assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'shareRecording', recording],
+  assert.deepEqual(calls, [['reel-desktop:action', 'retryProcessing', recording], ['reel-desktop:action', 'transcribeManualRecording', recording], ['reel-desktop:action', 'shareRecording', recording],
     ['reel-desktop:action', 'updateMeetingShareAccess', recording], ['reel-desktop:action', 'playRecording', recording], ['reel-desktop:action', 'revealRecording', recording], ['reel-desktop:action', 'copyTranscript', recording], ['reel-desktop:action', 'getTranscript', recording],
     ['reel-desktop:action', 'renameRecording', recording], ['reel-desktop:action', 'deleteRecording', recording],
     ['reel-desktop:action', 'exportTrimmedCopy', recording], ['reel-desktop:action', 'listCaptureWindows', recording],
@@ -39,6 +40,55 @@ test('transcript dialog labels the window without announcing the entire transcri
   assert.match(html,/<dialog[^>]+aria-labelledby="transcriptTitle"/);
   assert.doesNotMatch(html,/aria-describedby="transcriptContent"/);
   assert.match(html,/<button[^>]+data-action="closeTranscript"[^>]*>Close transcript<\/button>/);
+});
+
+test('manual transcript asks for an explicit local or cloud choice before processing', async()=>{
+  const elements=new Map();const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onClick;const calls=[];
+  const snapshot={configured:true,profile:{userID:'owner-a',email:'a@northwind.example',calendarConnected:true},
+    settings:{localTranscription:true,participantConsent:false,systemAudioConsent:false,selection:{useAll:true,ids:[]}},
+    meetings:[],status:{phase:'idle'},recordings:[{id:'manual-id',title:'Demo',manualRecording:true,
+      processing:{phase:'pending',transcriptReady:false}}]};
+  const api={onState:()=>{},state:async()=>snapshot,action:(name,payload)=>{calls.push([name,payload]);return Promise.resolve(snapshot);}};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='click')onClick=fn;}};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),
+    {window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise});
+  await new Promise(resolve=>setImmediate(resolve));
+  const transcribe=getElement('recordingsList').children[0].children[0].children.find(item=>item.dataset.action==='transcribeManualRecording');
+  onClick({target:{closest:selector=>selector==='[data-action]'?transcribe:null}});
+  assert.equal(getElement('manualTranscriptionDialog').open,true);
+  assert.equal(getElement('manualTranscriptionLocal').checked,true);
+  getElement('manualTranscriptionLocal').checked=false;getElement('manualTranscriptionCloud').checked=true;
+  const confirm=getElement('manualTranscriptionConfirm');
+  confirm.dataset.action='confirmManualTranscription';
+  onClick({target:{closest:selector=>selector==='[data-action]'?confirm:null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[['transcribeManualRecording',{
+    id:'manual-id',transcriptionConfirmed:true,transcriptionMode:'cloud',expectedOwnerUserID:'owner-a'}]]);
+  assert.equal(getElement('manualTranscriptionDialog').open,false);
+});
+
+test('the selected window preview stays in the signed-in picker and clears on sign-out', async () => {
+  const elements=new Map(); const getElement=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
+  let onState,onChange;
+  const profile={userID:'owner-a',email:'a@example.com',calendarConnected:true};
+  const snapshot={configured:true,profile,settings:{participantConsent:true,systemAudioConsent:true,autoJoin:false,selection:{useAll:true,ids:[]}},
+    manualCapture:{phase:'idle',ownerUserID:'owner-a',sources:[{id:'opaque-choice',title:'Window',preview:'data:image/png;base64,cHJldmlldw=='}]},
+    meetings:[],recordings:[],status:{phase:'idle'}};
+  const api={onState:fn=>{onState=fn;},state:async()=>snapshot,action:async()=>snapshot};
+  const document={getElementById:getElement,createElement:tag=>new Element(tag),querySelectorAll:()=>[],querySelector:()=>null,
+    addEventListener:(name,fn)=>{if(name==='change')onChange=fn;}};
+  const context={window:{reelDesktop:api},document,setTimeout,clearTimeout,Intl,Date,Number,String,Array,Set,Boolean,Math,Promise};
+  vm.runInNewContext(await readFile(new URL('../ui/setup.mjs',import.meta.url),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  const select=getElement('captureWindowSelect'),preview=getElement('captureWindowPreview');
+  select.value='opaque-choice'; onChange({target:{...select,id:'captureWindowSelect',matches:()=>false}});
+  assert.equal(preview.src,'data:image/png;base64,cHJldmlldw==');
+  assert.equal(preview.classList.values.has('hidden'),false);
+  onState({...snapshot,profile:null,manualCapture:{phase:'idle'}});
+  assert.equal(preview.src,'');
+  assert.equal(preview.classList.values.has('hidden'),true);
 });
 
 class Element {

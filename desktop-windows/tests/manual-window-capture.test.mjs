@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createManualWindowCapture } from '../src/manual-window-capture.mjs';
 
 function fixture() {
-  let profile={userID:'owner-a'}, sources=[{id:'window:101:0',name:'Chrome — Product demo'},
+  const thumbnail = { isEmpty:()=>false, getSize:()=>({width:192,height:120}), toDataURL:()=> 'data:image/png;base64,cHJldmlldw==' };
+  let profile={userID:'owner-a'}, sources=[{id:'window:101:0',name:'Chrome — Product demo',thumbnail},
     {id:'screen:0:0',name:'Entire screen'}, {id:'window:202:0',name:'Settings'}];
   const calls=[];
   const desktopCapturer={getSources:async query=>{calls.push(['sources',query]);return sources;}};
@@ -15,13 +16,16 @@ function fixture() {
 test('picker exposes opaque window choices and captures only the revalidated exact HWND',async()=>{
   const f=fixture(), choices=await f.controller.list('owner-a');
   assert.deepEqual(choices.map(choice=>choice.title),['Chrome — Product demo','Settings']);
+  assert.equal(choices[0].preview,'data:image/png;base64,cHJldmlldw==');
+  assert.equal(choices[1].preview,undefined);
+  assert.deepEqual(f.calls[0][1],{types:['window'],thumbnailSize:{width:192,height:120}});
   assert.ok(choices.every(choice=>/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(choice.id)
     && !choice.id.startsWith('window:')));
   await assert.rejects(f.controller.start({ownerUserID:'owner-a',sourceID:choices[0].id,consentConfirmed:false}),/permission/);
   await f.controller.start({ownerUserID:'owner-a',sourceID:choices[0].id,consentConfirmed:true});
   const start=f.calls.find(call=>call[0]==='start')[1];
   assert.equal(start.hwnd,'101'); assert.equal(start.manual,true); assert.equal(start.ownerUserID,'owner-a');
-  assert.equal(start.title,'Chrome — Product demo'); assert.equal(start.sourceName,'Chrome — Product demo'); assert.equal(start.meeting,null);
+  assert.equal(start.title,'Chrome — Product demo'); assert.equal(start.sourceName,'Chrome — Product demo'); assert.deepEqual(start.meeting,{manual:true});
   assert.equal(start.systemAudio,true); assert.equal(start.microphone,false);
   assert.equal(Object.hasOwn(start,'pid'),false);
   assert.deepEqual(f.controller.state(),{phase:'capturing',ownerUserID:'owner-a',title:'Chrome — Product demo'});

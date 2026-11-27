@@ -173,7 +173,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
   async function initialize(capture, args) {
     const title = args.manual === true ? args.title : (args.meeting.title || 'Meeting');
     const writer = await store.begin({ ownerUserID: args.ownerUserID, title,
-      createdAt: new Date().toISOString(), meeting: args.manual === true ? null
+      createdAt: new Date().toISOString(), meeting: args.manual === true ? { manual: true }
         : { attendees: args.meeting.attendeeEmails ?? [], calendar: args.meeting.calendar ?? null } });
     capture.writer = writer;
     if (terminal(capture)) { await writer.abort(); return; }
@@ -225,7 +225,7 @@ export function createWindowsRecorder({ BrowserWindow, desktopCapturer, ipcMain,
     try {
       check(!current, 'A meeting recording is already active.');
       check(typeof args.hwnd === 'string' && /^[1-9]\d{0,19}$/.test(args.hwnd)
-        && (args.manual === true ? args.pid === undefined && args.meeting === null && typeof args.title === 'string'
+        && (args.manual === true ? args.pid === undefined && args.meeting?.manual === true && typeof args.title === 'string'
           && args.title.trim().length > 0 && args.title.length <= 160 && typeof args.sourceName === 'string'
           && args.sourceName.length <= 1024 : Number.isSafeInteger(args.pid) && args.pid > 0
           && args.meeting && typeof args.meeting === 'object')
