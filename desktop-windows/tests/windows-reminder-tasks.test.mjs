@@ -88,11 +88,17 @@ test('persistent reminder files are included in the portable runtime allowlist',
   const deliveryFunction=taskHelper.match(/function Deliver-ReminderTrigger[\s\S]*?(?=\n}\n\ntry)/)?.[0] ?? '';
   assert.match(deliveryFunction,/\[IO\.Path\]::Combine\(\$PSScriptRoot, 'reminder-launch\.json'\)[\s\S]*\[IO\.File\]::Exists\(\$launchPath\)[\s\S]*\[IO\.File\]::ReadAllText\(\$launchPath\)[\s\S]*launch-config-parse-after/,
     'The trigger path uses .NET path/file APIs and separately marks config existence, read and JSON parse.');
+  assert.match(deliveryFunction,/System\.Web\.Extensions[\s\S]*JavaScriptSerializer\]::new\(\)[\s\S]*MaxJsonLength = 65536[\s\S]*RecursionLimit = 8[\s\S]*DeserializeObject\(\$launchJson\)/,
+    'Cold-path JSON parsing uses the bounded .NET Framework parser available to Windows PowerShell 5.1.');
+  assert.match(deliveryFunction,/\$launch -isnot \[System\.Collections\.IDictionary\][\s\S]*\$allowedKeys[\s\S]*-notin \$allowedKeys[\s\S]*diagnosticsFile/,
+    'The launch parser requires an object and rejects fields outside the portable/MSIX schema.');
+  assert.doesNotMatch(deliveryFunction,/ConvertFrom-Json/,
+    'Scheduled delivery does not invoke the slow PowerShell JSON cmdlet on the ARM cold path.');
   assert.doesNotMatch(deliveryFunction,/\b(?:Join-Path|Test-Path|Get-Content|New-Item|Remove-Item)\b/,
     'Scheduled delivery does not invoke filesystem provider cmdlets on its cold PowerShell path.');
-  assert.match(taskHelper,/\$launch\.PSObject\.Properties\.Name -contains 'diagnosticsFile'/,
+  assert.match(taskHelper,/\$launch\.Contains\('diagnosticsFile'\)/,
     'Production launch configuration safely omits the smoke-only diagnostic field under StrictMode.');
-  assert.match(taskHelper,/\$launch\.PSObject\.Properties\.Name -contains 'waitForChildExit'/,
+  assert.match(taskHelper,/\$launch\.Contains\('waitForChildExit'\)/,
     'Production portable launch configuration safely omits the smoke-only child wait flag under StrictMode.');
   assert.match(smoke,/Object\.hasOwn\(productionLaunchConfig,'diagnosticsFile'\),false[\s\S]*Object\.hasOwn\(productionLaunchConfig,'waitForChildExit'\),false[\s\S]*productionLaunchConfig[\s\S]*The production launch configuration delivers the reminder trigger[\s\S]*productionStatus\.lastTaskResult,0/,
     'Windows CI runs and verifies an actual reminder task with production launch JSON and absent optional diagnostic properties.');

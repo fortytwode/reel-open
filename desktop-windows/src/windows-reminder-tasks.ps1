@@ -194,14 +194,52 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     $launchExists = [IO.File]::Exists($launchPath)
     Write-TaskDiagnostic $DiagnosticPath ('launch-path-check-after:' + [bool]$launchExists)
     if (-not $launchExists) { return }
+    $launchFile = [IO.FileInfo]::new($launchPath)
+    if ($launchFile.Length -gt 65536) { throw 'Invalid reminder launch configuration.' }
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-read-before'
     $launchJson = [IO.File]::ReadAllText($launchPath)
     Write-TaskDiagnostic $DiagnosticPath ('launch-config-read-after:' + $launchJson.Length)
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-before'
-    $launch = ConvertFrom-Json -InputObject $launchJson
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    $serializer = [System.Web.Script.Serialization.JavaScriptSerializer]::new()
+    $serializer.MaxJsonLength = 65536
+    $serializer.RecursionLimit = 8
+    try { $launch = $serializer.DeserializeObject($launchJson) }
+    catch { throw 'Invalid reminder launch configuration.' }
+    if ($launch -isnot [System.Collections.IDictionary] -or -not $launch.Contains('mode')) {
+        throw 'Invalid reminder launch configuration.'
+    }
+    $launchMode = $launch['mode']
+    if ($launchMode -isnot [string]) { throw 'Invalid reminder launch configuration.' }
+    if ($launchMode -eq 'portable') {
+        $allowedKeys = @('mode', 'executable', 'arguments', 'diagnosticsFile', 'waitForChildExit')
+        if (-not $launch.Contains('executable') -or -not $launch.Contains('arguments')
+            -or $launch['executable'] -isnot [string] -or $launch['arguments'] -isnot [System.Array]) {
+            throw 'Invalid reminder launch configuration.'
+        }
+        foreach ($argument in $launch['arguments']) {
+            if ($argument -isnot [string] -or $argument.Length -gt 2048) { throw 'Invalid reminder launch configuration.' }
+        }
+        if ($launch['arguments'].Length -gt 16) { throw 'Invalid reminder launch configuration.' }
+        if ($launch.Contains('waitForChildExit') -and $launch['waitForChildExit'] -isnot [bool]) {
+            throw 'Invalid reminder launch configuration.'
+        }
+    } elseif ($launchMode -eq 'msix') {
+        $allowedKeys = @('mode', 'diagnosticsFile')
+    } else { throw 'Invalid reminder launch configuration.' }
+    foreach ($key in $launch.Keys) {
+        if ($key -notin $allowedKeys) { throw 'Invalid reminder launch configuration.' }
+    }
+    if ($launch.Contains('diagnosticsFile') -and $launch['diagnosticsFile'] -isnot [string]) {
+        throw 'Invalid reminder launch configuration.'
+    }
     Write-TaskDiagnostic $DiagnosticPath 'launch-config-parse-after'
     $diagnosticsFile = ''
-    if ($launch.PSObject.Properties.Name -contains 'diagnosticsFile') { $diagnosticsFile = [string]$launch.diagnosticsFile }
+    if ($launch.Contains('diagnosticsFile')) {
+        $diagnosticCandidate = [IO.Path]::GetFullPath([string]$launch['diagnosticsFile'])
+        $root = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if ($diagnosticCandidate.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $diagnosticsFile = $diagnosticCandidate }
+    }
     Write-TaskDiagnostic $diagnosticsFile 'helper-config-loaded'
     $triggerDir = [IO.Path]::Combine($PSScriptRoot, 'reminder-triggers')
     Write-TaskDiagnostic $diagnosticsFile 'trigger-directory-create-before'
@@ -219,22 +257,21 @@ function Deliver-ReminderTrigger([string]$token, [string]$scopeValue) {
     Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-create-after'
     Write-TaskDiagnostic $diagnosticsFile 'trigger-marker-written'
 
-    if ($launch.mode -eq 'msix') {
+    if ($launchMode -eq 'msix') {
         $package = Get-AppxPackage -Name 'RocketShipHQ.Reel' -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $package) { Write-TaskDiagnostic $diagnosticsFile 'msix-package-not-found'; [IO.File]::Delete($marker); return }
         Start-Process -FilePath ([IO.Path]::Combine($env:WINDIR, 'explorer.exe')) -ArgumentList ('shell:AppsFolder\' + $package.PackageFamilyName + '!Companion') -WindowStyle Hidden
         Write-TaskDiagnostic $diagnosticsFile 'msix-shell-launch-returned'
-    } elseif ($launch.mode -eq 'portable' -and [IO.Path]::IsPathRooted([string]$launch.executable) -and [IO.File]::Exists([string]$launch.executable)) {
-        $arguments = @()
-        if ($launch.arguments -is [System.Array]) { $arguments = @($launch.arguments | ForEach-Object { [string]$_ }) }
+    } elseif ($launchMode -eq 'portable' -and [IO.Path]::IsPathRooted([string]$launch['executable']) -and [IO.File]::Exists([string]$launch['executable'])) {
+        $arguments = @($launch['arguments'] | ForEach-Object { [string]$_ })
         if ($arguments.Count -gt 16 -or @($arguments | Where-Object { $_.Length -gt 2048 }).Count -gt 0) { Write-TaskDiagnostic $diagnosticsFile 'portable-arguments-invalid'; [IO.File]::Delete($marker); return }
         $arguments += '--meeting-reminder-trigger=' + $token
         $argumentLine = (@($arguments | ForEach-Object { Quote-CommandLineArgument $_ }) -join ' ')
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-called'
-        $child = Start-Process -FilePath ([string]$launch.executable) -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
+        $child = Start-Process -FilePath ([string]$launch['executable']) -ArgumentList $argumentLine -PassThru -WindowStyle Hidden
         Write-TaskDiagnostic $diagnosticsFile 'portable-start-process-returned'
         $waitForChildExit = $false
-        if ($launch.PSObject.Properties.Name -contains 'waitForChildExit') { $waitForChildExit = $launch.waitForChildExit -eq $true }
+        if ($launch.Contains('waitForChildExit')) { $waitForChildExit = $launch['waitForChildExit'] -eq $true }
         if ($waitForChildExit) {
             $child.WaitForExit()
             $child.Refresh()
