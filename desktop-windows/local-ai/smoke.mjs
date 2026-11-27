@@ -41,6 +41,9 @@ function log(phase,progress,requestClass,loadErrorCode,loadFailureClass,loadErro
 }
 const profileRoot=mkdtempSync(path.join(os.tmpdir(),'reel-whisper-cache-'));
 app.setPath('userData',profileRoot);app.setPath('sessionData',profileRoot);
+// Keep Electron alive while the smoke deliberately destroys and recreates its
+// only window. The production app retains its main window during local AI work.
+app.on('window-all-closed',()=>{});
 const windows=[];
 class SmokeWindow extends BrowserWindow{constructor(options){super(options);windows.push(this);
   this.webContents.on('dom-ready',()=>log('renderer_dom_ready'));
