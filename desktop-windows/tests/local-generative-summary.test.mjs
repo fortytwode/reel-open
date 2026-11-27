@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {cleanGeneratedSummary,localSummaryPrompt} from '../src/local-generative-summary.mjs';
-import {MODEL_CDN_PATHS,SUMMARY_MODEL_ID,SUMMARY_MODEL_PATH,SUMMARY_MODEL_REVISION,SUMMARY_TOKENIZER_MODEL_ID,SUMMARY_TOKENIZER_PATH,SUMMARY_TOKENIZER_REVISION,modelForCachePath,modelForRequestPath,pinModelRequest} from '../local-ai/model-pinning.mjs';
+import {MODEL_CDN_PATHS,SUMMARY_MODEL_ID,SUMMARY_MODEL_PATH,SUMMARY_MODEL_REVISION,SUMMARY_TOKENIZER_MODEL_ID,SUMMARY_TOKENIZER_PATH,SUMMARY_TOKENIZER_REVISION,modelForCachePath,modelForRequestPath,pinModelRequest,withPinnedModelFetch} from '../local-ai/model-pinning.mjs';
 
 test('summary prompt samples long walkthroughs and bounds every input',()=>{
   const segments=Array.from({length:100},(_,index)=>({start:index*60,text:`Step ${index}: select a region and export its report.`}));
@@ -40,4 +40,18 @@ test('T5 CNN summarizer and base tokenizer assets are revision-pinned and indivi
   assert.ok(MODEL_CDN_PATHS.has('/xet-bridge-us/6aad31d90f859544e744ef1d/79da1e37ca464b964c942b66507b1387f904f32533b90a332260ca8201af9c88'));
   assert.equal(MODEL_CDN_PATHS.has('/xet-bridge-us/645181169d916c596e3490a6/25d2f732f698950e8807e07a20bafe057fb7dd69a291e36c81455ca861998d9b'),false);
   assert.equal(MODEL_CDN_PATHS.has('/xet-bridge-us/645181169d916c596e3490a6/366214183dbf2b2c76e4158b6fd6886de2de269d756c5b9857375c9ca9021608'),false);
+});
+
+test('offline tokenizer cache accepts only the known summary-to-base-tokenizer cache alias',async()=>{
+  const seen=[];let networkRequests=0;
+  const cache={match:async request=>{
+    const url=typeof request==='string'?request:request.url;seen.push(new URL(url).pathname);
+    return url===`https://huggingface.co${SUMMARY_MODEL_PATH}tokenizer.json`?new Response('cached-tokenizer'):undefined;
+  }};
+  const fetch=withPinnedModelFetch(async()=>{networkRequests++;return new Response('network');},{cacheStorage:{open:async()=>cache}});
+  const response=await fetch(`https://huggingface.co/${SUMMARY_MODEL_ID}/resolve/${SUMMARY_MODEL_REVISION}/tokenizer.json`);
+  assert.equal(await response.text(),'cached-tokenizer');
+  assert.deepEqual(seen,[`https://huggingface.co${SUMMARY_TOKENIZER_PATH}tokenizer.json`,`https://huggingface.co${SUMMARY_MODEL_PATH}tokenizer.json`]
+    .map(value=>new URL(value).pathname));
+  assert.equal(networkRequests,0);
 });
