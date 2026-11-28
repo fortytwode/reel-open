@@ -1,7 +1,7 @@
 import * as firebase from "./reel/firebase.js?v=20261121-public-signup";
-import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261125-complete1";
-import * as org from "./organization.js?v=20261121-public-signup";
-import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261105-parity2";
+import { mountMeetingCalendar } from "./meeting-calendar.js?v=20261126-language";
+import * as org from "./organization.js?v=20261128-branded-capture";
+import { downloadURL, File, viewerURL } from "./reel/core.js?v=20261126-language";
 
 import { displayedSharedTitle, resolveTitleRoom, saveSharedTitle, editSharedTitle, closeSharedTitleEditor } from "./reel/shared-title.js?v=20261105-parity2";
 
@@ -20,6 +20,12 @@ const observeReelAccount = firebase.observeReelAccount ?? ((am, auth, receive) =
   receive(candidate?.emailVerified && firebase.isOrganizationEmail(candidate.email) ? candidate : null, candidate)));
 
 const el = (id) => document.getElementById(id);
+const platform = navigator.platform || "";
+const isMac = /^(Mac|Darwin)/i.test(platform);
+const isWindows = /^Win/i.test(platform);
+for (const link of document.querySelectorAll("[data-mac-app]")) link.hidden = !isMac;
+const windowsHistory = el("windows-local-history");
+if (windowsHistory) windowsHistory.hidden = !isWindows;
 const status = el("status");
 let auth, am, fs, db, currentUser, entries = [], meetings = [], meetingShareIDs = new Set(), recent = [], loading = true, meetingLoading = false, loadError = "", meetingError = "", loadNumber = 0, meetingLoadNumber = 0, stopListening = () => {};
 let preferences = new Map(), folders = [], organizationReady = false, organizationError = "", organizationMessage = "", creatingFolder = false, accountNumber = 0;
@@ -91,7 +97,7 @@ if (fixedNotetaker && !hostPages && organization?.notesBaseURL && organization.w
     && !sameOrigin(organization.webBase, organization.notesBaseURL) && !sameOrigin(location.href, organization.notesBaseURL)) {
   location.replace(organization.notesBaseURL + (location.hash || "#meetings"));
 }
-const productName = () => notetaker ? "Reel Notetaker" : "Reel Recorder";
+const productName = () => notetaker ? org.notetakerName : "Reel Recorder";
 const notetakerURL = (hash = "") => hostPages ? hostNotetaker + hash
   : !organization ? "/notetaker-meetings" + hash
   : publicSignup ? organization.webBase + "/notetaker"
@@ -110,7 +116,7 @@ function showProduct() {
   document.querySelector(".personal-library small").textContent = notetaker ? "Private to you and attendees" : "Private to you";
   const other = el("other-product");
   other.href = notetaker ? recorderURL() : notetakerURL();
-  other.firstChild.textContent = notetaker ? "Reel Recorder " : "Reel Notetaker ";
+  other.firstChild.textContent = (notetaker ? "Reel Recorder" : org.notetakerName) + " ";
   other.querySelector("small").textContent = notetaker ? "Screen recordings and share links" : "Meetings, notes and calendar";
 }
 const isRecent = () => !notetaker && location.hash === "#recent";
@@ -602,7 +608,7 @@ function renderMeetings() {
     const label = Number.isNaN(started.getTime()) ? "Earlier" : dayLabel(started);
     if (label !== pastDay) { pastDay = label; past.append(node("h3", "nt-day", label)); }
     const row = node("a", "nt-row nt-past");
-    row.href = m.participantNote ? libraryURL(`meetings/${m.id}`) : m.recording_source === "mac" ? "reel-notetaker://home" : organization.webBase + "/record?mode=meeting";
+    row.href = m.participantNote ? libraryURL(`meetings/${m.id}`) : m.recording_source === "mac" ? "reel-notetaker://home" : org.captureURL + "?mode=meeting";
     row.append(node("span", "nt-time", Number.isNaN(started.getTime()) ? "" : timeOf(started)));
     const main = node("span", "nt-main"); main.append(node("strong", "", m.title));
     const hit = term && transcriptHits.get(m.id);

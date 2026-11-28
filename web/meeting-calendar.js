@@ -1,10 +1,11 @@
 // Calendar and browser-extension meeting controls for the recorder page.
 // The module deliberately keeps calendar data in memory only; Firebase tokens are
 // obtained from the caller's session and are never persisted or logged.
-import * as org from "./organization.js?v=20261121-public-signup";
+import * as org from "./organization.js?v=20261128-branded-capture";
 const { organization } = org;
 const publicSignup = org.publicSignup ?? false;
 const API = organization?.meetingServiceURL;
+const CAPTURE_URL = org.captureURL;
 const WEB_BASE = organization?.webBase || location.origin;
 const STATUSES = {
   scheduled: "Scheduled",
@@ -278,7 +279,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       const actionable = (!publicSignup || calendarAuthorized) && dueById.has(event.id) && event.status === "awaiting_consent" && (cloudEvent ? (botAvailable || hybridCloud) : (!desktop && botAvailable));
       const desktopJoin = eventDesktop && isMac && /^[a-f0-9]{64}$/i.test(String(event.id || ""))
         ? `<a class="mc-primary" href="reel://join-meeting?id=${encodeURIComponent(event.id)}">Open in Reel</a>`
-        : eventDesktop && !isMac ? `<a href="${esc(WEB_BASE)}/record?mode=meeting">Capture manually</a>` : "";
+        : eventDesktop && !isMac ? `<a href="${esc(CAPTURE_URL)}?mode=meeting">Capture manually</a>` : "";
       const failure = failed && Object.hasOwn(CLOUD_FAILURES, event.failure_category)
         ? CLOUD_FAILURES[event.failure_category] : "";
       const detailText = failure || (event.notion_status === "calendar_selection_required" ? event.detail : "");
@@ -291,7 +292,7 @@ export function mountMeetingCalendar({ container, session, onError, onSelectionC
       browserHost.hidden = false;
       const cloudRequest = cloudProviderForURL(state.browserRequest.url, capability);
       const cloudRequestName = cloudRequest === "google_meet" ? "Google Meet" : "Teams";
-      browserHost.innerHTML = desktop && !cloudRequest ? `<div class="mc-browser-card"><strong>Meeting requested by the browser</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${isMac ? "Open this meeting link in Reel to continue." : "Open manual capture in Reel, then choose the meeting from your browser picker."}</p><a href="${isMac ? `reel://meeting-link?url=${encodeURIComponent(state.browserRequest.url)}` : `${esc(WEB_BASE)}/record?mode=meeting`}">${isMac ? "Open in Reel" : "Capture manually"}</a> <button type="button" data-action="browser-dismiss">Dismiss</button></div>` : `<div class="mc-browser-card"><strong>Meeting requested by the browser extension</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${cloudRequest ? "This request must match an eligible meeting in your connected Google Calendar. Reel will not open this link." : "Reel will ask the meeting provider to admit its note taker. This page will not open the meeting link."}</p><label class="mc-check"><input type="checkbox" data-field="browser-attest"> I confirm the participants have agreed to recording this meeting.</label><div class="mc-actions"><button type="button" data-action="browser-join" ${!state.uid || state.busy || !(botAvailable || cloudRequest) ? "disabled" : ""}>${cloudRequest ? `Consent and request ${cloudRequestName} entry` : "Consent and request entry"}</button><button type="button" data-action="browser-dismiss" ${state.busy ? "disabled" : ""}>Dismiss</button></div></div>`;
+      browserHost.innerHTML = desktop && !cloudRequest ? `<div class="mc-browser-card"><strong>Meeting requested by the browser</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${isMac ? "Open this meeting link in Reel to continue." : "Open manual capture in Reel, then choose the meeting from your browser picker."}</p><a href="${isMac ? `reel://meeting-link?url=${encodeURIComponent(state.browserRequest.url)}` : `${esc(CAPTURE_URL)}?mode=meeting`}">${isMac ? "Open in Reel" : "Capture manually"}</a> <button type="button" data-action="browser-dismiss">Dismiss</button></div>` : `<div class="mc-browser-card"><strong>Meeting requested by the browser extension</strong><p>${esc(state.browserRequest.title || "A supported meeting")}</p><p>${cloudRequest ? "This request must match an eligible meeting in your connected Google Calendar. Reel will not open this link." : "Reel will ask the meeting provider to admit its note taker. This page will not open the meeting link."}</p><label class="mc-check"><input type="checkbox" data-field="browser-attest"> I confirm the participants have agreed to recording this meeting.</label><div class="mc-actions"><button type="button" data-action="browser-join" ${!state.uid || state.busy || !(botAvailable || cloudRequest) ? "disabled" : ""}>${cloudRequest ? `Consent and request ${cloudRequestName} entry` : "Consent and request entry"}</button><button type="button" data-action="browser-dismiss" ${state.busy ? "disabled" : ""}>Dismiss</button></div></div>`;
     } else { browserHost.hidden = true; browserHost.innerHTML = ""; }
     if (compact && wasOpen) { const fold = q("details.mc-recent"); if (fold) fold.open = true; }
     for (const input of savedInputs) {

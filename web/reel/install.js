@@ -2,19 +2,21 @@
 const button = document.getElementById("install-reel");
 const help = document.getElementById("install-help");
 const message = document.getElementById("install-status");
+const branded = !!document.querySelector('meta[name="reel-capture-url"]');
+const appName = branded ? "Notetaker AI" : "Reel Recorder";
 let deferredPrompt = null, installed = false;
 const standalone = window.matchMedia("(display-mode: standalone)");
 function update() {
   button.hidden = installed || standalone.matches;
   help.hidden = installed || standalone.matches;
-  button.textContent = "Install Recorder";
+  button.textContent = branded ? "Install Notetaker AI" : "Install Recorder";
 }
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault(); deferredPrompt = event; update();
 });
 window.addEventListener("appinstalled", () => {
   installed = true; deferredPrompt = null; update();
-  message.textContent = "Reel Recorder installed.";
+  message.textContent = `${appName} installed.`;
 });
 standalone.addEventListener("change", update);
 button.addEventListener("click", async () => {
@@ -27,7 +29,7 @@ button.addEventListener("click", async () => {
   try {
     await prompt.prompt();
     const { outcome } = await prompt.userChoice;
-    message.textContent = outcome === "accepted" ? "Reel Recorder installation accepted." : "Installation cancelled. You can keep recording here or install later.";
+    message.textContent = outcome === "accepted" ? `${appName} installation accepted.` : "Installation cancelled. You can keep recording here or install later.";
   } catch {
     message.textContent = "Use your browser’s Install app option below, or keep recording here.";
     help.open = true;
