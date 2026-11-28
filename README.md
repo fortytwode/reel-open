@@ -9,13 +9,13 @@ For online features, both products can share a self-hosted deployment and accoun
 
 ## Install Reel Recorder for Mac
 
-[Download the signed Mac installer](https://github.com/rocketshiphq/reel-open/releases/latest). Open the disk image and drag **Reel Recorder** to **Applications**. The same download supports Apple silicon and Intel Macs running macOS 15 or later.
+[Download the signed Mac installer](https://github.com/rocketshiphq/recorder-ai/releases/latest). Open the disk image and drag **Reel Recorder** to **Applications**. The same download supports Apple silicon and Intel Macs running macOS 15 or later.
 
 The installer saves recordings on your Mac without an account. For share links or online Notetaker features, follow the [self-hosting guide](docs/self-hosting.md). The browser-based Notetaker is available at `/notetaker` on your deployment.
 
 ## Install Reel Notetaker for Mac
 
-[Download the signed Reel Notetaker installer](https://github.com/rocketshiphq/reel-open/releases/tag/notetaker-v1.2.31). Open the disk image and drag **Reel Notetaker** to **Applications**. It supports Apple silicon and Intel Macs running macOS 15 or later and installs alongside Reel Recorder.
+[Download the signed Reel Notetaker installer](https://github.com/rocketshiphq/notetaker-ai/releases/latest). Open the disk image and drag **Reel Notetaker** to **Applications**. It supports Apple silicon and Intel Macs running macOS 15 or later and installs alongside Reel Recorder.
 
 The Mac app records a meeting window you choose. Notes, calendar joining and cloud meetings need a deployment from the [self-hosting guide](docs/self-hosting.md).
 
@@ -45,6 +45,8 @@ Use the [self-hosting guide](docs/self-hosting.md) to set up hosting, Google sig
 Cloud auto-join supports Google Meet and Teams links on Google Calendar. The deployment’s Google Workspace administrator grants the calendar service account delegated read access. Each verified member then signs in, selects calendars and sets recording consent.
 
 For a self-hosted browser deployment that accepts verified Google accounts across domains, use the isolated [public signup deployment](docs/public-signup.md). The web products support verified Google accounts and Notetaker requests each account's Calendar permission separately.
+
+Product source and contributions live here. Follow releases and report product issues in [Recorder AI](https://github.com/rocketshiphq/recorder-ai) or [Notetaker AI](https://github.com/rocketshiphq/notetaker-ai). Maintainers can use the [release guide](docs/product-releases.md).
 
 ## Run checks
 
