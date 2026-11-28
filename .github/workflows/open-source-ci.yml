@@ -63,7 +63,7 @@ jobs:
           playwright_requirement=$(grep '^playwright==' meeting-bot/requirements.txt)
           python -m pip install "$playwright_requirement"
       - run: python -m pip check
-      - run: python -m pytest Tests/test_organization_configuration.py test_organization.py
+      - run: python -m pytest Tests/test_organization_configuration.py Tests/test_product_release_sync.py test_organization.py
       - run: PYTHONPATH=. python -m pytest delivery-service
       - run: PYTHONPATH=. python -m pytest meeting-service
       - run: python -m playwright install --with-deps chromium
